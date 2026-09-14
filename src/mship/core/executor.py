@@ -1,8 +1,12 @@
 import time as _time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Event, Thread
+from typing import TypeVar
 
 from mship.core.config import WorkspaceConfig, Dependency
 from mship.core.graph import DependencyGraph
@@ -48,11 +52,14 @@ class ExecutionResult:
 @dataclass
 class _TestGroup:
     """A group of repos that share a resolved test cwd (#127)."""
+
     cwd: Path
-    members: list[str]            # all repos in the group
-    skipped_members: list[str]    # subset with `test` in not_applicable
-    runnable_members: list[str]   # subset that will share the actual run
-    representative: str | None    # the one whose tasks.test is invoked; None if all skipped
+    members: list[str]  # all repos in the group
+    skipped_members: list[str]  # subset with `test` in not_applicable
+    runnable_members: list[str]  # subset that will share the actual run
+    representative: (
+        str | None
+    )  # the one whose tasks.test is invoked; None if all skipped
     actual_task_name: str | None  # what to run as `task <X>`; None if all skipped
 
 
@@ -62,9 +69,14 @@ class TestTargetConflictError(Exception):
     Carries enough context for the CLI to render the actionable error message
     described in #127's acceptance criteria.
     """
+
     def __init__(
-        self, *, cwd: Path, conflicting_repos: list[str],
-        explicit_repos: list[str], implicit_repos: list[str],
+        self,
+        *,
+        cwd: Path,
+        conflicting_repos: list[str],
+        explicit_repos: list[str],
+        implicit_repos: list[str],
     ) -> None:
         self.cwd = cwd
         self.conflicting_repos = sorted(conflicting_repos)
@@ -74,6 +86,9 @@ class TestTargetConflictError(Exception):
             f"Path-sharing repos at {cwd} resolve `task test` to different targets: "
             f"{', '.join(self.conflicting_repos)}"
         )
+
+
+_LaunchResult = TypeVar("_LaunchResult")
 
 
 class RepoExecutor:
@@ -127,7 +142,9 @@ class RepoExecutor:
         return env
 
     def _plan_test_targets(
-        self, repos: list[str], task_slug: str | None,
+        self,
+        repos: list[str],
+        task_slug: str | None,
     ) -> list[_TestGroup]:
         """Group repos by resolved test cwd; validate; pick a representative per group.
 
@@ -152,27 +169,34 @@ class RepoExecutor:
         for cwd in order:
             members = by_cwd[cwd]
             skipped = [
-                m for m in members
-                if "test" in self._config.repos[m].not_applicable
+                m for m in members if "test" in self._config.repos[m].not_applicable
             ]
             runnable = [m for m in members if m not in skipped]
 
             if not runnable:
-                groups.append(_TestGroup(
-                    cwd=cwd, members=members,
-                    skipped_members=skipped, runnable_members=[],
-                    representative=None, actual_task_name=None,
-                ))
+                groups.append(
+                    _TestGroup(
+                        cwd=cwd,
+                        members=members,
+                        skipped_members=skipped,
+                        runnable_members=[],
+                        representative=None,
+                        actual_task_name=None,
+                    )
+                )
                 continue
 
             effective = {
-                m: self._config.repos[m].tasks.get("test", "test")
-                for m in runnable
+                m: self._config.repos[m].tasks.get("test", "test") for m in runnable
             }
             distinct = set(effective.values())
             if len(distinct) > 1:
-                explicit = [m for m in runnable if "test" in self._config.repos[m].tasks]
-                implicit = [m for m in runnable if "test" not in self._config.repos[m].tasks]
+                explicit = [
+                    m for m in runnable if "test" in self._config.repos[m].tasks
+                ]
+                implicit = [
+                    m for m in runnable if "test" not in self._config.repos[m].tasks
+                ]
                 raise TestTargetConflictError(
                     cwd=cwd,
                     conflicting_repos=runnable,
@@ -186,11 +210,16 @@ class RepoExecutor:
             )
             rep = with_explicit[0] if with_explicit else sorted(runnable)[0]
 
-            groups.append(_TestGroup(
-                cwd=cwd, members=members,
-                skipped_members=skipped, runnable_members=runnable,
-                representative=rep, actual_task_name=actual,
-            ))
+            groups.append(
+                _TestGroup(
+                    cwd=cwd,
+                    members=members,
+                    skipped_members=skipped,
+                    runnable_members=runnable,
+                    representative=rep,
+                    actual_task_name=actual,
+                )
+            )
         return groups
 
     def _make_skip_result(self, repo_name: str, canonical_task: str) -> RepoResult:
@@ -256,9 +285,7 @@ class RepoExecutor:
 
         if repo_config.start_mode == "background" and canonical_task == "run":
             # Launch as background subprocess, don't wait
-            command = self._shell.build_command(
-                f"task {actual_name}", env_runner
-            )
+            command = self._shell.build_command(f"task {actual_name}", env_runner)
             popen = self._shell.run_streaming(command, cwd=cwd)
             # Drain stdout/stderr to the shared printer. Threads are daemon
             # and die naturally when the PIPEs close at process exit.
@@ -278,11 +305,11 @@ class RepoExecutor:
             # Foreground `run` task: stream output live via Popen + drain
             # threads, then wait for completion. This replaces the old
             # capture-and-never-print behavior of run_task().
-            command = self._shell.build_command(
-                f"task {actual_name}", env_runner
-            )
+            command = self._shell.build_command(f"task {actual_name}", env_runner)
             _start = _time.monotonic()
-            popen = self._shell.run_streaming(command, cwd=cwd, env=upstream_env or None)
+            popen = self._shell.run_streaming(
+                command, cwd=cwd, env=upstream_env or None
+            )
             threads: list = []
             if self._printer is not None:
                 threads = drain_to_printer(popen, repo_name, self._printer)
@@ -296,7 +323,9 @@ class RepoExecutor:
                     task_name=actual_name,
                     # Output already streamed to stdout; the ShellResult
                     # carries only the returncode for downstream logic.
-                    shell_result=ShellResult(returncode=returncode, stdout="", stderr=""),
+                    shell_result=ShellResult(
+                        returncode=returncode, stdout="", stderr=""
+                    ),
                     duration_ms=_elapsed_ms,
                 ),
                 None,
@@ -352,10 +381,14 @@ class RepoExecutor:
                         pre_skips.append(self._make_skip_result(m, "test"))
             if pre_skips:
                 if task_slug:
+
                     def _record_pre_skips(task, _results=pre_skips):
                         now = datetime.now(timezone.utc)
                         for rr in _results:
-                            task.test_results[rr.repo] = TestResult(status="skip", at=now)
+                            task.test_results[rr.repo] = TestResult(
+                                status="skip", at=now
+                            )
+
                     try:
                         self._state_manager.mutate_task(
                             task_slug,
@@ -391,7 +424,9 @@ class RepoExecutor:
                 # Multiple repos — run in parallel
                 with ThreadPoolExecutor(max_workers=len(tier)) as pool:
                     futures = {
-                        pool.submit(self._execute_one, repo_name, canonical_task, task_slug): repo_name
+                        pool.submit(
+                            self._execute_one, repo_name, canonical_task, task_slug
+                        ): repo_name
                         for repo_name in tier
                     }
                     for future in as_completed(futures):
@@ -415,15 +450,15 @@ class RepoExecutor:
                     others = [m for m in g.runnable_members if m != r.repo]
                     r.shared_with = others
                     for m in others:
-                        expanded.append(RepoResult(
-                            repo=m,
-                            task_name=r.task_name,
-                            shell_result=r.shell_result,
-                            duration_ms=r.duration_ms,
-                            shared_with=[
-                                x for x in g.runnable_members if x != m
-                            ],
-                        ))
+                        expanded.append(
+                            RepoResult(
+                                repo=m,
+                                task_name=r.task_name,
+                                shell_result=r.shell_result,
+                                duration_ms=r.duration_ms,
+                                shared_with=[x for x in g.runnable_members if x != m],
+                            )
+                        )
                 tier_results = expanded
 
             # Sort tier results for deterministic output order
@@ -459,6 +494,7 @@ class RepoExecutor:
 
             # Batch-save test results for this tier
             if task_slug and canonical_task == "test":
+
                 def _apply_test_results(task, _results=tier_results):
                     now = datetime.now(timezone.utc)
                     for repo_result in _results:
@@ -472,6 +508,7 @@ class RepoExecutor:
                             status=status,
                             at=now,
                         )
+
                 try:
                     self._state_manager.mutate_task(
                         task_slug,
@@ -486,3 +523,140 @@ class RepoExecutor:
                 break
 
         return result
+
+    def launch_profiled(
+        self,
+        launches: dict[
+            str,
+            Callable[[Callable[[_LaunchResult], None], Event], _LaunchResult],
+        ],
+        *,
+        cancel: Callable[[_LaunchResult], None] | None = None,
+    ) -> dict[str, _LaunchResult]:
+        """Launch dependency tiers after each owner acknowledges readiness.
+
+        Workers retain their cancellable launch stream while downstream tiers
+        start. A pre-ready worker is cancelled through its own request event;
+        an acknowledged owner is stopped only through the exact-owner callback.
+        """
+        results: dict[str, _LaunchResult] = {}
+        completed: dict[str, _LaunchResult] = {}
+        ready: dict[str, _LaunchResult] = {}
+        events: Queue[tuple[str, str, object]] = Queue()
+        inflight: dict[str, Event] = {}
+        cancelled: set[str] = set()
+        workers: list[Thread] = []
+        terminal: set[str] = set()
+
+        def stop_live() -> None:
+            for repo_name, cancel_event in tuple(inflight.items()):
+                if repo_name not in ready:
+                    cancel_event.set()
+            if cancel is None:
+                return
+            for repo_name, value in tuple(ready.items()):
+                if repo_name in cancelled:
+                    continue
+                cancelled.add(repo_name)
+                try:
+                    cancel(value)
+                except Exception:
+                    continue
+
+        def process(
+            repo_name: str,
+            event: str,
+            value: object,
+            pending: set[str],
+            reject_ended: bool = False,
+        ) -> None:
+            if event in {"done", "failed"}:
+                terminal.add(repo_name)
+            if event == "failed":
+                if isinstance(value, BaseException):
+                    raise value
+                raise RuntimeError(f"profile launch for {repo_name} failed")
+            if event == "ready":
+                ready[repo_name] = value  # type: ignore[assignment]
+                pending.discard(repo_name)
+                return
+            results[repo_name] = value  # type: ignore[assignment]
+            if repo_name in pending:
+                raise RuntimeError(
+                    f"profile launch for {repo_name} ended before readiness"
+                )
+            status = getattr(value, "status", None)
+            if repo_name in ready and status in {"failed", "unknown"}:
+                raise RuntimeError(
+                    f"profile launch for {repo_name} failed after readiness"
+                )
+            if (
+                reject_ended
+                and repo_name in ready
+                and status is not None
+                and status != "active"
+            ):
+                raise RuntimeError(
+                    f"profile launch for {repo_name} ended after readiness"
+                )
+
+        def start(repo_name: str) -> None:
+            cancel_event = Event()
+            inflight[repo_name] = cancel_event
+
+            def worker() -> None:
+                try:
+                    value = launches[repo_name](
+                        lambda ready_value: events.put(
+                            (repo_name, "ready", ready_value)
+                        ),
+                        cancel_event,
+                    )
+                    completed[repo_name] = value
+                    events.put((repo_name, "done", value))
+                except BaseException as error:
+                    events.put((repo_name, "failed", error))
+
+            thread = Thread(target=worker, name=f"mship-profile-{repo_name}")
+            thread.start()
+            workers.append(thread)
+
+        try:
+            tiers = self._graph.topo_tiers(list(launches))
+            for tier_index, tier in enumerate(tiers):
+                pending = set(tier)
+                for repo_name in tier:
+                    start(repo_name)
+                while pending:
+                    process(*events.get(), pending=pending)
+                if tier_index == len(tiers) - 1:
+                    continue
+                while True:
+                    try:
+                        process(
+                            *events.get_nowait(),
+                            pending=pending,
+                            reject_ended=True,
+                        )
+                    except Empty:
+                        break
+            remaining = set(launches) - terminal
+            while remaining:
+                repo_name, event, value = events.get()
+                process(repo_name, event, value, pending=set())
+                if event in {"done", "failed"}:
+                    remaining.discard(repo_name)
+            for worker in workers:
+                worker.join()
+            results.update(completed)
+        except KeyboardInterrupt:
+            stop_live()
+            for worker in workers:
+                worker.join(timeout=5)
+            raise
+        except BaseException:
+            stop_live()
+            for worker in workers:
+                worker.join(timeout=5)
+            raise
+        return results

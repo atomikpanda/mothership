@@ -118,6 +118,43 @@ def test_invalid_owner_acknowledgement_leaves_committable_context_unchanged(
         assert transaction.app_runs.get(transaction.connection, original.id) == original
 
 
+def test_starting_owner_acknowledgement_is_cas_bound(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".mothership"
+    store = WorkspaceStore(state_dir)
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.insert(transaction.connection, _task("task-a", "api"))
+        binding_ref = transaction.app_runs.store_private_binding({"serial": "private"})
+        original = _run(binding_ref)
+        transaction.app_runs.insert(transaction.connection, original)
+        started = transaction.app_runs.transition(
+            transaction.connection,
+            run_id=original.id,
+            expected_revision=original.revision,
+            status="starting",
+            owner_ref="operation-42",
+            owner_generation="generation-7",
+            now=NOW,
+        )
+        assert started.status == "starting"
+        assert started.owner_ref == "operation-42"
+        with pytest.raises(
+            AppRunTransitionError, match="cannot be cleared or replaced"
+        ):
+            transaction.app_runs.transition(
+                transaction.connection,
+                run_id=original.id,
+                expected_revision=started.revision,
+                status="starting",
+                owner_ref="operation-other",
+                owner_generation="generation-other",
+                now=NOW,
+            )
+
+    with store.read() as transaction:
+        persisted = transaction.app_runs.get(transaction.connection, original.id)
+    assert persisted == started
+
+
 def test_two_connections_cas_owner_conflict_survives_reopen(tmp_path: Path) -> None:
     state_dir = tmp_path / ".mothership"
     database = WorkspaceDatabase(state_dir)

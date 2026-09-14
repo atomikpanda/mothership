@@ -138,6 +138,12 @@ class FlutterSessionOwner:
         fingerprint = hashlib.sha256(
             self.config.target.target_fingerprint.encode()
         ).hexdigest()
+        capabilities = ["logs"]
+        if self.config.target.platform == "android" or (
+            self.config.target.ios is not None
+            and self.config.target.ios.supports_capture
+        ):
+            capabilities.append("capture")
         return {
             "version": 1,
             "run_id": self.config.context["run_id"],
@@ -147,7 +153,7 @@ class FlutterSessionOwner:
             "transport": self.config.target.transport,
             "target_fingerprint": fingerprint,
             "binary_provenance": {"known": False},
-            "capabilities": ["logs", "capture"],
+            "capabilities": capabilities,
             "resources": {"framework_child": "owned"},
         }
 
@@ -617,6 +623,13 @@ class FlutterSessionOwner:
     ) -> dict[str, object]:
         if payload or request.capture is None:
             raise _session_error("invalid", "Invalid Flutter capture request")
+        if self.config.target.platform == "ios" and (
+            self.config.target.ios is None
+            or not self.config.target.ios.supports_capture
+        ):
+            raise _session_error(
+                "unavailable", "Selected Flutter iOS target cannot attest capture"
+            )
         grant = request.capture
         if grant.platform != self.config.target.platform:
             raise _session_error(

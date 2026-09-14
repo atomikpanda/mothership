@@ -31,6 +31,7 @@ import os
 import re
 import tarfile
 import tempfile
+import threading
 from pathlib import Path
 from urllib.parse import quote
 from typing import TYPE_CHECKING, Optional
@@ -41,7 +42,11 @@ if TYPE_CHECKING:
 import httpx
 
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
-from mship.core.run_host import HostRegistration, ResolvedRunHostConnection, RunHostResolver
+from mship.core.run_host import (
+    HostRegistration,
+    ResolvedRunHostConnection,
+    RunHostResolver,
+)
 from mship.core.remote_tool import (
     ToolEvent,
     ToolProtocolError,
@@ -68,6 +73,7 @@ NONCE_HEADER = "X-Mship-Exec-Nonce"
 MAX_SOURCE_UPDATE_BYTES = 64 * 1024
 MAX_RESULT_METADATA_BYTES = 512 * 1024
 # reading (no unbounded allocation / tar-bomb landing on disk). 256 MiB.
+_SAFE_PLATFORM = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 
 
@@ -97,36 +103,61 @@ _RESULT_ID = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
 
 
 def list_task_results(
-    *, host: HostRegistration, resolver: RunHostResolver, task_slug: str | None = None,
-    work_item_id: str | None = None, repo: str | None = None,
+    *,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    task_slug: str | None = None,
+    work_item_id: str | None = None,
+    repo: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> list[dict[str, object]]:
     """List safe immutable result summaries over the existing bearer boundary."""
-    selectors = {key: value for key, value in {
-        "task_slug": task_slug, "work_item_id": work_item_id, "repo": repo,
-    }.items() if value is not None}
-    if not selectors or any(not isinstance(value, str) or not value or len(value) > 128 for value in selectors.values()):
+    selectors = {
+        key: value
+        for key, value in {
+            "task_slug": task_slug,
+            "work_item_id": work_item_id,
+            "repo": repo,
+        }.items()
+        if value is not None
+    }
+    if not selectors or any(
+        not isinstance(value, str) or not value or len(value) > 128
+        for value in selectors.values()
+    ):
         raise ValueError("invalid task result selector")
-    value = _result_json(host, resolver, "/task-results", params=selectors, transport=transport)
+    value = _result_json(
+        host, resolver, "/task-results", params=selectors, transport=transport
+    )
     if not isinstance(value, list):
         raise TaskResultRetrievalError("task result list is invalid")
     return value
 
 
 def get_task_result(
-    *, host: HostRegistration, resolver: RunHostResolver, result_id: str,
+    *,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    result_id: str,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, object]:
     _validate_result_id(result_id)
-    value = _result_json(host, resolver, f"/task-results/{result_id}", transport=transport)
+    value = _result_json(
+        host, resolver, f"/task-results/{result_id}", transport=transport
+    )
     if not isinstance(value, dict):
         raise TaskResultRetrievalError("task result metadata is invalid")
     return value
 
 
 def download_task_artifact(
-    *, host: HostRegistration, resolver: RunHostResolver, result_id: str, artifact_id: str,
-    expected_sha256: str, destination: Path,
+    *,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    result_id: str,
+    artifact_id: str,
+    expected_sha256: str,
+    destination: Path,
     transport: httpx.BaseTransport | None = None,
 ) -> Path:
     """Stream one selected artifact to a private temporary file and verify it."""
@@ -136,12 +167,16 @@ def download_task_artifact(
         raise ValueError("invalid selected artifact digest")
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
     received = 0
     digest = hashlib.sha256()
     try:
         with _result_response(
-            host, resolver, f"/task-results/{result_id}/artifacts/{artifact_id}",
+            host,
+            resolver,
+            f"/task-results/{result_id}/artifacts/{artifact_id}",
             transport=transport,
         ) as response:
             header_digest = response.headers.get("X-Mship-SHA256")
@@ -149,15 +184,22 @@ def download_task_artifact(
             try:
                 expected_length = int(length) if length is not None else -1
             except ValueError:
-                raise TaskResultRetrievalError("task result artifact is invalid") from None
-            if header_digest != expected_sha256 or not 0 <= expected_length <= 512 * 1024 * 1024:
+                raise TaskResultRetrievalError(
+                    "task result artifact is invalid"
+                ) from None
+            if (
+                header_digest != expected_sha256
+                or not 0 <= expected_length <= 512 * 1024 * 1024
+            ):
                 raise TaskResultRetrievalError("task result artifact is invalid")
             with os.fdopen(fd, "wb") as stream:
                 fd = -1
                 for chunk in response.iter_bytes(chunk_size=64 * 1024):
                     received += len(chunk)
                     if received > expected_length:
-                        raise TaskResultRetrievalError("task result artifact is invalid")
+                        raise TaskResultRetrievalError(
+                            "task result artifact is invalid"
+                        )
                     digest.update(chunk)
                     stream.write(chunk)
                 stream.flush()
@@ -179,7 +221,10 @@ def download_task_artifact(
 
 @contextmanager
 def _result_response(
-    host: HostRegistration, resolver: RunHostResolver, path: str, *,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    path: str,
+    *,
     params: dict[str, str] | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> Iterator[httpx.Response]:
@@ -188,10 +233,16 @@ def _result_response(
         for attempt in range(2):
             active = resolver.resolve(host, force_refresh=attempt == 1)
             with client.stream(
-                "GET", _operation_url(host, active, path), params=params,
+                "GET",
+                _operation_url(host, active, path),
+                params=params,
                 headers={"Authorization": f"Bearer {active.token}"},
             ) as response:
-                if response.status_code == 401 and attempt == 0 and hasattr(host.connection, "workspace_id"):
+                if (
+                    response.status_code == 401
+                    and attempt == 0
+                    and hasattr(host.connection, "workspace_id")
+                ):
                     continue
                 if response.status_code != 200:
                     raise TaskResultRetrievalError("task result is unavailable")
@@ -200,12 +251,17 @@ def _result_response(
 
 
 def _result_json(
-    host: HostRegistration, resolver: RunHostResolver, path: str, *,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    path: str,
+    *,
     params: dict[str, str] | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> object:
     try:
-        with _result_response(host, resolver, path, params=params, transport=transport) as response:
+        with _result_response(
+            host, resolver, path, params=params, transport=transport
+        ) as response:
             raw = bytearray()
             for chunk in response.iter_bytes(chunk_size=64 * 1024):
                 if len(raw) + len(chunk) > MAX_RESULT_METADATA_BYTES:
@@ -215,15 +271,13 @@ def _result_json(
         raise TaskResultRetrievalError("task result retrieval failed") from None
     try:
         return json.loads(raw)
-    except (ValueError, UnicodeDecodeError, RecursionError):
+    except ValueError, UnicodeDecodeError, RecursionError:
         raise TaskResultRetrievalError("task result metadata is invalid") from None
 
 
 def _validate_result_id(value: str) -> None:
     if not isinstance(value, str) or _RESULT_ID.fullmatch(value) is None:
         raise ValueError("invalid task result identifier")
-
-
 
 
 class _ChunkReader:
@@ -389,20 +443,42 @@ def exec_remote(
         url = _operation_url(host, active, f"/exec/{verb}")
         try:
             with httpx.Client(transport=transport, follow_redirects=False) as client:
-                with client.stream("POST", url, headers={"Authorization": f"Bearer {active.token}"}, json=body) as response:
-                    if response.status_code in {401, 403} and attempt == 0 and hasattr(host.connection, "workspace_id"):
+                with client.stream(
+                    "POST",
+                    url,
+                    headers={"Authorization": f"Bearer {active.token}"},
+                    json=body,
+                ) as response:
+                    if (
+                        response.status_code in {401, 403}
+                        and attempt == 0
+                        and hasattr(host.connection, "workspace_id")
+                    ):
                         continue
                     if response.status_code >= 400:
-                        raise RemoteExecError(f"remote execution was refused (HTTP {response.status_code})")
+                        raise RemoteExecError(
+                            f"remote execution was refused (HTTP {response.status_code})"
+                        )
                     nonce = response.headers.get(NONCE_HEADER)
                     if not nonce:
-                        raise RemoteExecError(f"remote response missing the {NONCE_HEADER} header")
+                        raise RemoteExecError(
+                            f"remote response missing the {NONCE_HEADER} header"
+                        )
                     timeout = response.request.extensions.get("timeout")
                     if isinstance(timeout, dict):
                         timeout["read"] = None
-                    return _drive(_ChunkReader(_raw_chunks(response)), nonce=nonce, captures_dir_for=captures_dir_for, print_fn=print_fn)
+                    return _drive(
+                        _ChunkReader(_raw_chunks(response)),
+                        nonce=nonce,
+                        captures_dir_for=captures_dir_for,
+                        print_fn=print_fn,
+                    )
         except httpx.HTTPError:
-            raise RemoteExecError("remote host is unreachable; check relay pairing and host availability") from None
+            raise RemoteExecError(
+                "remote host is unreachable; check relay pairing and host availability"
+            ) from None
+
+
 def exec_session_capture(
     *,
     operation: ToolRequest,
@@ -428,7 +504,7 @@ def exec_session_capture(
         or not kinds
         or any(kind not in {"image", "layout"} for kind in kinds)
         or not isinstance(platform, str)
-        or not platform
+        or not _SAFE_PLATFORM.fullmatch(platform)
     ):
         raise ValueError("invalid session capture request")
     body = {
@@ -442,7 +518,10 @@ def exec_session_capture(
         try:
             with httpx.Client(transport=transport, follow_redirects=False) as client:
                 with client.stream(
-                    "POST", url, headers={"Authorization": f"Bearer {active.token}"}, json=body
+                    "POST",
+                    url,
+                    headers={"Authorization": f"Bearer {active.token}"},
+                    json=body,
                 ) as response:
                     if response.status_code in {401, 403} and attempt == 0:
                         continue
@@ -473,6 +552,61 @@ def exec_session_capture(
     )
 
 
+def stop_session(
+    *,
+    task: str,
+    repo: str,
+    owner_ref: str,
+    generation: str,
+    source_revision: str,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """Ask one authenticated host runner to stop its exact live owner."""
+    body = {
+        "task": task,
+        "repo": repo,
+        "owner_ref": owner_ref,
+        "generation": generation,
+        "source_revision": source_revision,
+    }
+    for attempt in range(2):
+        active = resolver.resolve(host, force_refresh=attempt == 1)
+        url = _operation_url(host, active, "/exec/session-stop")
+        try:
+            with httpx.Client(transport=transport, follow_redirects=False) as client:
+                with client.stream(
+                    "POST",
+                    url,
+                    headers={"Authorization": f"Bearer {active.token}"},
+                    json=body,
+                    # Domain cleanup and process reaping can exceed the default 5s.
+                    timeout=httpx.Timeout(5, read=30),
+                ) as response:
+                    if response.status_code in {401, 403} and attempt == 0:
+                        continue
+                    if response.status_code >= 400:
+                        raise RemoteExecError(
+                            f"remote session stop was refused (HTTP {response.status_code})"
+                        )
+                    value = _bounded_response_json(response)
+        except httpx.HTTPError:
+            raise RemoteExecError(
+                "remote host is unreachable; check relay pairing and host availability"
+            ) from None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"status"}
+            or value["status"] not in {"stopped", "unknown", "invalid"}
+        ):
+            raise RemoteExecError("remote session stop response is invalid")
+        return value["status"]
+    raise RemoteExecError(
+        "remote host rejected refreshed credentials; re-enrol the host and re-pair if needed"
+    )
+
+
 def _bounded_response_json(response: httpx.Response) -> object:
     payload = bytearray()
     for chunk in _raw_chunks(response):
@@ -481,7 +615,7 @@ def _bounded_response_json(response: httpx.Response) -> object:
         payload.extend(chunk)
     try:
         return json.loads(payload)
-    except (UnicodeDecodeError, ValueError):
+    except UnicodeDecodeError, ValueError:
         raise RemoteExecError("remote source-update response is invalid") from None
 
 
@@ -504,7 +638,10 @@ def source_update_remote(
         try:
             with httpx.Client(transport=transport, follow_redirects=False) as client:
                 with client.stream(
-                    "POST", url, headers={"Authorization": f"Bearer {active.token}"}, json=body
+                    "POST",
+                    url,
+                    headers={"Authorization": f"Bearer {active.token}"},
+                    json=body,
                 ) as response:
                     if response.status_code in {401, 403} and attempt == 0:
                         continue
@@ -519,13 +656,11 @@ def source_update_remote(
             ) from None
         try:
             return SourceUpdateReply.from_dict(value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise RemoteExecError("remote source-update response is invalid") from None
     raise RemoteExecError(
         "remote host rejected refreshed credentials; re-enrol the host and re-pair if needed"
     )
-
-
 
 
 def _exec_tool_once(
@@ -535,6 +670,7 @@ def _exec_tool_once(
     workspace_id: str | None,
     event_sink: Callable[[ToolEvent], None] | None = None,
     session_source_revision: Callable[[str, str], str | None] | None = None,
+    cancel_event: threading.Event | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> ToolResult:
     """Execute one structured tool request against the already selected host.
@@ -549,8 +685,12 @@ def _exec_tool_once(
         return ToolResult(status="invalid")
 
     headers = {"Authorization": f"Bearer {conn.token}"}
-    workspace_prefix = f"/workspaces/{quote(workspace_id, safe='')}" if workspace_id else ""
+    workspace_prefix = (
+        f"/workspaces/{quote(workspace_id, safe='')}" if workspace_id else ""
+    )
     url = f"{conn.url.rstrip('/')}{workspace_prefix}/exec/tool"
+    if cancel_event is not None and cancel_event.is_set():
+        return ToolResult(status="cancelled")
     try:
         with httpx.Client(transport=transport, follow_redirects=False) as client:
             with client.stream(
@@ -581,112 +721,157 @@ def _exec_tool_once(
                 final: ToolResult | None = None
                 accepted: ToolResult | None = None
                 terminal_event: ToolEvent | None = None
-                for event in iter_tool_events(
-                    _raw_chunks(response),
-                    nonce,
-                ):
-                    if (
-                        request.preparation == "discover"
-                        and request.host_tools_action != "bootstrap"
-                        and event.kind in {"stdout", "stderr"}
+                ready_seen = False
+                stop_watcher = threading.Event()
+
+                def cancel_stream_before_ready() -> None:
+                    while not stop_watcher.wait(0.02):
+                        if (
+                            cancel_event is not None
+                            and cancel_event.is_set()
+                            and not ready_seen
+                        ):
+                            try:
+                                response.close()
+                            except httpx.HTTPError:
+                                pass
+                            return
+
+                watcher = (
+                    None
+                    if cancel_event is None
+                    else threading.Thread(
+                        target=cancel_stream_before_ready, daemon=True
+                    )
+                )
+                if watcher is not None:
+                    watcher.start()
+                try:
+                    for event in iter_tool_events(
+                        _raw_chunks(response),
+                        nonce,
                     ):
-                        return ToolResult(status="protocol_error")
-                    result = event.result
-                    if result is not None:
                         if (
-                            not (
-                                request.host_tools_action is not None
-                                and event.kind == "result"
-                                and result.host_tools_report is not None
-                            )
-                            and (
-                                event.kind == "started"
-                                or result.status in {"running", "completed"}
-                                or accepted is not None
-                            )
-                            and (
-                                result.owner_ref is None
-                                or result.generation is None
-                                or result.source_revision is None
-                            )
+                            cancel_event is not None
+                            and cancel_event.is_set()
+                            and not ready_seen
                         ):
-                            return ToolResult(status="protocol_error")
-                        if (
-                            request.owner_ref is not None
-                            and result.owner_ref is not None
-                            and (
-                                result.owner_ref != request.owner_ref
-                                or result.generation != request.generation
-                            )
-                        ):
-                            return ToolResult(status="protocol_error")
-                        if accepted is not None and (
-                            result.owner_ref != accepted.owner_ref
-                            or result.generation != accepted.generation
-                        ):
-                            return ToolResult(status="protocol_error")
-                        expected_source = request.source_revision
-                        if (
-                            session_source_revision is not None
-                            and accepted is not None
-                            and result.owner_ref is not None
-                            and result.generation is not None
-                        ):
-                            advanced_source = session_source_revision(
-                                result.owner_ref, result.generation
-                            )
-                            if advanced_source is not None:
-                                expected_source = advanced_source
-                        if (
-                            expected_source is not None
-                            and result.source_revision is not None
-                            and result.source_revision != expected_source
-                        ):
-                            return ToolResult(status="protocol_error")
-                        if event.kind == "started":
-                            if accepted is not None:
-                                return ToolResult(status="protocol_error")
-                            accepted = result
-                        if (
-                            event.kind == "result"
-                            and result.status == "completed"
-                            and accepted is None
-                            and request.host_tools_action is None
-                            and (request.preparation != "observe" or bool(request.argv))
-                        ):
-                            return ToolResult(status="protocol_error")
-                        if (
-                            event.kind == "result"
-                            and result.status == "running"
-                            and (request.preparation != "observe" or request.argv)
-                        ):
-                            return ToolResult(status="protocol_error")
+                            return ToolResult(status="cancelled")
                         if (
                             request.preparation == "discover"
-                            and event.kind == "result"
-                            and (
-                                request.max_stdout_bytes is None
-                                or request.max_stderr_bytes is None
-                                or len(result.stdout) > request.max_stdout_bytes
-                                or len(result.stderr) > request.max_stderr_bytes
-                            )
+                            and request.host_tools_action != "bootstrap"
+                            and event.kind in {"stdout", "stderr"}
                         ):
                             return ToolResult(status="protocol_error")
-                    if event_sink is not None and event.kind != "result":
-                        event_sink(event)
-                    if event.kind == "result":
-                        final = result
-                        terminal_event = event
-                if final is None or terminal_event is None:
-                    return ToolResult(status="protocol_error")
-                if event_sink is not None:
-                    event_sink(terminal_event)
-                return final
+                        result = event.result
+                        if result is not None:
+                            if (
+                                not (
+                                    request.host_tools_action is not None
+                                    and event.kind == "result"
+                                    and result.host_tools_report is not None
+                                )
+                                and (
+                                    event.kind == "started"
+                                    or result.status in {"running", "completed"}
+                                    or accepted is not None
+                                )
+                                and (
+                                    result.owner_ref is None
+                                    or result.generation is None
+                                    or result.source_revision is None
+                                )
+                            ):
+                                return ToolResult(status="protocol_error")
+                            if (
+                                request.owner_ref is not None
+                                and result.owner_ref is not None
+                                and (
+                                    result.owner_ref != request.owner_ref
+                                    or result.generation != request.generation
+                                )
+                            ):
+                                return ToolResult(status="protocol_error")
+                            if accepted is not None and (
+                                result.owner_ref != accepted.owner_ref
+                                or result.generation != accepted.generation
+                            ):
+                                return ToolResult(status="protocol_error")
+                            expected_source = request.source_revision
+                            if (
+                                session_source_revision is not None
+                                and accepted is not None
+                                and result.owner_ref is not None
+                                and result.generation is not None
+                            ):
+                                advanced_source = session_source_revision(
+                                    result.owner_ref, result.generation
+                                )
+                                if advanced_source is not None:
+                                    expected_source = advanced_source
+                            if (
+                                expected_source is not None
+                                and result.source_revision is not None
+                                and result.source_revision != expected_source
+                            ):
+                                return ToolResult(status="protocol_error")
+                            if event.kind == "started":
+                                if accepted is not None:
+                                    return ToolResult(status="protocol_error")
+                                accepted = result
+                            if (
+                                event.kind == "result"
+                                and result.status == "completed"
+                                and accepted is None
+                                and request.host_tools_action is None
+                                and (
+                                    request.preparation != "observe"
+                                    or bool(request.argv)
+                                )
+                            ):
+                                return ToolResult(status="protocol_error")
+                            if (
+                                event.kind == "result"
+                                and result.status == "running"
+                                and (request.preparation != "observe" or request.argv)
+                            ):
+                                return ToolResult(status="protocol_error")
+                            if (
+                                request.preparation == "discover"
+                                and event.kind == "result"
+                                and (
+                                    request.max_stdout_bytes is None
+                                    or request.max_stderr_bytes is None
+                                    or len(result.stdout) > request.max_stdout_bytes
+                                    or len(result.stderr) > request.max_stderr_bytes
+                                )
+                            ):
+                                return ToolResult(status="protocol_error")
+                        if event.kind == "ready":
+                            ready_seen = True
+                        if event_sink is not None and event.kind != "result":
+                            event_sink(event)
+                        if event.kind == "result":
+                            final = result
+                            terminal_event = event
+                    if final is None or terminal_event is None:
+                        return ToolResult(status="protocol_error")
+                    if event_sink is not None:
+                        event_sink(terminal_event)
+                    return final
+                finally:
+                    stop_watcher.set()
+                    if watcher is not None:
+                        watcher.join(timeout=1)
     except httpx.HTTPError:
+        if cancel_event is not None and cancel_event.is_set():
+            return ToolResult(status="cancelled")
         return ToolResult(
-            status="unreachable" if request.host_tools_action is not None else "protocol_error"
+            status="unreachable"
+            if request.host_tools_action is not None
+            else "protocol_error"
         )
-    except (ToolProtocolError, UnicodeError, ValueError):
+    except ToolProtocolError, UnicodeError, ValueError:
         return ToolResult(status="protocol_error")
 
 
@@ -697,6 +882,7 @@ def exec_tool(
     resolver: RunHostResolver,
     event_sink: Callable[[ToolEvent], None] | None = None,
     session_source_revision: Callable[[str, str], str | None] | None = None,
+    cancel_event: threading.Event | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> ToolResult:
     """Issue one typed request, retrying only a definite pre-start auth rejection."""
@@ -717,6 +903,7 @@ def exec_tool(
             event_sink=attempt_sink,
             session_source_revision=session_source_revision,
             transport=transport,
+            cancel_event=cancel_event,
         )
         if (
             result.status != "auth_error"

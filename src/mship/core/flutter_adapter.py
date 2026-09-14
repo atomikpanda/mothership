@@ -111,13 +111,18 @@ class FlutterOptions:
     entrypoint: str
     flavor: str | None
     mode: str
+    platform: str | None = None
+    transport: str | None = None
 
     @classmethod
     def from_dict(cls, value: object) -> "FlutterOptions":
-        data = _exact_mapping(value, {"entrypoint", "flavor", "mode"})
-        entrypoint = data["entrypoint"]
-        flavor = data["flavor"]
-        mode = data["mode"]
+        if not isinstance(value, dict) or set(value) not in (
+            {"entrypoint", "flavor", "mode"},
+            {"entrypoint", "flavor", "mode", "platform", "transport"},
+        ):
+            raise _error()
+        entrypoint, flavor, mode = value["entrypoint"], value["flavor"], value["mode"]
+        platform, transport = value.get("platform"), value.get("transport")
         if (
             not isinstance(entrypoint, str)
             or not entrypoint.startswith("lib/")
@@ -133,7 +138,15 @@ class FlutterOptions:
             raise _error()
         if mode not in {"debug", "profile", "release"}:
             raise _error("unavailable")
-        return cls(entrypoint, flavor, mode)
+        if platform is not None and platform not in {"android", "ios"}:
+            raise _error("invalid")
+        if transport is not None and transport not in {"usb", "emulator", "simulator"}:
+            raise _error("invalid")
+        if platform == "android" and transport == "simulator":
+            raise _error("invalid")
+        if platform == "ios" and transport == "emulator":
+            raise _error("invalid")
+        return cls(entrypoint, flavor, mode, platform, transport)
 
 
 @dataclass(frozen=True)
@@ -191,16 +204,20 @@ class AndroidBinding:
 @dataclass(frozen=True)
 class IosBinding:
     probe_argv: tuple[str, ...] = field(repr=False)
-    foreground_argv: tuple[str, ...] = field(repr=False)
-    capture_argv: tuple[str, ...] = field(repr=False)
+    foreground_argv: tuple[str, ...] | None = field(repr=False)
+    capture_argv: tuple[str, ...] | None = field(repr=False)
+
+    @property
+    def supports_capture(self) -> bool:
+        return self.foreground_argv is not None and self.capture_argv is not None
 
     @classmethod
     def from_dict(cls, value: object) -> "IosBinding":
         data = _exact_mapping(value, {"probe_argv", "foreground_argv", "capture_argv"})
         return cls(
             _configured_argv(data["probe_argv"]),
-            _configured_argv(data["foreground_argv"]),
-            _configured_argv(data["capture_argv"]),
+            _optional_configured_argv(data["foreground_argv"]),
+            _optional_configured_argv(data["capture_argv"]),
         )
 
 
@@ -218,6 +235,10 @@ def _configured_argv(value: object) -> tuple[str, ...]:
     if not executable.is_absolute() or ".." in executable.parts:
         raise _error()
     return tuple(value)
+
+
+def _optional_configured_argv(value: object) -> tuple[str, ...] | None:
+    return None if value is None else _configured_argv(value)
 
 
 @dataclass(frozen=True)
@@ -378,7 +399,12 @@ class FlutterTargetBinding:
         return cls(*prefix, None, ios)
 
     def supports(self, options: FlutterOptions) -> bool:
-        return options.mode in self.modes and options.flavor in self.flavors
+        return (
+            options.mode in self.modes
+            and options.flavor in self.flavors
+            and (options.platform is None or options.platform == self.platform)
+            and (options.transport is None or options.transport == self.transport)
+        )
 
 
 @dataclass(frozen=True)
@@ -580,17 +606,19 @@ def discovery_candidate(
 ) -> dict[str, object]:
     """Build one bounded #530 candidate only from its configured exact receipt."""
     ready = target.supports(options)
-    report = (False, False)
     if ready:
         try:
             revalidate_target(target)
-            report = reported_flutter_capabilities(executable, target)
         except SessionError:
             ready = False
-    capabilities = ["run", "logs", "capture"]
-    if ready and options.mode == "debug" and target.hot_reload and report[0]:
+    capabilities = ["run", "logs"]
+    if target.platform == "android" or (
+        target.ios is not None and target.ios.supports_capture
+    ):
+        capabilities.append("capture")
+    if ready and options.mode == "debug" and target.hot_reload:
         capabilities.append("reload")
-    if ready and options.mode == "debug" and target.hot_restart and report[1]:
+    if ready and options.mode == "debug" and target.hot_restart:
         capabilities.append("restart")
     return {
         "target_key": target.target_key,
@@ -781,6 +809,8 @@ def attest_ios_foreground(
     target: FlutterTargetBinding, cancel: threading.Event | None = None
 ) -> None:
     assert target.ios is not None
+    if target.ios.foreground_argv is None:
+        raise _error("unavailable")
     _run_receipt(
         target.ios.foreground_argv, expected=target, foreground=True, cancel=cancel
     )
@@ -793,6 +823,10 @@ def capture_ios(
     cancel: threading.Event,
 ) -> None:
     assert target.ios is not None
+    if not target.ios.supports_capture:
+        raise _error("unavailable")
+    assert target.ios.foreground_argv is not None
+    assert target.ios.capture_argv is not None
     _run_receipt(
         target.ios.foreground_argv, expected=target, foreground=True, cancel=cancel
     )

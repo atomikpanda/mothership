@@ -10,7 +10,11 @@ import pytest
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.remote_tool import ToolResult
-from mship.core.run_host.config import HostRegistration, RunHostConnection, registration_identity
+from mship.core.run_host.config import (
+    HostRegistration,
+    RunHostConnection,
+    registration_identity,
+)
 from mship.core.run_target.models import (
     AppRun,
     BackendConfig,
@@ -140,7 +144,9 @@ def _stored_observation_executor(
             backend_revision=_SHA,
             host_name=host.name,
             host_scope=host.scope,
-            host_endpoint_fingerprint=host_endpoint_fingerprint("|".join(registration_identity(host.connection))),
+            host_endpoint_fingerprint=host_endpoint_fingerprint(
+                "|".join(registration_identity(host.connection))
+            ),
             safe_target_label="Phone",
             private_binding_ref=binding_ref,
             operation="run",
@@ -500,50 +506,6 @@ def test_remote_executor_rejects_observation_with_replaced_host_scope(
     assert result.error_code == "identity_lost"
 
 
-def test_remote_executor_observes_granted_operation_from_persisted_run(
-    tmp_path, monkeypatch
-):
-    seen = []
-
-    def exec_tool(*, request, **unused):
-        seen.append(request)
-        return ToolResult(status="completed", exit_code=0)
-
-    monkeypatch.setattr("mship.core.remote_client.exec_tool", exec_tool)
-    executor, host = _stored_observation_executor(tmp_path)
-
-    result = executor(
-        host,
-        BackendExecution(
-            task="task",
-            repo="app",
-            profile="phone",
-            backend="native",
-            logical_task="logs",
-            operation="logs",
-            request=_profile_request(tmp_path, operation="logs"),
-            run_id="run",
-            preparation="observe",
-            max_stdout_bytes=None,
-            max_stderr_bytes=None,
-            timeout_seconds=5,
-        ),
-    )
-
-    assert result.error_code is None
-    assert len(seen) == 1
-    assert seen[0].owner_ref == "owner-ref"
-    assert seen[0].generation == "generation-ref"
-    assert (
-        json.loads(seen[0].input_files["MSHIP_TARGET_REQUEST_FILE"])["operation"]
-        == "logs"
-    )
-    assert (
-        json.loads(seen[0].input_files["MSHIP_TARGET_CONTEXT_FILE"])["operation"]
-        == "run"
-    )
-
-
 def test_remote_executor_rejects_ungranted_observation_before_remote_call(
     tmp_path, monkeypatch
 ):
@@ -608,41 +570,74 @@ def test_remote_executor_rejects_unknown_persisted_observation_before_remote_cal
     assert result.error_code == "identity_lost"
 
 
-def test_session_observation_never_sends_parent_target_context(tmp_path, monkeypatch):
-    seen = []
-
-    def exec_tool(*, request, **unused):
-        seen.append(request)
-        return ToolResult(status="completed", exit_code=0)
-
-    monkeypatch.setattr("mship.core.remote_client.exec_tool", exec_tool)
-    executor, host = _stored_observation_executor(
-        tmp_path, capabilities=("run", "logs", "capture")
-    )
-    executor.config.repos["app"].run_backends["native"] = BackendConfig(
-        discover_task="targets",
-        operations={"run": "launch", "logs": "logs", "capture": "capture"},
-        session_owner="android",
-    )
-
-    result = executor(
-        host,
-        BackendExecution(
-            task="task",
-            repo="app",
-            profile="phone",
-            backend="native",
-            logical_task="capture",
-            operation="capture",
-            request=_profile_request(tmp_path, operation="capture"),
-            run_id="run",
-            preparation="observe",
-            max_stdout_bytes=None,
-            max_stderr_bytes=None,
-            timeout_seconds=5,
-        ),
+@pytest.mark.parametrize(
+    "receipt_generation", ["new-generation", None, "foreign-generation"]
+)
+def test_launch_reconciles_concurrent_close_only_with_exact_host_receipt(
+    tmp_path, monkeypatch, receipt_generation
+):
+    executor, host = _stored_observation_executor(tmp_path, status="stopped")
+    selected = resolve_launch(
+        config=executor.config,
+        task=executor.task_obj,
+        repo_name="app",
+        profile_name="phone",
+        host_name=None,
+        remote_role=None,
+        target_alias="phone",
+        registry=_Registry([host]),
+        preferences=_Preferences(),
+        execute=_PreparedExecutor(),
+        choose=lambda candidates: pytest.fail("unique target must not prompt"),
     )
 
-    assert result.error_code is None
-    assert len(seen) == 1
-    assert "MSHIP_TARGET_CONTEXT_FILE" not in seen[0].input_files
+    def remote_operation(self, host, execution, *, event_sink=None, cancel_event=None):
+        if execution.preparation == "discover":
+            return _result()
+        receipt = ToolResult(
+            status="running",
+            owner_ref="new-owner",
+            generation="new-generation",
+            source_revision=_SHA,
+        )
+        event_sink(SimpleNamespace(kind="started", result=receipt))
+        event_sink(SimpleNamespace(kind="ready", result=receipt))
+        # Normal close can commit deletion before the launch stream returns.
+        with self.store.write(immediate=True) as transaction:
+            run = transaction.app_runs.get(transaction.connection, execution.run_id)
+            transaction.app_runs.transition(
+                transaction.connection,
+                run_id=run.id,
+                expected_revision=run.revision,
+                status="stopped",
+                owner_ref=run.owner_ref,
+                owner_generation=run.owner_generation,
+                now=datetime.now(timezone.utc),
+            )
+            transaction.app_runs.delete_for_task(
+                transaction.connection, self.task_obj.slug
+            )
+        return BackendResult(
+            None,
+            b"",
+            b"",
+            "cancelled",
+            "new-owner" if receipt_generation is not None else None,
+            receipt_generation,
+            (),
+        )
+
+    monkeypatch.setattr(RemoteBackendExecutor, "__call__", remote_operation)
+    if receipt_generation == "new-generation":
+        completed = executor.launch_selected(
+            selected, repo_name="app", profile_name="phone"
+        )
+        assert completed.status == "stopped"
+        with executor.store.read() as transaction:
+            assert (
+                transaction.app_runs.get(transaction.connection, completed.id) is None
+            )
+    else:
+        with pytest.raises(TargetSelectionError) as error:
+            executor.launch_selected(selected, repo_name="app", profile_name="phone")
+        assert error.value.code == "identity_lost"

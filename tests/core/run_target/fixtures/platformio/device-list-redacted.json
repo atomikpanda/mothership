@@ -1,0 +1,16 @@
+[
+  {
+    "port": "/dev/ttyACM0",
+    "description": "USB Serial Device",
+    "hwid": "USB VID:PID=10C4:EA60 SER=REDACTED-BOARD-01 LOCATION=1-2",
+    "vid": "10C4",
+    "pid": "EA60"
+  },
+  {
+    "port": "/dev/ttyUSB9",
+    "description": "Serial device without trustworthy hardware identity",
+    "hwid": "USB VID:PID=1A86:7523 LOCATION=1-3",
+    "vid": "1A86",
+    "pid": "7523"
+  }
+]

@@ -27,8 +27,19 @@ from typing import Any, Literal
 
 from mship.core.log import LogEntry, format_log_entry
 from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
-from mship.core.session_channel import CLAIM_TTL_SECONDS, OWNER_CONTEXT_FILE, OwnerClient, OwnerContext
-from mship.core.session_inputs import CaptureGrant, OwnerRequest, SessionError, identifier, source_revision as validate_source_revision
+from mship.core.session_channel import (
+    CLAIM_TTL_SECONDS,
+    OWNER_CONTEXT_FILE,
+    OwnerClient,
+    OwnerContext,
+)
+from mship.core.session_inputs import (
+    CaptureGrant,
+    OwnerRequest,
+    SessionError,
+    identifier,
+    source_revision as validate_source_revision,
+)
 from mship.core.session_runtime import SessionPreparation, prepare_session_install
 from mship.util.shell import (
     ShellCancellationUnsupported,
@@ -44,6 +55,9 @@ _DELIVERY_QUEUE = 32
 _METADATA_LIMIT = 64 * 1024
 _INDEX_LIMIT = 64 * 1024
 _OPERATION_DIR = "remote-tool-operations"
+_GENERIC_READY_TIMEOUT_SECONDS = 60.0
+_GENERIC_CLEANUP_TIMEOUT_SECONDS = 5.0
+
 _TERMINAL = frozenset(
     {
         "completed",
@@ -62,6 +76,8 @@ _TERMINAL = frozenset(
         "unsupported",
     }
 )
+
+_PROVEN_CLEAN_TERMINAL = _TERMINAL - frozenset({"unknown", "evidence_error"})
 
 
 @dataclass(frozen=True)
@@ -127,22 +143,56 @@ class _Operation:
             if self.proc is None:
                 self.cleanup_complete = True
                 return
+            generic = (
+                self.indexed
+                and self.session_context is not None
+                and self.session_preparation is not None
+                and self.session_preparation.owner_kind is None
+            )
             try:
-                if self.indexed and self.session_context is not None and not _owned_process_exited(self.proc):
+                if generic:
+                    self._graceful_generic_cleanup()
+                elif (
+                    self.indexed
+                    and self.session_context is not None
+                    and not _owned_process_exited(self.proc)
+                ):
                     self._graceful_domain_cleanup()
                 _terminate_owned_process_group(self.proc)
+                if generic:
+                    self.check_capability_root()
+                    if not self.session_context.cleanup_acknowledged():
+                        raise SessionError(
+                            "unknown", "Generic session cleanup was not acknowledged"
+                        )
             except Exception:
                 self.cleanup_error = True
                 raise
             self.cleanup_complete = True
 
+    def _graceful_generic_cleanup(self) -> None:
+        assert self.proc is not None and self.session_context is not None
+        self.check_capability_root()
+        try:
+            os.kill(self.proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + _GENERIC_CLEANUP_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if self.session_context.cleanup_acknowledged():
+                return
+            time.sleep(0.02)
+
     def check_capability_root(self) -> None:
         if self.capability_root is None:
             return
         info = self.capability_root.stat(follow_symlinks=False)
-        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_mode & 0o077
-                or (info.st_dev, info.st_ino) != self.capability_identity):
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or (info.st_dev, info.st_ino) != self.capability_identity
+        ):
             raise OSError("private session root was replaced")
 
     def _graceful_domain_cleanup(self) -> None:
@@ -152,15 +202,16 @@ class _Operation:
         try:
             self.check_capability_root()
             request = OwnerRequest(
-                operation_ref=secrets.token_urlsafe(24), operation="cleanup",
+                operation_ref=secrets.token_urlsafe(24),
+                operation="cleanup",
                 source_revision=self.session_context.source_revision,
                 expires_at=time.time() + CLAIM_TTL_SECONDS,
             )
-            OwnerClient(self.session_context.issue(request)).call("cleanup", {}, timeout=5)
-        except (OSError, SessionError):
+            OwnerClient(self.session_context.issue(request)).call(
+                "cleanup", {}, timeout=5
+            )
+        except OSError, SessionError:
             if not _owned_process_exited(self.proc):
-                # Startup may not have opened its private listener yet. Signal the
-                # owner alone so its finally block can still use its live children.
                 os.kill(self.proc.pid, signal.SIGTERM)
         while time.monotonic() < deadline and not _owned_process_exited(self.proc):
             time.sleep(0.02)
@@ -233,7 +284,9 @@ class ToolOperationRegistry:
                 if cancel_event is not None and cancel_event.is_set():
                     rejection = ToolResult(status="cancelled")
                 else:
-                    admission = self._admission_status_locked(context.task)
+                    admission = self._admission_status_locked(
+                        context.task, context.repo
+                    )
                     if admission != "available":
                         rejection = ToolResult(status=admission)
                     else:
@@ -248,7 +301,7 @@ class ToolOperationRegistry:
                             self._write_record(operation, "starting")
                             self._set_index(operation)
                             self._journal(operation, "starting")
-                        except (OSError, SessionError):
+                        except OSError, SessionError:
                             rejection = ToolResult(status="evidence_error")
                         else:
                             self._operations[
@@ -311,7 +364,9 @@ class ToolOperationRegistry:
                 unavailable = True
             elif parent.source_update_ref != source_update_id:
                 unavailable = True
-                unavailable_status = "busy" if parent.source_update_ref is not None else "invalid"
+                unavailable_status = (
+                    "busy" if parent.source_update_ref is not None else "invalid"
+                )
             else:
                 unavailable = False
                 cancelled = threading.Event()
@@ -332,7 +387,7 @@ class ToolOperationRegistry:
             operation = self._new_operation(
                 request, parent.context, indexed=False, parent=parent, session=session
             )
-        except (OSError, SessionError):
+        except OSError, SessionError:
             done.set()
             with parent.observer_lock:
                 parent.observers.pop(cancelled, None)
@@ -384,7 +439,9 @@ class ToolOperationRegistry:
                     )
                 if operation.source_update_ref is not None:
                     return ToolResult(
-                        status="busy", owner_ref=owner_ref, generation=generation,
+                        status="busy",
+                        owner_ref=owner_ref,
+                        generation=generation,
                         source_revision=operation.context.source_revision,
                     )
                 return operation.result or _running_result(operation)
@@ -412,19 +469,164 @@ class ToolOperationRegistry:
         except ValueError:
             return ToolResult(status="unknown")
 
+    def inputs_for_owner(
+        self,
+        *,
+        task: str,
+        repo: str,
+        owner_ref: str,
+        generation: str,
+        source_revision: str,
+    ) -> dict[str, str] | None:
+        """Return sealed inputs for one live exact owner, never a recovered record."""
+        if not _safe_identifier(owner_ref) or not _safe_identifier(generation):
+            return None
+        try:
+            validate_source_revision(source_revision)
+        except SessionError:
+            return None
+        with self._lock:
+            parent = self._operations.get((owner_ref, generation))
+            if (
+                parent is None
+                or parent.completed.is_set()
+                or parent.stop.is_set()
+                or parent.collection_done.is_set()
+            ):
+                return None
+            request = ToolRequest(
+                task=task,
+                repo=repo,
+                argv=(),
+                preparation="observe",
+                source_revision=source_revision,
+                owner_ref=owner_ref,
+                generation=generation,
+            )
+            if not self._matches_parent(request, parent):
+                return None
+            try:
+                self._private_input_environment(parent)
+                parent.check_capability_root()
+            except OSError:
+                return None
+            return dict(parent.request.input_files)
+
+    def stop_owner(
+        self,
+        *,
+        task: str,
+        repo: str,
+        owner_ref: str,
+        generation: str,
+        source_revision: str,
+    ) -> str:
+        """Stop one live exact owner through its runner-owned cleanup path.
+
+        Durable evidence is never authority to signal after restart. It is
+        idempotent proof only when this exact runner wrote a terminal status
+        whose `_finish` path reaped the group and completed domain cleanup.
+        Unknown or evidence-error records remain unavailable.
+        """
+        if not _safe_identifier(owner_ref) or not _safe_identifier(generation):
+            return "invalid"
+        try:
+            validate_source_revision(source_revision)
+        except SessionError:
+            return "invalid"
+        with self._lock:
+            operation = self._operations.get((owner_ref, generation))
+            if operation is None:
+                record = self._read_record(task, owner_ref)
+                if (
+                    record is not None
+                    and record.get("generation") == generation
+                    and record.get("task") == task
+                    and record.get("repo") == repo
+                    and record.get("source_revision") == source_revision
+                    and record.get("status") in _PROVEN_CLEAN_TERMINAL
+                ):
+                    return "stopped"
+                return "unknown"
+            if operation.completed.is_set():
+                return (
+                    "stopped"
+                    if self._is_proven_clean_result(
+                        operation.result, owner_ref, generation, source_revision
+                    )
+                    else "unknown"
+                )
+            if operation.stop.is_set() or operation.collection_done.is_set():
+                return "unknown"
+            request = ToolRequest(
+                task=task,
+                repo=repo,
+                argv=(),
+                preparation="observe",
+                source_revision=source_revision,
+                owner_ref=owner_ref,
+                generation=generation,
+            )
+            if not self._matches_parent(request, operation):
+                return "invalid"
+            try:
+                operation.check_capability_root()
+            except OSError:
+                return "unknown"
+            operation.request_stop("cancelled")
+        try:
+            # The runner owns this termination.  For a session owner it first
+            # sends the authenticated cleanup request; this caller never derives
+            # or signals a PID from retained journal evidence.
+            operation.terminate()
+        except Exception:
+            operation.request_stop("unknown")
+            return "unknown"
+        if not operation.completed.wait(10):
+            operation.request_stop("unknown")
+            return "unknown"
+        if not self._is_proven_clean_result(
+            operation.result, owner_ref, generation, source_revision
+        ):
+            return "unknown"
+        return "stopped"
+
+    @staticmethod
+    def _is_proven_clean_result(
+        result: ToolResult | None,
+        owner_ref: str,
+        generation: str,
+        source_revision: str,
+    ) -> bool:
+        return (
+            result is not None
+            and result.status in _PROVEN_CLEAN_TERMINAL
+            and result.owner_ref == owner_ref
+            and result.generation == generation
+            and result.source_revision == source_revision
+        )
+
     def session_for_owner(
         self, *, task: str, repo: str, owner_ref: str, generation: str
     ) -> tuple[OwnerContext, dict[str, str]] | None:
         """Return only a live parent's private inputs to internal server adapters."""
         with self._lock:
             parent = self._operations.get((owner_ref, generation))
-            if (parent is None or parent.session_context is None
-                    or parent.completed.is_set() or parent.stop.is_set()
-                    or parent.collection_done.is_set()):
+            if (
+                parent is None
+                or parent.session_context is None
+                or parent.completed.is_set()
+                or parent.stop.is_set()
+                or parent.collection_done.is_set()
+            ):
                 return None
             request = ToolRequest(
-                task=task, repo=repo, argv=(), preparation="observe",
-                owner_ref=owner_ref, generation=generation,
+                task=task,
+                repo=repo,
+                argv=(),
+                preparation="observe",
+                owner_ref=owner_ref,
+                generation=generation,
             )
             if not self._matches_parent(request, parent):
                 return None
@@ -442,10 +644,14 @@ class ToolOperationRegistry:
         with self._lock:
             parent = self._source_parent(request)
             if not self._matches_parent(request, parent) or not parent.ready_announced:
-                raise SessionError("unavailable", "Framework owner is not ready for this source")
+                raise SessionError(
+                    "unavailable", "Framework owner is not ready for this source"
+                )
             with parent.observer_lock:
                 if parent.source_update_ref is not None:
-                    raise SessionError("busy", "Framework source update is already reserved")
+                    raise SessionError(
+                        "busy", "Framework source update is already reserved"
+                    )
                 self._private_input_environment(parent)
                 parent.check_capability_root()
                 parent.source_update_ref = update_id
@@ -453,37 +659,64 @@ class ToolOperationRegistry:
                 for cancelled, _ in observations:
                     cancelled.set()
         deadline = time.monotonic() + 10
-        if any(not done.wait(max(0, deadline - time.monotonic())) for _, done in observations):
+        if any(
+            not done.wait(max(0, deadline - time.monotonic()))
+            for _, done in observations
+        ):
             self.release_source_update(request, update_id, unknown=True)
-            raise SessionError("unknown", "Framework observations did not acknowledge cleanup")
+            raise SessionError(
+                "unknown", "Framework observations did not acknowledge cleanup"
+            )
         with self._lock:
             parent = self._source_parent(request, update_id)
             assert parent.session_context is not None
-            return parent.context, parent.session_context, dict(parent.request.input_files)
+            return (
+                parent.context,
+                parent.session_context,
+                dict(parent.request.input_files),
+            )
 
     def _source_parent(
         self, request: ToolRequest, update_id: str | None = None
     ) -> _Operation:
         parent = self._operations.get((request.owner_ref, request.generation))
-        if (request.preparation != "observe" or parent is None
-                or parent.context.task != request.task or parent.context.repo != request.repo
-                or parent.session_context is None or parent.session_preparation is None
-                or parent.session_preparation.owner_kind != "flutter"
-                or parent.completed.is_set() or parent.stop.is_set()
-                or parent.collection_done.is_set() or parent.cleanup_error
-                or (update_id is not None and parent.source_update_ref != update_id)):
-            raise SessionError("unknown", "The exact framework source owner is unavailable")
+        if (
+            request.preparation != "observe"
+            or parent is None
+            or parent.context.task != request.task
+            or parent.context.repo != request.repo
+            or parent.session_context is None
+            or parent.session_preparation is None
+            or parent.session_preparation.owner_kind != "flutter"
+            or parent.completed.is_set()
+            or parent.stop.is_set()
+            or parent.collection_done.is_set()
+            or parent.cleanup_error
+            or (update_id is not None and parent.source_update_ref != update_id)
+        ):
+            raise SessionError(
+                "unknown", "The exact framework source owner is unavailable"
+            )
         self._check_root(parent)
         parent.check_capability_root()
         return parent
 
     def commit_source_update(
-        self, request: ToolRequest, update_id: str, *,
-        source_revision: str, profile_revision: str,
+        self,
+        request: ToolRequest,
+        update_id: str,
+        *,
+        source_revision: str,
+        profile_revision: str,
     ) -> OwnerContext:
         validate_source_revision(source_revision)
-        if (not isinstance(profile_revision, str) or len(profile_revision) != 64
-                or any(character not in "0123456789abcdef" for character in profile_revision)):
+        if (
+            not isinstance(profile_revision, str)
+            or len(profile_revision) != 64
+            or any(
+                character not in "0123456789abcdef" for character in profile_revision
+            )
+        ):
             raise SessionError("invalid", "Invalid committed profile identity")
         with self._lock:
             parent = self._source_parent(request, update_id)
@@ -492,7 +725,9 @@ class ToolOperationRegistry:
             self._private_input_environment(parent)
             assert parent.session_context is not None
             next_context = replace(parent.context, source_revision=source_revision)
-            next_owner = replace(parent.session_context, source_revision=source_revision, request=None)
+            next_owner = replace(
+                parent.session_context, source_revision=source_revision, request=None
+            )
             files = dict(parent.request.input_files)
             for name in ("MSHIP_TARGET_REQUEST_FILE", "MSHIP_TARGET_CONTEXT_FILE"):
                 value = json.loads(files[name])
@@ -510,23 +745,36 @@ class ToolOperationRegistry:
                 with self._operation_directory(parent) as directory_fd:
                     for name, content in private_updates.items():
                         previous = parent.private_inputs[name]
-                        self._publish_json(directory_fd, previous.name, content.encode("utf-8"))
-                        fd = os.open(previous.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                        self._publish_json(
+                            directory_fd, previous.name, content.encode("utf-8")
+                        )
+                        fd = os.open(
+                            previous.name,
+                            os.O_RDONLY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
                         try:
                             info = self._check_private_file(fd)
-                            parent.private_inputs[name] = _PrivateInput(previous.name, info.st_dev, info.st_ino)
+                            parent.private_inputs[name] = _PrivateInput(
+                                previous.name, info.st_dev, info.st_ino
+                            )
                         finally:
                             os.close(fd)
                 parent.context = next_context
                 parent.session_context = next_owner
-                parent.request = replace(parent.request, source_revision=source_revision, input_files=files)
+                parent.request = replace(
+                    parent.request, source_revision=source_revision, input_files=files
+                )
                 parent.session_preparation = replace(
-                    parent.session_preparation, sealed_context=files["MSHIP_TARGET_CONTEXT_FILE"]
+                    parent.session_preparation,
+                    sealed_context=files["MSHIP_TARGET_CONTEXT_FILE"],
                 )
                 self._write_record(parent, "running")
-            except (OSError, KeyError, ValueError):
+            except OSError, KeyError, ValueError:
                 parent.request_stop("unknown")
-                raise SessionError("unknown", "Source authorization commit is incomplete") from None
+                raise SessionError(
+                    "unknown", "Source authorization commit is incomplete"
+                ) from None
             return next_owner
 
     def release_source_update(
@@ -534,9 +782,15 @@ class ToolOperationRegistry:
     ) -> None:
         with self._lock:
             parent = self._operations.get((request.owner_ref, request.generation))
-            if (parent is None or parent.context.task != request.task
-                    or parent.context.repo != request.repo or parent.source_update_ref != update_id):
-                raise SessionError("unknown", "The source reservation is no longer owned")
+            if (
+                parent is None
+                or parent.context.task != request.task
+                or parent.context.repo != request.repo
+                or parent.source_update_ref != update_id
+            ):
+                raise SessionError(
+                    "unknown", "The source reservation is no longer owned"
+                )
             with parent.observer_lock:
                 if unknown:
                     parent.reason = "unknown"
@@ -545,40 +799,79 @@ class ToolOperationRegistry:
                     parent.source_update_ref = None
 
     def admission_status(
-        self, task: str
+        self, task: str, *, repo: str | None = None
     ) -> Literal["available", "busy", "unknown", "evidence_error"]:
-        """Distinguish live contention from unvalidated durable ownership."""
-        if not isinstance(task, str) or not task:
+        """Distinguish live contention from unvalidated durable ownership.
+
+        A missing repository is legacy task-wide admission and therefore conflicts
+        with every live repository owner.  New repository-scoped admission still
+        fails closed when it sees a legacy task-wide active record.
+        """
+        if not isinstance(task, str) or not task or (repo is not None and not repo):
             return "unknown"
         with self._lock:
-            return self._admission_status_locked(task)
+            return self._admission_status_locked(task, repo)
 
     def _admission_status_locked(
-        self, task: str
+        self, task: str, repo: str | None
     ) -> Literal["available", "busy", "unknown", "evidence_error"]:
+        relevant = [
+            operation
+            for operation in self._operations.values()
+            if operation.context.task == task
+            and (repo is None or operation.context.repo == repo)
+        ]
         if any(
-            op.context.task == task and (op.cleanup_error or op.reason == "unknown")
-            for op in self._operations.values()
+            operation.cleanup_error or operation.reason == "unknown"
+            for operation in relevant
         ):
             return "unknown"
         try:
-            active = self._read_active(task)
+            legacy = self._read_active(task)
+            if legacy is not None:
+                operation = self._operations.get(
+                    (legacy["owner_ref"], legacy["generation"])
+                )
+                if (
+                    operation is None
+                    or operation.context.task != task
+                    or operation.cleanup_error
+                ):
+                    return "unknown"
+                return "busy" if operation.reason != "unknown" else "unknown"
+            if repo is None:
+                active_indexes = self._read_repo_active_indexes(task)
+                if active_indexes:
+                    for active in active_indexes:
+                        operation = self._operations.get(
+                            (active["owner_ref"], active["generation"])
+                        )
+                        if (
+                            operation is None
+                            or operation.context.task != task
+                            or operation.context.repo != active["repo"]
+                            or operation.cleanup_error
+                            or operation.reason == "unknown"
+                        ):
+                            return "unknown"
+                    return "busy"
+            else:
+                active = self._read_active(task, repo=repo)
+                if active is not None:
+                    operation = self._operations.get(
+                        (active["owner_ref"], active["generation"])
+                    )
+                    if (
+                        operation is None
+                        or operation.context.task != task
+                        or operation.context.repo != repo
+                        or operation.cleanup_error
+                    ):
+                        return "unknown"
+                    return "busy" if operation.reason != "unknown" else "unknown"
         except OSError, ValueError, TypeError, RecursionError:
             return "evidence_error"
-        if active is None:
-            return (
-                "busy"
-                if any(op.context.task == task for op in self._operations.values())
-                else "available"
-            )
-        operation = self._operations.get((active["owner_ref"], active["generation"]))
-        if (
-            operation is None
-            or operation.context.task != task
-            or operation.cleanup_error
-        ):
-            return "unknown"
-        return "busy" if operation.reason != "unknown" else "unknown"
+        return "busy" if relevant else "available"
 
     def _validate_launch(
         self, request: ToolRequest, context: ToolContext
@@ -675,7 +968,9 @@ class ToolOperationRegistry:
                 raise
         return operation
 
-    def _prepare_session(self, operation: _Operation, parent: _Operation | None) -> None:
+    def _prepare_session(
+        self, operation: _Operation, parent: _Operation | None
+    ) -> None:
         preparation = operation.session_preparation
         assert preparation is not None
         if parent is not None and (
@@ -687,21 +982,29 @@ class ToolOperationRegistry:
         with self._operation_directory(operation) as directory_fd:
             name = f"{operation.record_path.stem}.session"
             os.mkdir(name, mode=0o700, dir_fd=directory_fd)
-            operation.capability_root = (operation.record_path.parent / name).resolve(strict=True)
+            operation.capability_root = (operation.record_path.parent / name).resolve(
+                strict=True
+            )
             info = operation.capability_root.stat(follow_symlinks=False)
             operation.capability_identity = (info.st_dev, info.st_ino)
             os.fsync(directory_fd)
         root = operation.capability_root
         install = (
-            None if preparation.install is None
-            else prepare_session_install(preparation.result_store, preparation.install, root)
+            None
+            if preparation.install is None
+            else prepare_session_install(
+                preparation.result_store, preparation.install, root
+            )
         )
         capture = None
         if preparation.capture_kinds is not None:
             capture_path = root / "capture"
             capture_path.mkdir(mode=0o700)
-            capture = CaptureGrant(capture_path, preparation.capture_kinds,
-                                   preparation.capture_platform or "")
+            capture = CaptureGrant(
+                capture_path,
+                preparation.capture_kinds,
+                preparation.capture_platform or "",
+            )
         request = OwnerRequest(
             operation_ref=secrets.token_urlsafe(24),
             operation=preparation.operation,
@@ -712,24 +1015,30 @@ class ToolOperationRegistry:
         )
         files = dict(operation.request.input_files)
         if parent is None:
-            socket_directory = Path(tempfile.mkdtemp(prefix="mso-")).resolve(strict=True)
+            socket_directory = Path(tempfile.mkdtemp(prefix="mso-")).resolve(
+                strict=True
+            )
             operation.socket_directory = socket_directory
             info = socket_directory.stat(follow_symlinks=False)
             operation.socket_directory_identity = (info.st_dev, info.st_ino)
             operation.session_context = OwnerContext(
-                task=operation.context.task, repo=operation.context.repo,
-                owner_ref=operation.owner_ref, generation=operation.generation,
+                task=operation.context.task,
+                repo=operation.context.repo,
+                owner_ref=operation.owner_ref,
+                generation=operation.generation,
                 source_revision=operation.context.source_revision,
-                workspace_root=self._workspace_root, worktree=operation.root_path,
-                private_root=root, socket_path=socket_directory / "owner.sock",
-                secret=secrets.token_urlsafe(32), request=request,
+                workspace_root=self._workspace_root,
+                worktree=operation.root_path,
+                private_root=root,
+                socket_path=socket_directory / "owner.sock",
+                secret=secrets.token_urlsafe(32),
+                request=request,
             )
             if preparation.sealed_context is None:
                 raise SessionError("invalid", "Missing server-selected target")
             files["MSHIP_TARGET_CONTEXT_FILE"] = preparation.sealed_context
         else:
             assert parent.session_context is not None
-            # Verify the parent's private files before authorizing a new child.
             self._private_input_environment(parent)
             parent.check_capability_root()
             operation.session_context = parent.session_context.issue(request)
@@ -745,10 +1054,11 @@ class ToolOperationRegistry:
         if directory is None:
             return
         info = directory.stat(follow_symlinks=False)
-        if (not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino)
-                != operation.socket_directory_identity):
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (info.st_dev, info.st_ino) != operation.socket_directory_identity
+        ):
             raise OSError("owner socket directory was replaced")
-        # Never recursively delete: an unexpected entry preserves uncertainty.
         socket_path = directory / "owner.sock"
         try:
             socket_info = socket_path.stat(follow_symlinks=False)
@@ -845,8 +1155,17 @@ class ToolOperationRegistry:
             if operation.request.timeout_seconds is None
             else time.monotonic() + operation.request.timeout_seconds
         )
+        ready_deadline = (
+            None
+            if (
+                operation.session_preparation is None
+                or operation.session_preparation.owner_kind is not None
+            )
+            else time.monotonic() + _GENERIC_READY_TIMEOUT_SECONDS
+        )
         watcher = threading.Thread(
-            target=self._watch, args=(operation, cancel_event, deadline)
+            target=self._watch,
+            args=(operation, cancel_event, deadline, ready_deadline),
         )
         selector = None
         stdout = bytearray()
@@ -894,8 +1213,6 @@ class ToolOperationRegistry:
         finally:
             if failed is not None:
                 operation.request_stop(failed)
-            # The watchdog watches collection, not publication of its result.
-            # Signal it before joining; otherwise every normal child deadlocks.
             operation.collection_done.set()
             try:
                 operation.terminate()
@@ -933,21 +1250,34 @@ class ToolOperationRegistry:
         operation: _Operation,
         cancel_event: threading.Event | _CombinedCancel | None,
         deadline: float | None,
+        ready_deadline: float | None,
     ) -> None:
         while not operation.collection_done.is_set() and not operation.stop.is_set():
             if cancel_event is not None and cancel_event.is_set():
                 reason = "cancelled"
+            elif (
+                ready_deadline is not None
+                and not operation.ready_announced
+                and time.monotonic() >= ready_deadline
+            ):
+                reason = "timeout"
             elif deadline is not None and time.monotonic() >= deadline:
                 reason = "timeout"
             else:
                 try:
-                    if operation.indexed and operation.session_context is not None and not operation.ready_announced:
+                    if (
+                        operation.indexed
+                        and operation.session_context is not None
+                        and not operation.ready_announced
+                    ):
                         operation.check_capability_root()
                         if operation.session_context.readiness_acknowledged():
                             operation.ready_announced = True
-                            self._put(operation, ToolEvent("ready", result=_running_result(operation)))
+                            self._put(
+                                operation,
+                                ToolEvent("ready", result=_running_result(operation)),
+                            )
                     if operation.leader_exited():
-                        # Retain the waitable leader while stopping descendants.
                         operation.terminate()
                 except Exception:
                     operation.request_stop("unknown")
@@ -968,7 +1298,7 @@ class ToolOperationRegistry:
         if any(not done.wait(2) for done in observer_done):
             status = "unknown"
         try:
-            operation.terminate()  # Also handles a leader that already exited.
+            operation.terminate()
         except Exception:
             status = "unknown"
         if operation.indexed and operation.session_context is not None:
@@ -979,7 +1309,7 @@ class ToolOperationRegistry:
                 if not operation.session_context.cleanup_acknowledged():
                     status = "unknown"
                 self._remove_socket_directory(operation)
-            except (OSError, SessionError):
+            except OSError, SessionError:
                 status = "unknown"
         try:
             self._discard_inputs(operation)
@@ -1027,7 +1357,7 @@ class ToolOperationRegistry:
                 if operation.indexed and cleanup_known:
                     self._clear_index(operation.context.task, operation)
             except OSError:
-                pass  # The retained admission record still excludes this task.
+                pass
         operation.close_context()
         if operation.parent_done is not None and cleanup_known:
             operation.parent_done.set()
@@ -1077,11 +1407,13 @@ class ToolOperationRegistry:
         if operation.session_context is not None:
             request = operation.session_context.request
             if request is not None and request.capture is not None:
-                environment.update({
-                    "MSHIP_CAPTURE_DIR": str(request.capture.directory),
-                    "MSHIP_CAPTURE_KINDS": ",".join(request.capture.kinds),
-                    "MSHIP_CAPTURE_PLATFORM": request.capture.platform,
-                })
+                environment.update(
+                    {
+                        "MSHIP_CAPTURE_DIR": str(request.capture.directory),
+                        "MSHIP_CAPTURE_KINDS": ",".join(request.capture.kinds),
+                        "MSHIP_CAPTURE_PLATFORM": request.capture.platform,
+                    }
+                )
         environment.update(
             {
                 "MSHIP_TASK": operation.context.task,
@@ -1406,7 +1738,8 @@ class ToolOperationRegistry:
                 "status": status,
                 "exit_code": exit_code,
                 "session_private_root": (
-                    None if operation.session_context is None
+                    None
+                    if operation.session_context is None
                     else str(operation.session_context.private_root)
                 ),
             },
@@ -1415,46 +1748,104 @@ class ToolOperationRegistry:
         with self._operation_directory(operation) as directory_fd:
             self._publish_json(directory_fd, operation.record_path.name, payload)
 
-    def _active_path(self, task: str) -> Path:
-        return self._task_dir(task) / "active.json"
+    def _active_path(self, task: str, repo: str | None = None) -> Path:
+        name = "active.json" if repo is None else self._repo_active_name(repo)
+        return self._task_dir(task) / name
+
+    @staticmethod
+    def _repo_active_name(repo: str) -> str:
+        return f"active-{hashlib.sha256(repo.encode()).hexdigest()}.json"
 
     def _read_active(
-        self, task: str, *, directory_fd: int | None = None
+        self,
+        task: str,
+        *,
+        repo: str | None = None,
+        directory_fd: int | None = None,
     ) -> dict[str, str] | None:
+        name = "active.json" if repo is None else self._repo_active_name(repo)
         try:
             if directory_fd is None:
                 with self._open_storage_dir(self._task_dir(task)) as opened_fd:
-                    return self._read_active(task, directory_fd=opened_fd)
-            data = self._read_json(directory_fd, "active.json", _INDEX_LIMIT)
+                    return self._read_active(task, repo=repo, directory_fd=opened_fd)
+            data = self._read_json(directory_fd, name, _INDEX_LIMIT)
         except FileNotFoundError:
             return None
+        expected = (
+            {"owner_ref", "generation"}
+            if repo is None
+            else {"repo", "owner_ref", "generation"}
+        )
         if (
-            set(data) != {"owner_ref", "generation"}
+            set(data) != expected
             or not _safe_identifier(data.get("owner_ref"))
             or not _safe_identifier(data.get("generation"))
+            or (
+                repo is not None
+                and (data.get("repo") != repo or name != self._repo_active_name(repo))
+            )
         ):
             raise OSError("corrupt active index")
         return data
 
+    def _read_repo_active_indexes(self, task: str) -> list[dict[str, str]]:
+        try:
+            with self._open_storage_dir(self._task_dir(task)) as directory_fd:
+                names = os.listdir(directory_fd)
+                indexes: list[dict[str, str]] = []
+                for name in names:
+                    if (
+                        not name.startswith("active-")
+                        or not name.endswith(".json")
+                        or len(name) != len("active-") + 64 + len(".json")
+                    ):
+                        continue
+                    data = self._read_json(directory_fd, name, _INDEX_LIMIT)
+                    repo = data.get("repo")
+                    if (
+                        set(data) != {"repo", "owner_ref", "generation"}
+                        or not isinstance(repo, str)
+                        or not repo
+                        or name != self._repo_active_name(repo)
+                        or not _safe_identifier(data.get("owner_ref"))
+                        or not _safe_identifier(data.get("generation"))
+                    ):
+                        raise OSError("corrupt repository active index")
+                    indexes.append(data)
+                return indexes
+        except FileNotFoundError:
+            return []
+
     def _set_index(self, operation: _Operation) -> None:
         payload = json.dumps(
-            {"owner_ref": operation.owner_ref, "generation": operation.generation},
+            {
+                "repo": operation.context.repo,
+                "owner_ref": operation.owner_ref,
+                "generation": operation.generation,
+            },
             separators=(",", ":"),
         ).encode()
         with self._operation_directory(operation) as directory_fd:
-            self._publish_json(directory_fd, "active.json", payload)
+            self._publish_json(
+                directory_fd, self._repo_active_name(operation.context.repo), payload
+            )
 
     def _clear_index(self, task: str, operation: _Operation) -> None:
         with self._operation_directory(operation) as directory_fd:
-            active = self._read_active(task, directory_fd=directory_fd)
+            active = self._read_active(
+                task, repo=operation.context.repo, directory_fd=directory_fd
+            )
             if active is None:
                 return
             if active != {
+                "repo": operation.context.repo,
                 "owner_ref": operation.owner_ref,
                 "generation": operation.generation,
             }:
                 raise OSError("active index belongs to another operation")
-            os.unlink("active.json", dir_fd=directory_fd)
+            os.unlink(
+                self._repo_active_name(operation.context.repo), dir_fd=directory_fd
+            )
             os.fsync(directory_fd)
 
     def _journal(self, operation: _Operation, status: str) -> None:

@@ -263,9 +263,9 @@ Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends
 | `run_host` | Logical run-host role this repo uses for `--remote` execution (`mship build`/`capture`). Must name an entry in the workspace `run_hosts:` list. |
 | `setup_inputs` | Manifests/lockfiles whose content decides whether a **remote** run re-runs `task setup` on the run host (glob patterns, matched inside the materialized worktree). Undeclared means setup runs on first materialization only — declaring them is what enables re-run-on-change. See [`remote-run.md`](remote-run.md). |
 | `host_tools` | Optional strict selected-host mise declaration. Its manifest (and optional native lock) is validated only in the server-materialized worktree; it enables `doctor --remote` readiness inspection and explicit `bootstrap --host-tools`, never implicit provisioning. |
-| `run_profiles` | Internal profile definitions. Each profile names a configured `backend`, non-empty host `roles` (all declared in workspace `run_hosts`), optional host `tags`, and JSON-compatible `options`. Defining one does not add a CLI profile command. |
-| `run_backends` | Internal backend definitions: `discover_task` and an `operations` map from operation to logical task key. Every referenced key must exist in this repo's `tasks:` mapping; the host resolves the key rather than accepting arbitrary argv. |
-| `default_run_profile` | Optional configured profile name. It must name an entry in `run_profiles`; it is not currently consumed by `mship run`, `capture`, or `logs`. |
+| `run_profiles` | Named, opt-in profile definitions for `mship run`. A profile names a configured `backend`, non-empty eligible host `roles` (each declared in workspace `run_hosts`), optional host `tags`, and JSON-compatible backend `options`. When a selected repo declares profiles, bare `mship run` uses `default_run_profile` or, in an interactive TTY, asks you to choose. |
+| `run_backends` | Backend definitions: a `discover_task`, an `operations` map from operation to logical task key, and optional native `session_owner` (`android` or `flutter`). Every referenced key must exist in this repo's `tasks:` mapping; the host resolves the key rather than accepting arbitrary argv. |
+| `default_run_profile` | Optional configured profile name, which must name an entry in `run_profiles`. It is the default for that repo's bare, task-bound `mship run`; without a default, a TTY chooser is used or a non-interactive run reports that `--profile` is required. |
 
 ```yaml
 repos:
@@ -306,40 +306,41 @@ file must stay beneath the materialized worktree, be non-symlinked, and match
 its digest; at most 64 files per directory, 128 files total, and 1 MiB of
 sidecar bytes are admitted. The directory itself is not recursively trusted.
 
-### Internal profile/backend configuration
+### Profile and backend configuration
 
-The following schema is accepted for adapter-driven target selection, but it
-does **not** activate a user-facing profile run, capture, or logs command, nor
-does it provision a device or backend. Keep the task keys in `tasks:` so the
-host can validate and resolve them from its own configuration:
-
-```yaml
-repos:
-  app:
-    path: app
-    type: service
-    tasks:
-      discover-targets: target-inventory
-      run-target: target-launch
-    run_backends:
-      host-tools:
-        discover_task: discover-targets
-        operations:
-          run: run-target
-    run_profiles:
-      internal-profile:
-        backend: host-tools
-        hosts:
-          roles: [android-emu-host]  # must be in workspace run_hosts
-          tags: []
-        options: {}
-    default_run_profile: internal-profile
-```
+`run_profiles` is an executable, opt-in configuration surface: it selects a
+reviewed backend, eligible run-host roles, and backend options. `run_backends`
+maps its discovery and operation names through the repository's `tasks:` map.
+The profile path requires a resolved task. A run can select more than one
+repository: every selected profiled repository is discovered and preflighted
+before any app launches, dependency readiness boundaries are retained, and each
+launched repository receives its own recorded run ID. Repositories with no
+profiles retain the ordinary `mship run` behavior.
 
 Profiles and backends are strict configuration objects: unknown nested fields,
 an unknown backend, an empty host-role list, a role outside `run_hosts`, or a
-task key absent from `tasks:` rejects configuration. They remain internal until
-the separate CLI/backend and native-device work is approved and evidenced.
+task key absent from `tasks:` rejects configuration. `session_owner` is present
+only for the concrete `android` and `flutter` owners; generic backends omit it.
+
+The portable [five-backend run-target example](../examples/run-targets/mothership.yaml)
+contains the complete schema for Android CLI, Flutter, iOS simulator, browser,
+and PlatformIO profiles. Its [root Taskfile](../examples/run-targets/Taskfile.yml)
+and per-backend wrappers are executable examples, not implicit Mship setup:
+[Android CLI](../examples/run-targets/android-cli/),
+[Flutter](../examples/run-targets/flutter/),
+[iOS](../examples/run-targets/ios/),
+[browser](../examples/run-targets/browser/), and
+[PlatformIO](../examples/run-targets/platformio/).
+
+Keep tool paths, target aliases, device identities, credentials, app templates,
+and other machine-specific values in the owner-private
+`$XDG_CONFIG_HOME/mothership/run-target-bindings.yaml` (or
+`~/.config/mothership/run-target-bindings.yaml`), never in `mothership.yaml`.
+Discovery is read-only and never installs an SDK, creates an emulator, pairs a
+device, provisions a target, or falls back to an ambient target. SDKs, tools,
+and the app or simulator state required by a profile must be prepared on the
+selected host first. `host_tools` can diagnose or explicitly install its
+declared mise tools; it does not provision platform SDK components or targets.
 
 ### Immutable declared task outputs
 

@@ -1,0 +1,23 @@
+[
+  {
+    "version": 1,
+    "token": "browser_chromium_qa_0001",
+    "engine": "chromium",
+    "headless": true,
+    "page_url": "https://example.invalid/app",
+    "capture_layout": true
+  },
+  {
+    "version": 1,
+    "token": "browser_firefox_review_01",
+    "engine": "firefox",
+    "headless": true
+  },
+  {
+    "version": 1,
+    "token": "browser_webkit_visual_01",
+    "engine": "webkit",
+    "headless": true,
+    "page_url": "https://example.invalid/visual"
+  }
+]

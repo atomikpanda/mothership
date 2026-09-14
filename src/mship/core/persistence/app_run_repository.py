@@ -25,14 +25,18 @@ from mship.core.persistence.serialization import (
     encode_json,
     encode_source_update_receipt,
 )
-from mship.core.run_target.models import AppRun, JsonValue, _validate_source_update_receipt
+from mship.core.run_target.models import (
+    AppRun,
+    JsonValue,
+    _validate_source_update_receipt,
+)
 
 _BINDING_REF = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 _MAX_BINDING_BYTES = 256 * 1024
 _CANDIDATE_STATUSES = ("starting", "active", "updating", "unknown")
 _TERMINAL_STATUSES = frozenset(("stopped", "failed"))
 _ALLOWED_TRANSITIONS = {
-    "starting": frozenset(("active", "unknown", "stopped", "failed")),
+    "starting": frozenset(("starting", "active", "unknown", "stopped", "failed")),
     "active": frozenset(("updating", "unknown", "stopped", "failed")),
     "updating": frozenset(("active", "unknown", "stopped", "failed")),
     "unknown": frozenset(("stopped", "failed")),
@@ -110,6 +114,15 @@ class AppRunRepository:
             .one_or_none()
         )
         return None if row is None else self._decode(row)
+
+    def list_for_task(self, connection: Connection, *, task_slug: str) -> list[AppRun]:
+        """Return every task run, including retained terminal recovery evidence."""
+        rows = connection.execute(
+            select(app_runs)
+            .where(app_runs.c.task_slug == task_slug)
+            .order_by(app_runs.c.created_at, app_runs.c.id)
+        ).mappings()
+        return [self._decode(row) for row in rows]
 
     def list_candidates(
         self,
@@ -240,9 +253,7 @@ class AppRunRepository:
                 backend_revision=updated.backend_revision,
                 profile_revision=updated.profile_revision,
                 status=updated.status,
-                source_update_receipt_json=encode_source_update_receipt(
-                    receipt_values
-                ),
+                source_update_receipt_json=encode_source_update_receipt(receipt_values),
                 revision=updated.revision,
                 updated_at=encode_datetime(now),
             )
@@ -314,9 +325,8 @@ class AppRunRepository:
         """Delete terminal metadata and hand private refs to post-commit cleanup.
 
         The returned opaque refs are not authorization to remove payload files.
-        Existing owner/evidence cleanup must first observe a committed deletion and
-        prove no remaining rows reference each payload. Until that integration
-        exists, private payloads are safely retained.
+        The task-close facade commits this deletion first, then opens a separate
+        write transaction to prove no surviving row references each payload.
         """
         rows = (
             connection.execute(
@@ -331,6 +341,48 @@ class AppRunRepository:
             raise AppRunCleanupBlocked(task_slug)
         connection.execute(delete(app_runs).where(app_runs.c.task_slug == task_slug))
         return tuple(dict.fromkeys(str(row["private_binding_ref"]) for row in rows))
+
+    def remove_unreferenced_private_bindings(
+        self, connection: Connection, binding_refs: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Remove only post-commit handoffs no surviving AppRun still references."""
+        unique_refs = tuple(dict.fromkeys(binding_refs))
+        for binding_ref in unique_refs:
+            self._validate_binding_ref(binding_ref)
+        if not unique_refs:
+            return ()
+        referenced = {
+            str(row["private_binding_ref"])
+            for row in connection.execute(
+                select(app_runs.c.private_binding_ref).where(
+                    app_runs.c.private_binding_ref.in_(unique_refs)
+                )
+            ).mappings()
+        }
+        removed: list[str] = []
+        for binding_ref in unique_refs:
+            if binding_ref in referenced:
+                continue
+            path = self._binding_path(binding_ref)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(binding_ref)
+        return tuple(removed)
 
     def store_private_binding(self, binding: Mapping[str, JsonValue]) -> str:
         """Atomically create and return an unguessable owner-private binding key."""
@@ -427,14 +479,16 @@ class AppRunRepository:
             raise AppRunTransitionError(
                 "acknowledged app run owner identity cannot be cleared or replaced"
             )
-        if current.owner_ref is None and status not in {"active", "updating"} and owner_ref is not None:
+        if (
+            current.owner_ref is None
+            and status not in {"starting", "active", "updating"}
+            and owner_ref is not None
+        ):
             raise AppRunTransitionError(
-                "owner identity may only be acknowledged by an active transition"
+                "owner identity may only be acknowledged by starting or active transition"
             )
 
-    def _receipt_values(
-        self, receipt: Mapping[str, JsonValue]
-    ) -> dict[str, JsonValue]:
+    def _receipt_values(self, receipt: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
         if not isinstance(receipt, Mapping):
             raise AppRunTransitionError("source update receipt is invalid")
         values = dict(receipt)
@@ -466,7 +520,9 @@ class AppRunRepository:
         if existing is not None:
             if existing["update_id"] != values["update_id"]:
                 if existing["stage"] != "reloaded":
-                    raise AppRunTransitionError("another source update is already recorded")
+                    raise AppRunTransitionError(
+                        "another source update is already recorded"
+                    )
             else:
                 if any(
                     existing[field] != values[field]
@@ -477,7 +533,9 @@ class AppRunRepository:
                         "new_source_revision",
                     )
                 ):
-                    raise AppRunTransitionError("source update receipt identity changed")
+                    raise AppRunTransitionError(
+                        "source update receipt identity changed"
+                    )
                 if (
                     existing["stage"] == "unknown"
                     or values["stage"] != "unknown"
@@ -516,9 +574,7 @@ class AppRunRepository:
             )
             .values(
                 status=updated.status,
-                source_update_receipt_json=encode_source_update_receipt(
-                    receipt_values
-                ),
+                source_update_receipt_json=encode_source_update_receipt(receipt_values),
                 revision=updated.revision,
                 updated_at=encode_datetime(now),
             )
@@ -544,6 +600,7 @@ class AppRunRepository:
             "operation": run.operation,
             "protocol_version": run.protocol_version,
             "capabilities_json": encode_json(run.capabilities),
+            "target_aliases_json": encode_json(run.target_aliases),
             "owner_ref": run.owner_ref,
             "owner_generation": run.owner_generation,
             "status": run.status,
@@ -559,6 +616,7 @@ class AppRunRepository:
     def _decode(self, row: Mapping[str, object]) -> AppRun:
         try:
             capabilities = decode_json(str(row["capabilities_json"]))
+            target_aliases = decode_json(str(row["target_aliases_json"]))
             provenance_text = row["binary_provenance_json"]
             provenance = (
                 None if provenance_text is None else decode_json(str(provenance_text))
@@ -570,6 +628,7 @@ class AppRunRepository:
             )
             if (
                 not isinstance(capabilities, list)
+                or not isinstance(target_aliases, list)
                 or not isinstance(provenance, (dict, type(None)))
                 or not isinstance(source_update_receipt, (dict, type(None)))
             ):
@@ -590,6 +649,7 @@ class AppRunRepository:
                 operation=str(row["operation"]),
                 protocol_version=int(row["protocol_version"]),  # type: ignore[arg-type]
                 capabilities=tuple(str(value) for value in capabilities),
+                target_aliases=tuple(str(value) for value in target_aliases),
                 owner_ref=None if row["owner_ref"] is None else str(row["owner_ref"]),
                 owner_generation=(
                     None

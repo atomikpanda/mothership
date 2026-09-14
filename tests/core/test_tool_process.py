@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mship.core.remote_tool import ToolContext, ToolRequest
 from mship.core.tool_process import ToolOperationRegistry
+from mship.core.session_runtime import SessionPreparation
 
 
 _REVISION = "a" * 40
@@ -363,6 +364,178 @@ def test_restart_treats_live_evidence_as_unknown_not_a_pid_to_signal(tmp_path):
         assert refused.status == "unknown"
     finally:
         stream.close()
+
+
+def test_same_task_distinct_repositories_have_independent_live_owners(tmp_path):
+    registry = ToolOperationRegistry(tmp_path)
+    app_context = _context(tmp_path)
+    web_worktree = tmp_path / "web-worktree"
+    web_worktree.mkdir()
+    web_context = ToolContext(
+        task="demo",
+        repo="web",
+        worktree=web_worktree.resolve(),
+        source_revision=_REVISION,
+    )
+    app_stream = registry.run(
+        _launch((sys.executable, "-c", "import time; time.sleep(60)"), timeout=10),
+        app_context,
+    )
+    web_stream = registry.run(
+        ToolRequest(
+            task="demo",
+            repo="web",
+            argv=(sys.executable, "-c", "import time; time.sleep(60)"),
+            preparation="launch",
+            timeout_seconds=10,
+        ),
+        web_context,
+    )
+    app_owner = next(app_stream).result
+    web_owner = next(web_stream).result
+    assert app_owner is not None and web_owner is not None
+    try:
+        assert registry.admission_status("demo", repo="app") == "busy"
+        assert registry.admission_status("demo", repo="web") == "busy"
+        assert registry.admission_status("demo") == "busy"
+    finally:
+        registry.stop_owner(
+            task="demo",
+            repo="app",
+            owner_ref=app_owner.owner_ref,
+            generation=app_owner.generation,
+            source_revision=_REVISION,
+        )
+        registry.stop_owner(
+            task="demo",
+            repo="web",
+            owner_ref=web_owner.owner_ref,
+            generation=web_owner.generation,
+            source_revision=_REVISION,
+        )
+        list(app_stream)
+        list(web_stream)
+
+
+def test_generic_profile_lifecycle_survives_ready_deadline(tmp_path, monkeypatch):
+    registry = ToolOperationRegistry(tmp_path)
+    context = _context(tmp_path)
+    monkeypatch.setattr("mship.core.tool_process._GENERIC_READY_TIMEOUT_SECONDS", 1.0)
+    script = """
+import signal
+import time
+from mship.core.session_channel import OwnerContext
+
+owner = OwnerContext.from_environ()
+owner.begin()
+owner.ready()
+signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit))
+try:
+    time.sleep(60)
+finally:
+    owner.finish(cleanup_known=True)
+"""
+    stream = registry.run(
+        _launch((sys.executable, "-c", script), timeout=10),
+        context,
+        session=SessionPreparation(
+            operation="run",
+            owner_kind=None,
+            sealed_context="{}",
+        ),
+    )
+    started = next(stream)
+    ready = next(stream)
+    assert started.kind == "started"
+    assert ready.kind == "ready"
+    assert ready.result is not None
+    time.sleep(1.1)
+    assert (
+        registry.status(
+            task="demo",
+            repo="app",
+            owner_ref=ready.result.owner_ref,
+            generation=ready.result.generation,
+        ).status
+        == "running"
+    )
+    try:
+        assert (
+            registry.stop_owner(
+                task="demo",
+                repo="app",
+                owner_ref=ready.result.owner_ref,
+                generation=ready.result.generation,
+                source_revision=_REVISION,
+            )
+            == "stopped"
+        )
+    finally:
+        list(stream)
+
+
+def test_generic_session_without_cleanup_acknowledgement_is_unknown(
+    tmp_path, monkeypatch
+):
+    registry = ToolOperationRegistry(tmp_path)
+    monkeypatch.setattr(
+        "mship.core.tool_process._GENERIC_CLEANUP_TIMEOUT_SECONDS", 0.05
+    )
+    script = """
+import time
+from mship.core.session_channel import OwnerContext
+
+owner = OwnerContext.from_environ()
+owner.begin()
+owner.ready()
+time.sleep(60)
+"""
+    stream = registry.run(
+        _launch((sys.executable, "-c", script), timeout=10),
+        _context(tmp_path),
+        session=SessionPreparation(
+            operation="run",
+            owner_kind=None,
+            sealed_context="{}",
+        ),
+    )
+    ready = next(stream)
+    assert ready.kind == "started"
+    ready = next(stream)
+    assert ready.kind == "ready"
+    assert ready.result is not None
+    try:
+        assert (
+            registry.stop_owner(
+                task="demo",
+                repo="app",
+                owner_ref=ready.result.owner_ref,
+                generation=ready.result.generation,
+                source_revision=_REVISION,
+            )
+            == "unknown"
+        )
+    finally:
+        assert list(stream)[-1].result.status == "unknown"
+
+
+def test_stop_owner_accepts_exact_durable_clean_terminal_result(tmp_path):
+    registry = ToolOperationRegistry(tmp_path)
+    result = list(
+        registry.run(_launch((sys.executable, "-c", "pass")), _context(tmp_path))
+    )[-1].result
+    assert result is not None
+    assert result.status == "completed"
+    assert (
+        registry.stop_owner(
+            task="demo",
+            repo="app",
+            owner_ref=result.owner_ref,
+            generation=result.generation,
+            source_revision=_REVISION,
+        )
+        == "stopped"
+    )
 
 
 def test_paused_consumer_cannot_prevent_deadline_cleanup(tmp_path):

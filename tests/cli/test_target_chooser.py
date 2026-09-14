@@ -1,14 +1,17 @@
 import io
+from datetime import datetime, timezone
 
 import pytest
 
 from mship.cli.output import Output
-from mship.cli.run_target import choose_profile, choose_target
+from mship.cli.run_target import choose_profile, choose_run, choose_target
 from mship.core.run_host.config import HostRegistration, RunHostConnection
 from mship.core.run_target.models import (
+    AppRun,
     SelectedTarget,
     TargetCandidate,
     TargetSelectionError,
+    host_endpoint_fingerprint,
 )
 
 
@@ -63,6 +66,57 @@ def _selected(
     return SelectedTarget(
         registration, candidate, "adapter-a", ("major", "minor"), "profile-revision"
     )
+
+
+def _run(run_id: str, *, private_binding: str) -> AppRun:
+    now = datetime.now(timezone.utc)
+    return AppRun(
+        id=run_id,
+        task_slug="task",
+        repo="app",
+        profile="phone",
+        profile_revision="profile-revision",
+        backend="native",
+        backend_revision="a" * 40,
+        host_name="mobile",
+        host_scope="project",
+        host_endpoint_fingerprint=host_endpoint_fingerprint("https://mobile.invalid"),
+        safe_target_label="Phone",
+        private_binding_ref=private_binding,
+        target_aliases=("phone",),
+        operation="run",
+        protocol_version=1,
+        capabilities=("run", "logs"),
+        owner_ref="owner",
+        owner_generation="generation",
+        status="active",
+        revision=0,
+        created_at=now,
+        updated_at=now,
+        binary_provenance=None,
+    )
+
+
+def test_run_chooser_displays_only_safe_recorded_run_fields():
+    first = _run("run-a", private_binding="private-a" + "x" * 23)
+    second = _run("run-b", private_binding="private-b" + "x" * 23)
+    output, stdout, stderr = _output(tty=True)
+
+    selected = choose_run(
+        (first, second),
+        interactive=True,
+        input_fn=lambda _prompt: "2",
+        output=output,
+    )
+
+    rendered = stdout.getvalue() + stderr.getvalue()
+    assert selected == second
+    assert "run-a" in rendered and "run-b" in rendered
+    assert "Phone" in rendered and "mobile" in rendered
+    assert "owner" not in rendered
+    assert "generation" not in rendered
+    assert "private-a" not in rendered and "private-b" not in rendered
+    assert first.public_projection()["target_aliases"] == ("phone",)
 
 
 def test_interactive_chooser_selects_numbered_safe_candidate_without_private_target_data():

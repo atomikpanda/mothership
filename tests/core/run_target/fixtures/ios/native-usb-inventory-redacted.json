@@ -1,0 +1,9 @@
+{
+  "devices": [
+    {
+      "identifier": "REDACTED-USB-DEVICE-1",
+      "name": "Redacted physical iPhone",
+      "state": "connected"
+    }
+  ]
+}

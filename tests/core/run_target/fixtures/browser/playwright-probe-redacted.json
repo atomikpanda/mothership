@@ -1,0 +1,19 @@
+{
+  "engines": {
+    "chromium": {
+      "ready": true,
+      "version": "Chromium 127.0.6533.119",
+      "fingerprint": "c1d2e3f40123456789abcdef0123456789abcdef0123456789abcdef01234567"
+    },
+    "firefox": {
+      "ready": true,
+      "version": "Mozilla Firefox 128.2",
+      "fingerprint": "f1d2e3f40123456789abcdef0123456789abcdef0123456789abcdef01234567"
+    },
+    "webkit": {
+      "ready": true,
+      "version": "WebKit 18.0",
+      "fingerprint": "a1d2e3f40123456789abcdef0123456789abcdef0123456789abcdef01234567"
+    }
+  }
+}

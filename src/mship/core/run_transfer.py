@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import tempfile
+from datetime import datetime, timezone
 from urllib.parse import quote
 from pathlib import Path
 
@@ -203,7 +204,14 @@ def _push(
 
 
 def push_run_ref(
-    shell, repo_root: Path, *, conn, workspace_id: str | None = None, repo: str, task: str, sha: str
+    shell,
+    repo_root: Path,
+    *,
+    conn,
+    workspace_id: str | None = None,
+    repo: str,
+    task: str,
+    sha: str,
 ) -> str:
     """Push `sha` straight to the run host's scratch ref, and return that ref.
 
@@ -287,7 +295,9 @@ def cleanup_run_refs(task, *, config, store, shell, warn) -> list[str]:
         root_config = repos.get(git_repo)
         if root_config is None:
             continue
-        if not getattr(config, "run_hosts", ()) and not getattr(root_config, "run_host", None):
+        if not getattr(config, "run_hosts", ()) and not getattr(
+            root_config, "run_host", None
+        ):
             continue
         try:
             host = resolve_run_host(None, repo=root_config, config=config, store=store)
@@ -300,11 +310,199 @@ def cleanup_run_refs(task, *, config, store, shell, warn) -> list[str]:
                 repo=git_repo,
                 task=task.slug,
             )
-        except (RunHostError, RunTransferError, RunRefNameError):
+        except RunHostError, RunTransferError, RunRefNameError:
             warn(f"could not delete {git_repo}'s run ref from the selected run host")
             continue
         deleted.append(git_repo)
     return deleted
+
+
+class TaskRunCleanupBlocked(RuntimeError):
+    """Task teardown would discard a run whose owner outcome is not reconciled."""
+
+    def __init__(self, task_slug: str) -> None:
+        super().__init__(
+            f"cannot close task {task_slug!r} while recorded app runs are not "
+            "confirmed stopped; restore the recorded host and retry"
+        )
+
+
+def _recorded_run_host(run, *, host_store):
+    from mship.core.run_host.config import registration_identity
+    from mship.core.run_target.models import host_endpoint_fingerprint
+
+    host = host_store.effective_hosts().get(run.host_name)
+    if (
+        host is None
+        or host.scope != run.host_scope
+        or host_endpoint_fingerprint("|".join(registration_identity(host.connection)))
+        != run.host_endpoint_fingerprint
+    ):
+        return None
+    return host
+
+
+def _owner_proof(run) -> tuple[object, ...]:
+    return (
+        run.revision,
+        run.owner_ref,
+        run.owner_generation,
+        run.backend_revision,
+        run.host_name,
+        run.host_scope,
+        run.host_endpoint_fingerprint,
+    )
+
+
+def _close_safe_run(run, proven_failed: dict[str, tuple[object, ...]]) -> bool:
+    return (
+        run.status == "stopped"
+        or (
+            run.status == "failed"
+            and run.owner_ref is None
+            and run.owner_generation is None
+        )
+        or (run.status == "failed" and proven_failed.get(run.id) == _owner_proof(run))
+    )
+
+
+def cleanup_task_runs(
+    task,
+    *,
+    workspace_store,
+    host_store,
+    warn,
+    stop_session=None,
+) -> tuple[str, ...]:
+    """Reconcile exact AppRun owners before task metadata is removed.
+
+    A failed row without an owner is removable because no launch was
+    acknowledged. Owner-bearing failed or unknown rows are removable only in
+    this close transaction after their exact recorded owner returns proven
+    clean; every unavailable, mismatched, or unknown owner retains recovery
+    evidence and blocks teardown.
+    """
+    from mship.core.persistence.app_run_repository import AppRunConflict
+    from mship.core.remote_client import (
+        RemoteExecError,
+        stop_session as stop_remote_session,
+    )
+    from mship.core.run_host import RunHostError, RunHostResolver
+
+    task_slug = _task_slug(task)
+    stop = stop_remote_session if stop_session is None else stop_session
+    resolver = RunHostResolver()
+    with workspace_store.read() as transaction:
+        runs = transaction.app_runs.list_for_task(
+            transaction.connection, task_slug=task_slug
+        )
+
+    proven_failed: dict[str, tuple[object, ...]] = {}
+    for run in runs:
+        if _close_safe_run(run, proven_failed):
+            continue
+        if (
+            run.status not in {"starting", "active", "updating", "failed", "unknown"}
+            or run.owner_ref is None
+            or run.owner_generation is None
+        ):
+            warn(
+                f"recorded app run {run.id} is {run.status}; retaining recovery "
+                "metadata and its private binding"
+            )
+            continue
+        try:
+            host = _recorded_run_host(run, host_store=host_store)
+        except Exception:
+            host = None
+        if host is None:
+            warn(
+                f"recorded app run {run.id} host identity changed or is unavailable; "
+                "retaining owner recovery evidence"
+            )
+            continue
+        try:
+            outcome = stop(
+                task=run.task_slug,
+                repo=run.repo,
+                owner_ref=run.owner_ref,
+                generation=run.owner_generation,
+                source_revision=run.backend_revision,
+                host=host,
+                resolver=resolver,
+            )
+        except RemoteExecError, RunHostError:
+            outcome = "unknown"
+        if outcome != "stopped":
+            warn(
+                f"recorded app run {run.id} owner stop is {outcome}; retaining "
+                "owner recovery evidence"
+            )
+            continue
+        try:
+            with workspace_store.write(immediate=True) as transaction:
+                current = transaction.app_runs.get(transaction.connection, run.id)
+                if (
+                    current is None
+                    or current.revision != run.revision
+                    or current.status
+                    not in {"starting", "active", "updating", "failed", "unknown"}
+                    or current.owner_ref != run.owner_ref
+                    or current.owner_generation != run.owner_generation
+                    or current.host_name != run.host_name
+                    or current.host_scope != run.host_scope
+                    or current.host_endpoint_fingerprint
+                    != run.host_endpoint_fingerprint
+                ):
+                    raise AppRunConflict(run.id)
+                if current.status == "failed":
+                    proven_failed[current.id] = _owner_proof(current)
+                    continue
+                transaction.app_runs.transition(
+                    transaction.connection,
+                    run_id=current.id,
+                    expected_revision=current.revision,
+                    status="stopped",
+                    owner_ref=current.owner_ref,
+                    owner_generation=current.owner_generation,
+                    now=datetime.now(timezone.utc),
+                )
+        except AppRunConflict, KeyError:
+            warn(
+                f"recorded app run {run.id} changed while stopping; retaining "
+                "owner recovery evidence"
+            )
+
+    with workspace_store.read() as transaction:
+        remaining = transaction.app_runs.list_for_task(
+            transaction.connection, task_slug=task_slug
+        )
+    if any(not _close_safe_run(run, proven_failed) for run in remaining):
+        raise TaskRunCleanupBlocked(task_slug)
+
+    with workspace_store.write(immediate=True) as transaction:
+        # Recheck under the deletion transaction, because a run may be recorded
+        # after the reconciliation read but before task teardown.
+        if any(
+            not _close_safe_run(run, proven_failed)
+            for run in transaction.app_runs.list_for_task(
+                transaction.connection, task_slug=task_slug
+            )
+        ):
+            raise TaskRunCleanupBlocked(task_slug)
+        binding_refs = transaction.app_runs.delete_for_task(
+            transaction.connection, task_slug
+        )
+
+    # This is intentionally a second transaction: a rolled-back task deletion
+    # must retain both its rows and binding files.  The repository rechecks all
+    # surviving references while holding the workspace write lock.
+    with workspace_store.write(immediate=True) as transaction:
+        transaction.app_runs.remove_unreferenced_private_bindings(
+            transaction.connection, binding_refs
+        )
+    return binding_refs
+
 
 _RECEIPTS_VERSION = 2
 _RECEIPTS_FILE = "run-ref-receipts.json"
@@ -328,6 +526,7 @@ def _endpoint_fingerprint(connection) -> str:
             registration_identity(connection)
         )
     return hashlib.sha256(payload.encode()).hexdigest()
+
 
 def _receipt_path(state_dir: Path) -> Path:
     return Path(state_dir) / _RECEIPTS_FILE
@@ -471,7 +670,14 @@ def record_run_ref_receipt(
 
 
 def _delete_recorded_ref(
-    shell, repo_root: Path, *, conn, workspace_id: str | None, repo: str, ref: str, expected_sha: str
+    shell,
+    repo_root: Path,
+    *,
+    conn,
+    workspace_id: str | None,
+    repo: str,
+    ref: str,
+    expected_sha: str,
 ) -> None:
     """Delete exactly an already-recorded ref with its recorded object lease."""
     url = _receive_url(conn, repo, workspace_id)
@@ -497,13 +703,17 @@ def _cleanup_recorded_run_refs(
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         receipts = _load_receipts(path)
-        recorded_repos = {receipt["repo"] for receipt in receipts if receipt["task"] == task_slug}
+        recorded_repos = {
+            receipt["repo"] for receipt in receipts if receipt["task"] == task_slug
+        }
         try:
             current_hosts = store.effective_hosts()
         except RunHostError:
             for receipt in receipts:
                 if receipt["task"] == task_slug:
-                    warn(f"could not delete {receipt['repo']}'s recorded run ref: could not validate host identity")
+                    warn(
+                        f"could not delete {receipt['repo']}'s recorded run ref: could not validate host identity"
+                    )
             return [], recorded_repos
         repos = getattr(config, "repos", {})
         deleted: list[str] = []
@@ -513,8 +723,15 @@ def _cleanup_recorded_run_refs(
                 retained.append(receipt)
                 continue
             host = current_hosts.get(receipt["host_name"])
-            if host is None or host.scope != receipt["host_scope"] or _endpoint_fingerprint(host.connection) != receipt["host_endpoint_fingerprint"]:
-                warn(f"could not delete {receipt['repo']}'s recorded run ref on {receipt['host_name']}: host identity changed or is unavailable")
+            if (
+                host is None
+                or host.scope != receipt["host_scope"]
+                or _endpoint_fingerprint(host.connection)
+                != receipt["host_endpoint_fingerprint"]
+            ):
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref on {receipt['host_name']}: host identity changed or is unavailable"
+                )
                 retained.append(receipt)
                 continue
             repo_config = repos.get(receipt["repo"])
@@ -523,7 +740,9 @@ def _cleanup_recorded_run_refs(
             except RunRefNameError:
                 expected_ref = None
             if repo_config is None or receipt["ref"] != expected_ref:
-                warn(f"could not delete {receipt['repo']}'s recorded run ref: recorded destination is invalid")
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref: recorded destination is invalid"
+                )
                 retained.append(receipt)
                 continue
             try:
@@ -537,9 +756,11 @@ def _cleanup_recorded_run_refs(
                     ref=receipt["ref"],
                     expected_sha=receipt["sha"],
                 )
-            except (RunHostError, RunTransferError, RunRefNameError):
+            except RunHostError, RunTransferError, RunRefNameError:
                 # A failed delete is ambiguous; never query/replay and retain the lease.
-                warn(f"could not delete {receipt['repo']}'s recorded run ref; the exact ref remains recorded")
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref; the exact ref remains recorded"
+                )
                 retained.append(receipt)
                 continue
             deleted.append(receipt["repo"])
@@ -547,7 +768,9 @@ def _cleanup_recorded_run_refs(
             try:
                 _write_receipts(path, retained)
             except OSError:
-                warn("could not update recorded run refs after cleanup; exact receipt cleanup will retry")
+                warn(
+                    "could not update recorded run refs after cleanup; exact receipt cleanup will retry"
+                )
         return deleted, recorded_repos
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -559,6 +782,11 @@ def cleanup_recorded_run_refs(task, *, config, store, shell, warn) -> list[str]:
     from mship.core.run_host import RunHostResolver
 
     deleted, _recorded_repos = _cleanup_recorded_run_refs(
-        task, config=config, store=store, shell=shell, warn=warn, resolver=RunHostResolver()
+        task,
+        config=config,
+        store=store,
+        shell=shell,
+        warn=warn,
+        resolver=RunHostResolver(),
     )
     return deleted

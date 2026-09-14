@@ -1,0 +1,18 @@
+version: '3'
+
+includes:
+  android:
+    taskfile: ./android-cli/Taskfile.yml
+    dir: ./android-cli
+  flutter:
+    taskfile: ./flutter/Taskfile.yml
+    dir: ./flutter
+  ios:
+    taskfile: ./ios/Taskfile.yml
+    dir: ./ios
+  browser:
+    taskfile: ./browser/Taskfile.yml
+    dir: ./browser
+  platformio:
+    taskfile: ./platformio/Taskfile.yml
+    dir: ./platformio

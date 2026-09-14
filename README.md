@@ -66,6 +66,10 @@ mship finish --bypass-deps                 # ship a downstream even if upstream 
 # Agent setup
 mship skill install --only claude,codex,omp  # install bundled skills; pi is an alias for omp
 
+# Runtime observation
+mship run --repos api,web                   # start selected services or configured profiles
+mship logs api                              # tail a service or its sole recorded profile session
+mship capture --repo web                    # capture a repo's UI (add --kind image|layout|all as needed)
 # Inspection
 mship status                            # active task, phase, branch, drift
 mship journal                           # task log with context
@@ -80,6 +84,9 @@ mship reply <thread> "text"             # answer a mailbox thread
 ```
 
 For details, see `mship spawn --help`, [`docs/cli.md`](docs/cli.md), and the `working-with-mothership` skill.
+
+For the profile-aware run → logs → capture flow and its session-selection
+rules, see [`docs/guides/run-and-observe.md`](docs/guides/run-and-observe.md).
 
 Codex and OMP/Pi discover the same bundle through the user-level
 `.agents/skills/mothership` link, so there is no second skill copy. Existing

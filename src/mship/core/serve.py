@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import re
 import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from pydantic import BaseModel, field_validator
 # `core/relay/egress/proxy.py` imports it at module scope. Everything else stays
 # a deferred import inside `create_app`.
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 
 from mship.core.gh_app import GhAppError, mint_installation_token, resolve_installation
 from mship.core.pr import PRManager
@@ -46,6 +48,8 @@ logger = logging.getLogger(__name__)
 # background loop (see `_lifespan` in `create_app`). Overridable via
 # MSHIP_PR_WATCH_INTERVAL so tests can shrink it (fast, deterministic) or
 # disable the loop entirely (<= 0 => no watcher task is created at all).
+
+_SAFE_PLATFORM = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 PR_WATCH_INTERVAL_SECONDS = 45
 
 
@@ -2111,9 +2115,13 @@ def create_app(
         if isinstance(error, ResultExpired):
             return HTTPException(status_code=410, detail="task result has expired")
         if isinstance(error, ResultIntegrityError):
-            return HTTPException(status_code=422, detail="task result integrity check failed")
+            return HTTPException(
+                status_code=422, detail="task result integrity check failed"
+            )
         if isinstance(error, ResultUnavailable):
-            return HTTPException(status_code=409, detail="task result artifact is unavailable")
+            return HTTPException(
+                status_code=409, detail="task result artifact is unavailable"
+            )
         return HTTPException(status_code=400, detail="invalid task result selector")
 
     @app.get("/task-results")
@@ -2126,21 +2134,39 @@ def create_app(
             return result_service.list_results(
                 task_slug=task_slug, work_item_id=work_item_id, repo=repo
             )
-        except (ValueError, ResultNotFound, ResultExpired, ResultUnavailable, ResultIntegrityError) as error:
+        except (
+            ValueError,
+            ResultNotFound,
+            ResultExpired,
+            ResultUnavailable,
+            ResultIntegrityError,
+        ) as error:
             raise _result_http_error(error) from None
 
     @app.get("/task-results/{result_id}")
     def get_task_result(result_id: str):
         try:
             return result_service.result_metadata(result_id)
-        except (ValueError, ResultNotFound, ResultExpired, ResultUnavailable, ResultIntegrityError) as error:
+        except (
+            ValueError,
+            ResultNotFound,
+            ResultExpired,
+            ResultUnavailable,
+            ResultIntegrityError,
+        ) as error:
             raise _result_http_error(error) from None
 
     @app.get("/task-results/{result_id}/artifacts/{artifact_id}")
     def get_task_result_artifact(result_id: str, artifact_id: str):
         try:
             lease = result_service.stream_artifact(result_id, artifact_id)
-        except (ValueError, ResultNotFound, ResultExpired, ResultUnavailable, ResultIntegrityError) as error:
+        except (
+            ValueError,
+            ResultNotFound,
+            ResultExpired,
+            ResultUnavailable,
+            ResultIntegrityError,
+        ) as error:
             raise _result_http_error(error) from None
 
         def chunks():
@@ -2239,10 +2265,16 @@ def create_app(
 
     def _tool_execution_dependencies(cancel_event):
         if config is None:
-            raise HTTPException(status_code=503, detail="remote workspace not bootstrapped")
+            raise HTTPException(
+                status_code=503, detail="remote workspace not bootstrapped"
+            )
         return remote_exec.RemoteExecDeps(
-            config=config, shell=ShellRunner(), workspace_root=workspace_root,
-            cancel_event=cancel_event, operations=tool_operations, result_store=result_store,
+            config=config,
+            shell=ShellRunner(),
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+            operations=tool_operations,
+            result_store=result_store,
             execution_provenance=trusted_execution_provenance,
             work_item_id_for_task=_trusted_work_item_id,
         )
@@ -2251,12 +2283,16 @@ def create_app(
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > MAX_REQUEST_BYTES:
-                raise HTTPException(status_code=413, detail="session request exceeds byte limit")
+                raise HTTPException(
+                    status_code=413, detail="session request exceeds byte limit"
+                )
             body.extend(chunk)
         try:
             return json.loads(body, object_pairs_hook=_unique_tool_object)
-        except (ValueError, TypeError, RecursionError):
-            raise HTTPException(status_code=400, detail="invalid session request") from None
+        except ValueError, TypeError, RecursionError:
+            raise HTTPException(
+                status_code=400, detail="invalid session request"
+            ) from None
 
     @app.post("/exec/tool")
     async def post_tool(request: Request):
@@ -2298,29 +2334,81 @@ def create_app(
             headers={"X-Mship-Exec-Nonce": nonce},
         )
 
+    @app.post("/exec/session-stop")
+    async def post_session_stop(request: Request):
+        if config is None:
+            raise HTTPException(
+                status_code=503, detail="remote workspace not bootstrapped"
+            )
+        value = await _session_request_body(request)
+        try:
+            if (
+                not isinstance(value, dict)
+                or set(value)
+                != {
+                    "task",
+                    "repo",
+                    "owner_ref",
+                    "generation",
+                    "source_revision",
+                }
+                or not all(isinstance(field, str) for field in value.values())
+            ):
+                raise ValueError
+        except AttributeError, ValueError, TypeError, RecursionError:
+            raise HTTPException(
+                status_code=400, detail="invalid session stop request"
+            ) from None
+        status = tool_operations.stop_owner(
+            task=value["task"],
+            repo=value["repo"],
+            owner_ref=value["owner_ref"],
+            generation=value["generation"],
+            source_revision=value["source_revision"],
+        )
+        return JSONResponse({"status": status})
+
     @app.post("/exec/session-capture")
     async def post_session_capture(request: Request):
         cancel_event = threading.Event()
         deps = _tool_execution_dependencies(cancel_event)
         value = await _session_request_body(request)
         try:
-            if not isinstance(value, dict) or set(value) != {"operation", "kinds", "platform"}:
+            if not isinstance(value, dict) or set(value) != {
+                "operation",
+                "kinds",
+                "platform",
+            }:
                 raise ValueError
             operation = ToolRequest.from_dict(value["operation"])
             kinds, platform = value["kinds"], value["platform"]
-            if (not isinstance(kinds, list) or not 1 <= len(kinds) <= 2
-                    or any(not isinstance(kind, str) or kind not in {"image", "layout"} for kind in kinds)
-                    or len(set(kinds)) != len(kinds)
-                    or not isinstance(platform, str) or platform not in {"android", "ios"}):
+            if (
+                not isinstance(kinds, list)
+                or not 1 <= len(kinds) <= 2
+                or any(
+                    not isinstance(kind, str) or kind not in {"image", "layout"}
+                    for kind in kinds
+                )
+                or len(set(kinds)) != len(kinds)
+                or not isinstance(platform, str)
+                or not _SAFE_PLATFORM.fullmatch(platform)
+            ):
                 raise ValueError
-        except (ValueError, TypeError, RecursionError):
-            raise HTTPException(status_code=400, detail="invalid session capture request") from None
+        except ValueError, TypeError, RecursionError:
+            raise HTTPException(
+                status_code=400, detail="invalid session capture request"
+            ) from None
         nonce = secrets.token_hex(16)
         return _RemoteExecStreamingResponse(
             remote_exec.run_observe_capture_stream(
-                operation, deps=deps, kinds=kinds, platform=platform, nonce=nonce,
+                operation,
+                deps=deps,
+                kinds=kinds,
+                platform=platform,
+                nonce=nonce,
             ),
-            cancel_event=cancel_event, media_type="application/octet-stream",
+            cancel_event=cancel_event,
+            media_type="application/octet-stream",
             headers={"X-Mship-Exec-Nonce": nonce},
         )
 
@@ -2328,7 +2416,9 @@ def create_app(
     async def post_source_update(request: Request):
         from mship.core.session_inputs import SessionError
         from mship.core.session_source import (
-            SessionSourceUpdateService, SourceUpdateReply, SourceUpdateRequest,
+            SessionSourceUpdateService,
+            SourceUpdateReply,
+            SourceUpdateRequest,
         )
 
         cancel_event = threading.Event()
@@ -2336,8 +2426,10 @@ def create_app(
         value = await _session_request_body(request)
         try:
             operation = SourceUpdateRequest.from_dict(value)
-        except (ValueError, TypeError, RecursionError):
-            raise HTTPException(status_code=400, detail="invalid source update request") from None
+        except ValueError, TypeError, RecursionError:
+            raise HTTPException(
+                status_code=400, detail="invalid source update request"
+            ) from None
 
         def source_reply():
             try:
@@ -2345,19 +2437,26 @@ def create_app(
             except Exception:
                 try:
                     tool_operations.release_source_update(
-                        operation.operation, operation.update_id, unknown=True,
+                        operation.operation,
+                        operation.update_id,
+                        unknown=True,
                     )
                 except SessionError:
                     pass
                 result = SourceUpdateReply(
-                    update_id=operation.update_id, run_id=operation.run_id, stage="unknown",
+                    update_id=operation.update_id,
+                    run_id=operation.run_id,
+                    stage="unknown",
                     source_revision=operation.new_source_revision,
-                    profile_revision=operation.new_profile_revision, error_code="unknown",
+                    profile_revision=operation.new_profile_revision,
+                    error_code="unknown",
                 )
             yield json.dumps(result.to_dict(), separators=(",", ":")).encode("utf-8")
 
         return _RemoteExecStreamingResponse(
-            source_reply(), cancel_event=cancel_event, media_type="application/json",
+            source_reply(),
+            cancel_event=cancel_event,
+            media_type="application/json",
         )
 
     @app.post("/exec/{verb}")

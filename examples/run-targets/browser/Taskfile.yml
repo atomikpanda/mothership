@@ -1,0 +1,19 @@
+version: '3'
+
+tasks:
+  targets:
+    silent: true
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" backend.py discover'
+  run:
+    silent: true
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" backend.py'
+  logs:
+    silent: true
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" backend.py'
+  capture:
+    silent: true
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" backend.py'

@@ -14,6 +14,7 @@ def _read_stdin_body_or_exit(output: Output) -> str:
     Used by both `--body -` and `--body-file -` to give them identical semantics.
     """
     import sys
+
     if sys.stdin.isatty():
         output.error(
             "refusing to read body from an interactive TTY; "
@@ -44,7 +45,8 @@ def _run_gate(
         return
     from mship.core.reconcile.cache import ReconcileCache
     from mship.core.reconcile.fetch import (
-        collect_git_snapshots, fetch_pr_snapshots,
+        collect_git_snapshots,
+        fetch_pr_snapshots,
     )
     from mship.core.reconcile.gate import GateAction, reconcile_now, should_block
 
@@ -88,9 +90,7 @@ def _run_gate(
         }
         unavailable = scoped_slugs.difference(decisions)
         if unavailable:
-            output.error(
-                "reconcile unavailable for: " + ", ".join(sorted(unavailable))
-            )
+            output.error("reconcile unavailable for: " + ", ".join(sorted(unavailable)))
             raise typer.Exit(code=1)
     else:
         try:
@@ -156,7 +156,10 @@ def _dependency_decisions(state):
         cache = ReconcileCache(_container_singleton.state_dir())
 
         def _fetcher(branches, worktrees_by_branch):
-            return (fetch_pr_snapshots(branches), collect_git_snapshots(worktrees_by_branch))
+            return (
+                fetch_pr_snapshots(branches),
+                collect_git_snapshots(worktrees_by_branch),
+            )
 
         return reconcile_now(
             state, cache=cache, fetcher=_fetcher, config=_container_singleton.config()
@@ -172,9 +175,10 @@ class PRGroup:
     Members all push to the same branch on the same git repo (same
     git_root_or_self) with the same effective base.
     """
-    rep_name: str           # repo name driving push + create_pr calls
-    rep_path: Path          # absolute path to run git/gh from
-    members: list[str]      # all repos sharing this PR (includes rep_name)
+
+    rep_name: str  # repo name driving push + create_pr calls
+    rep_path: Path  # absolute path to run git/gh from
+    members: list[str]  # all repos sharing this PR (includes rep_name)
     branch: str
     base: str | None
 
@@ -238,17 +242,21 @@ def _build_pr_groups(
             rep_name = members[0]
         rep_path = _effective_path(rep_name)
 
-        groups.append(PRGroup(
-            rep_name=rep_name,
-            rep_path=rep_path,
-            members=list(members),
-            branch=task.branch,
-            base=base,
-        ))
+        groups.append(
+            PRGroup(
+                rep_name=rep_name,
+                rep_path=rep_path,
+                members=list(members),
+                branch=task.branch,
+                base=base,
+            )
+        )
     return groups
 
 
-def _capture_dirty_main_post_op(command: str, task, config, shell, state_dir: Path) -> None:
+def _capture_dirty_main_post_op(
+    command: str, task, config, shell, state_dir: Path
+) -> None:
     """Capture a diagnostic snapshot if any affected repo's main checkout is dirty.
 
     Called after `finish` and `close` complete successfully. Strictly best-effort:
@@ -284,7 +292,8 @@ def _capture_dirty_main_post_op(command: str, task, config, shell, state_dir: Pa
                 break
         if any_dirty:
             capture_snapshot(
-                command, "dirty-main-post-op",
+                command,
+                "dirty-main-post-op",
                 state_dir,
                 repos=post_op_repos,
             )
@@ -298,48 +307,66 @@ def register(app: typer.Typer, get_container):
     def spawn(
         description: str,
         repos: Optional[str] = typer.Option(None, help="Comma-separated repo names"),
-        skip_setup: bool = typer.Option(False, "--skip-setup", help="Skip running `task setup` in new worktrees"),
-        force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this spawn"),
-        bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this spawn"),
+        skip_setup: bool = typer.Option(
+            False, "--skip-setup", help="Skip running `task setup` in new worktrees"
+        ),
+        force_audit: bool = typer.Option(
+            False, "--force-audit", help="Bypass audit gate for this spawn"
+        ),
+        bypass_reconcile: bool = typer.Option(
+            False,
+            "--bypass-reconcile",
+            help="Skip upstream PR drift check for this spawn",
+        ),
         slug: Optional[str] = typer.Option(
-            None, "--slug",
+            None,
+            "--slug",
             help="Override the auto-generated task slug (lowercase alphanumeric + dashes). "
-                 "Useful when the description would produce a 50+ char slug. See #59.",
+            "Useful when the description would produce a 50+ char slug. See #59.",
         ),
         yes: bool = typer.Option(
-            False, "--yes", "-y",
+            False,
+            "--yes",
+            "-y",
             help="Skip confirmation prompts (required in non-TTY mode when "
-                 "spawn would exceed spawn_confirm_threshold). See #74.",
+            "spawn would exceed spawn_confirm_threshold). See #74.",
         ),
         offline: bool = typer.Option(
-            False, "--offline",
+            False,
+            "--offline",
             help="Skip `git fetch` for passive worktrees; use local refs. "
-                 "Journal entry tagged OFFLINE.",
+            "Journal entry tagged OFFLINE.",
         ),
         depends_on: Optional[str] = typer.Option(
-            None, "--depends-on",
+            None,
+            "--depends-on",
             help="Comma-separated upstream task slugs this task depends on. See #104.",
         ),
         base: Optional[str] = typer.Option(
-            None, "--base",
+            None,
+            "--base",
             help="Cut the worktree from <branch> instead of the configured base "
-                 "(stacked PRs: base a task on another task's feat/* branch). "
-                 "`mship finish` then targets it as the PR base. See #42.",
+            "(stacked PRs: base a task on another task's feat/* branch). "
+            "`mship finish` then targets it as the PR base. See #42.",
         ),
         work_item: Optional[str] = typer.Option(
-            None, "--work-item", "--item",
+            None,
+            "--work-item",
+            "--item",
             help="WorkItem id this task implements. Required unless --hotfix is "
-                 "passed. Create one with `mship item new`.",
+            "passed. Create one with `mship item new`.",
         ),
         hotfix: bool = typer.Option(
-            False, "--hotfix",
+            False,
+            "--hotfix",
             help="Bypass the WorkItem requirement for this spawn. Recorded to "
-                 "the bypass log.",
+            "the bypass log.",
         ),
         closes: Optional[list[str]] = typer.Option(
-            None, "--closes",
+            None,
+            "--closes",
             help="GitHub issue ref(s) this task closes on merge (#N, owner/repo#N, "
-                 "or issue URL; repeatable). Requires --work-item. See #386.",
+            "or issue URL; repeatable). Requires --work-item. See #386.",
         ),
     ):
         """Create coordinated worktrees across repos for a new task."""
@@ -401,6 +428,7 @@ def register(app: typer.Typer, get_container):
                 pass  # --yes bypasses
             elif output.is_tty:
                 import typer as _typer
+
                 proceed = _typer.confirm(
                     f"Spawn will create worktrees for {len(effective_scope)} repos "
                     f"(exceeds spawn_confirm_threshold={config.spawn_confirm_threshold}). "
@@ -408,9 +436,7 @@ def register(app: typer.Typer, get_container):
                     default=False,
                 )
                 if not proceed:
-                    output.error(
-                        f"Aborted. To proceed with the full set: {repos_flag}"
-                    )
+                    output.error(f"Aborted. To proceed with the full set: {repos_flag}")
                     raise typer.Exit(code=1)
             else:
                 output.error(
@@ -472,14 +498,18 @@ def register(app: typer.Typer, get_container):
         closes_canonical: list[str] = []
         if closes:
             if work_item is None:
-                output.error("--closes requires --work-item (issues are linked to the WorkItem)")
+                output.error(
+                    "--closes requires --work-item (issues are linked to the WorkItem)"
+                )
                 raise typer.Exit(code=1)
             from mship.core.issue_link import default_issue_slug
             from mship.core.issue_refs import IssueRefError, normalize_issue_ref
+
             _slug_default = default_issue_slug(config.repos.values())
             try:
-                closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
-                                    for c in closes]
+                closes_canonical = [
+                    normalize_issue_ref(c, default_slug=_slug_default) for c in closes
+                ]
             except IssueRefError as e:
                 output.error(str(e))
                 raise typer.Exit(code=1)
@@ -490,6 +520,7 @@ def register(app: typer.Typer, get_container):
         audit_names = effective_scope
 
         from mship.core.audit_gate import collect_known_worktree_paths
+
         try:
             known = collect_known_worktree_paths(container.state_manager())
         except Exception:
@@ -506,8 +537,11 @@ def register(app: typer.Typer, get_container):
         except Exception:
             active = frozenset()
         report = audit_repos(
-            config, shell, names=audit_names,
-            known_worktree_paths=known, repos_with_active_task=active,
+            config,
+            shell,
+            names=audit_names,
+            known_worktree_paths=known,
+            repos_with_active_task=active,
         )
 
         pending_bypass: list[list[str]] = []
@@ -534,7 +568,9 @@ def register(app: typer.Typer, get_container):
                 for i in r.issues
                 if i.severity == "error"
             )
-            output.print(f"[yellow]warning:[/yellow] spawn proceeding despite audit errors ({error_summary})")
+            output.print(
+                f"[yellow]warning:[/yellow] spawn proceeding despite audit errors ({error_summary})"
+            )
 
         # --- git_root validation: every repo that has a git_root must have
         #     that root included in the target set, otherwise worktree isolation
@@ -546,10 +582,16 @@ def register(app: typer.Typer, get_container):
             if root is not None and root not in target_repos:
                 gitroot_violations.append((r, root))
         if gitroot_violations:
-            output.error("Cannot spawn: some repos share a git_root with repos not in this task.")
-            output.error("Worktree isolation will not work because they share one git checkout.")
+            output.error(
+                "Cannot spawn: some repos share a git_root with repos not in this task."
+            )
+            output.error(
+                "Worktree isolation will not work because they share one git checkout."
+            )
             for r, root in gitroot_violations:
-                output.error(f"  {r} shares git_root with {root!r} (missing from --repos)")
+                output.error(
+                    f"  {r} shares git_root with {root!r} (missing from --repos)"
+                )
             missing = sorted({root for _, root in gitroot_violations})
             if repo_list:
                 suggestion = ",".join(sorted(set(repo_list) | set(missing)))
@@ -557,11 +599,15 @@ def register(app: typer.Typer, get_container):
                 output.error(f"Add missing repos: --repos {suggestion}")
             else:
                 output.error(f"")
-                output.error(f"Add missing repos to the spawn: --repos {','.join(sorted(missing))}")
+                output.error(
+                    f"Add missing repos to the spawn: --repos {','.join(sorted(missing))}"
+                )
             raise typer.Exit(code=1)
 
         if output.is_tty and not skip_setup:
-            output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
+            output.print(
+                "[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]"
+            )
 
         # --- #104 dependency edges ---
         from datetime import datetime, timezone
@@ -582,17 +628,25 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
             slug_for_cycle = slug if slug else slugify(description)
             for up in requested:
-                cycle = find_cycle(existing_state, downstream=slug_for_cycle, new_upstream=up)
+                cycle = find_cycle(
+                    existing_state, downstream=slug_for_cycle, new_upstream=up
+                )
                 if cycle is not None:
                     output.error(f"Cycle detected: {' → '.join(cycle)}")
                     raise typer.Exit(code=1)
             now = datetime.now(timezone.utc)
-            dep_edges = [DependencyEdge(upstream_slug=s, created_at=now) for s in requested]
+            dep_edges = [
+                DependencyEdge(upstream_slug=s, created_at=now) for s in requested
+            ]
 
         from mship.core.worktree import BaseBranchNotFoundError
+
         try:
             result = wt_mgr.spawn(
-                description, repos=repo_list, skip_setup=skip_setup, slug=slug,
+                description,
+                repos=repo_list,
+                skip_setup=skip_setup,
+                slug=slug,
                 workspace_root=container.config_path().parent,
                 offline=offline,
                 depends_on=dep_edges,
@@ -609,9 +663,14 @@ def register(app: typer.Typer, get_container):
             # crash the spawn after its side effects (#410 review).
             try:
                 from mship.core.issue_link import link_issue_to_item
-                _issue_items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+
+                _issue_items = WorkItemStore(
+                    workspace_root / ".mothership" / "workitems"
+                )
                 for _canonical in closes_canonical:
-                    link_issue_to_item(_issue_items, work_item, _canonical, default_slug=None)
+                    link_issue_to_item(
+                        _issue_items, work_item, _canonical, default_slug=None
+                    )
             except Exception as e:
                 output.warning(f"could not link --closes issue(s): {e}")
 
@@ -621,7 +680,9 @@ def register(app: typer.Typer, get_container):
                 log_mgr.append(task.slug, f"BYPASSED AUDIT: spawn — {', '.join(codes)}")
 
         if offline:
-            container.log_manager().append(task.slug, "OFFLINE: passive fetches skipped")
+            container.log_manager().append(
+                task.slug, "OFFLINE: passive fetches skipped"
+            )
 
         if output.is_tty:
             output.success(f"Spawned task: {task.slug}")
@@ -633,8 +694,14 @@ def register(app: typer.Typer, get_container):
             for warning in result.setup_warnings:
                 output.warning(warning)
             if task.worktrees:
-                first_repo = task.affected_repos[0] if task.affected_repos else next(iter(task.worktrees))
-                hint_path = task.worktrees.get(first_repo) or next(iter(task.worktrees.values()))
+                first_repo = (
+                    task.affected_repos[0]
+                    if task.affected_repos
+                    else next(iter(task.worktrees))
+                )
+                hint_path = task.worktrees.get(first_repo) or next(
+                    iter(task.worktrees.values())
+                )
                 output.print("")
                 output.print("[bold]Next:[/bold] cd into the worktree before editing.")
                 output.print(f"  cd {hint_path}")
@@ -673,25 +740,42 @@ def register(app: typer.Typer, get_container):
         task_slug: Optional[str] = typer.Argument(
             None,
             help="Task slug to close (positional). Alternative to --task. "
-                 "Falls back to cwd > MSHIP_TASK when omitted. See #40.",
+            "Falls back to cwd > MSHIP_TASK when omitted. See #40.",
         ),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
-        force: bool = typer.Option(False, "--force", "-f", help="Bypass ALL safety checks (destructive)"),
-        abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
-        skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
-        bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check"),
+        force: bool = typer.Option(
+            False, "--force", "-f", help="Bypass ALL safety checks (destructive)"
+        ),
+        abandon: bool = typer.Option(
+            False, "--abandon", help="Close without finishing (discard PR flow)"
+        ),
+        skip_pr_check: bool = typer.Option(
+            False,
+            "--skip-pr-check",
+            help="Do not call gh; close regardless of PR state",
+        ),
+        bypass_reconcile: bool = typer.Option(
+            False, "--bypass-reconcile", help="Skip upstream PR drift check"
+        ),
         bypass_base_ancestry: bool = typer.Option(
-            False, "--bypass-base-ancestry",
+            False,
+            "--bypass-base-ancestry",
             help="Skip the check that merged PR commits actually reached the base branch",
         ),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        task: Optional[str] = typer.Option(
+            None,
+            "--task",
+            help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var.",
+        ),
         cascade: bool = typer.Option(
-            False, "--cascade",
+            False,
+            "--cascade",
             help="Also remove downstream tasks from state (#104). "
-                 "Their worktrees stay until `mship prune`.",
+            "Their worktrees stay until `mship prune`.",
         ),
         detach_downstream: bool = typer.Option(
-            False, "--detach-downstream",
+            False,
+            "--detach-downstream",
             help="Clear the inbound dependency edges, leave downstream tasks alive (#104).",
         ),
     ):
@@ -714,7 +798,9 @@ def register(app: typer.Typer, get_container):
         if task is None and task_slug is not None:
             task = task_slug
 
-        _run_gate(get_container, command="close", bypass=bypass_reconcile, output=output)
+        _run_gate(
+            get_container, command="close", bypass=bypass_reconcile, output=output
+        )
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
@@ -746,6 +832,7 @@ def register(app: typer.Typer, get_container):
         undelivered_repos: list[tuple[str, str]] = []  # (repo, reason)
         if not force:
             from mship.core.base_resolver import resolve_base
+
             # (repo, commits, branch, base); commits is "?" when the comparison failed
             unrecoverable: list[tuple[str, int | str, str, str]] = []
             for repo_name in task.affected_repos:
@@ -758,12 +845,17 @@ def register(app: typer.Typer, get_container):
                     continue
                 wt_path = Path(wt)
                 eff_base = resolve_base(
-                    repo_name, config.repos[repo_name],
-                    cli_base=None, base_map={}, known_repos=config.repos.keys(),
+                    repo_name,
+                    config.repos[repo_name],
+                    cli_base=None,
+                    base_map={},
+                    known_repos=config.repos.keys(),
                     task_base=task.base_override,
                 )
                 if eff_base is None:
-                    eff_base = "main"  # fall back to main when no base_branch configured
+                    eff_base = (
+                        "main"  # fall back to main when no base_branch configured
+                    )
                 try:
                     # None = the comparison itself failed (count_commits_ahead
                     # can no longer masquerade as 0): the repo must NOT read as
@@ -773,7 +865,9 @@ def register(app: typer.Typer, get_container):
                     if commits == 0:
                         continue  # VERIFIED nothing past base — delivered
                     # Recovery checks
-                    merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
+                    merged = pr_mgr.check_merged_into_base(
+                        wt_path, task.branch, eff_base
+                    )
                     has_pr = repo_name in task.pr_urls
                     pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
                 except Exception:
@@ -785,11 +879,14 @@ def register(app: typer.Typer, get_container):
                     # Recoverable — but merely pushed/PR'd is NOT delivered:
                     # only merged-into-base proves the work reached the base.
                     if not merged:
-                        undelivered_repos.append((
-                            repo_name,
-                            "comparison failed" if commits is None
-                            else f"not merged into {eff_base}",
-                        ))
+                        undelivered_repos.append(
+                            (
+                                repo_name,
+                                "comparison failed"
+                                if commits is None
+                                else f"not merged into {eff_base}",
+                            )
+                        )
                     continue
                 if commits is None:
                     # Comparison failed AND no merge/push/PR evidence: we can't
@@ -817,6 +914,7 @@ def register(app: typer.Typer, get_container):
 
         # --- #104 downstream check ---
         from mship.core.task_graph import downstream_of
+
         downstream = sorted(downstream_of(state, task.slug))
         if downstream and not force:
             if cascade and detach_downstream:
@@ -824,11 +922,15 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
             if not (cascade or detach_downstream):
                 if output.is_tty:
-                    choice = typer.prompt(
-                        f"Task {task.slug!r} has downstream tasks: {', '.join(downstream)}. "
-                        "[c]ascade close downstream, [d]etach edges, [a]bort",
-                        default="a",
-                    ).strip().lower()
+                    choice = (
+                        typer.prompt(
+                            f"Task {task.slug!r} has downstream tasks: {', '.join(downstream)}. "
+                            "[c]ascade close downstream, [d]etach edges, [a]bort",
+                            default="a",
+                        )
+                        .strip()
+                        .lower()
+                    )
                     if choice.startswith("c"):
                         cascade = True
                     elif choice.startswith("d"):
@@ -846,10 +948,12 @@ def register(app: typer.Typer, get_container):
 
         # Determine the log message based on PR state.
         from mship.core.pr import PrStateResult
+
         pr_states: list[str] = []  # parallel to task.pr_urls values
         pr_state_results: list[PrStateResult] = []  # populated when gh check runs
         if task.pr_urls and not skip_pr_check:
             import shutil
+
             if shutil.which("gh") is None and not force:
                 output.error(
                     "gh CLI needed to check PR state. Install gh, or pass --skip-pr-check."
@@ -891,8 +995,7 @@ def register(app: typer.Typer, get_container):
             # Surface the classification reason so users can act on the cause
             # (auth, network, rate limit, etc). See #73.
             unknown_reasons = [
-                r.reason for r in pr_state_results
-                if r.state == "unknown" and r.reason
+                r.reason for r in pr_state_results if r.state == "unknown" and r.reason
             ]
             if unknown_reasons:
                 log_msg = f"closed: pr state unknown ({unknown_reasons[0]})"
@@ -904,9 +1007,17 @@ def register(app: typer.Typer, get_container):
         # was actually integrated into another feat branch that later closed
         # without merging — so the work never reached the configured base.
         bypassed_base_ancestry = False
-        if merged_count and not skip_pr_check and not force and not bypass_base_ancestry:
+        if (
+            merged_count
+            and not skip_pr_check
+            and not force
+            and not bypass_base_ancestry
+        ):
             from mship.core.base_resolver import resolve_base
-            not_reachable: list[tuple[str, str, str, str]] = []  # (repo, url, sha, base)
+
+            not_reachable: list[
+                tuple[str, str, str, str]
+            ] = []  # (repo, url, sha, base)
             unverified: list[tuple[str, str]] = []  # (repo, url)
             for (repo_name, url), state_val in zip(task.pr_urls.items(), pr_states):
                 if state_val != "merged":
@@ -918,8 +1029,11 @@ def register(app: typer.Typer, get_container):
                 if not wt_path.exists():
                     continue
                 eff_base = resolve_base(
-                    repo_name, config.repos[repo_name],
-                    cli_base=None, base_map={}, known_repos=config.repos.keys(),
+                    repo_name,
+                    config.repos[repo_name],
+                    cli_base=None,
+                    base_map={},
+                    known_repos=config.repos.keys(),
                     task_base=task.base_override,
                 )
                 if eff_base is None:
@@ -939,17 +1053,23 @@ def register(app: typer.Typer, get_container):
                     not_reachable.append((repo_name, url, merge_sha, eff_base))
 
             if not_reachable:
-                output.error("Cannot close: merged PR commits are NOT in the base branch.")
+                output.error(
+                    "Cannot close: merged PR commits are NOT in the base branch."
+                )
                 for repo_name, url, sha, base in not_reachable:
                     output.error(f"  {repo_name}: {url}")
-                    output.error(f"    merge commit {sha[:8]} not reachable from origin/{base}")
+                    output.error(
+                        f"    merge commit {sha[:8]} not reachable from origin/{base}"
+                    )
                     output.error(
                         "    PR may have merged into a stacked base that was later closed."
                     )
                 output.error("")
                 output.error("Options:")
                 output.error("  - run `mship reconcile` for full upstream state")
-                output.error("  - rebase/cherry-pick the missing commits onto the base manually")
+                output.error(
+                    "  - rebase/cherry-pick the missing commits onto the base manually"
+                )
                 output.error(
                     "  - `mship close --bypass-base-ancestry` to close anyway "
                     "(the commits will not be tracked)"
@@ -981,11 +1101,14 @@ def register(app: typer.Typer, get_container):
         # (the route excludes them; both are already explicit destructive
         # intents).
         _pushonly_route = (
-            not task.pr_urls and task.finished_at is not None
-            and not abandon and not force
+            not task.pr_urls
+            and task.finished_at is not None
+            and not abandon
+            and not force
         )
-        _midflight = [(r, why) for r, why in undelivered_repos
-                      if why != "worktree missing"]
+        _midflight = [
+            (r, why) for r, why in undelivered_repos if why != "worktree missing"
+        ]
         if _pushonly_route and _midflight and not yes:
             if output.is_tty:
                 lines = "\n".join(f"  {r}: {why}" for r, why in _midflight)
@@ -1014,6 +1137,7 @@ def register(app: typer.Typer, get_container):
 
         if not yes and output.is_tty:
             from InquirerPy import inquirer
+
             confirm = inquirer.confirm(
                 message=f"Close task '{task_slug}'? This will remove all worktrees.",
                 default=False,
@@ -1021,6 +1145,26 @@ def register(app: typer.Typer, get_container):
             if not confirm:
                 output.print("Cancelled")
                 raise typer.Exit(code=0)
+
+        # A retained AppRun is recovery evidence until its exact live owner
+        # acknowledges cleanup.  Do this before lifecycle advancement or any
+        # worktree deletion; --force never authorizes guessing a PID or host.
+        try:
+            from mship.core.run_host import RunHostStore
+            from mship.core.run_transfer import (
+                TaskRunCleanupBlocked,
+                cleanup_task_runs,
+            )
+
+            cleanup_task_runs(
+                task,
+                workspace_store=state_mgr.workspace_store,
+                host_store=RunHostStore(container.state_dir()),
+                warn=output.warning,
+            )
+        except TaskRunCleanupBlocked as exc:
+            output.error(str(exc))
+            raise typer.Exit(code=1)
 
         # Push-only completion: `finish --push-only` → local merge → `close`.
         # The task was finished and its branches pushed, but no PRs ever
@@ -1043,13 +1187,15 @@ def register(app: typer.Typer, get_container):
             and not undelivered_repos
         )
         if (
-            not task.pr_urls and task.finished_at is not None
-            and not abandon and not force and undelivered_repos
+            not task.pr_urls
+            and task.finished_at is not None
+            and not abandon
+            and not force
+            and undelivered_repos
         ):
             _reasons = "; ".join(f"{r}: {why}" for r, why in undelivered_repos)
             output.warning(
-                f"closed without verified delivery ({_reasons}); "
-                f"lifecycle not advanced"
+                f"closed without verified delivery ({_reasons}); lifecycle not advanced"
             )
 
         # Auto-advance bound spec dispatched→implemented when all PRs merged
@@ -1057,6 +1203,7 @@ def register(app: typer.Typer, get_container):
         try:
             from mship.core.spec_store import SPECS_DIRNAME
             from mship.core.spec_lifecycle import advance_spec_on_close
+
             advance_spec_on_close(
                 task=task,
                 specs_dir=Path(container.config_path()).parent / SPECS_DIRNAME,
@@ -1076,6 +1223,7 @@ def register(app: typer.Typer, get_container):
         try:
             from mship.core.workitem_lifecycle import advance_workitem_on_close
             from mship.core.spec_store import SPECS_DIRNAME
+
             _ws_root = Path(container.config_path()).parent
             advance_workitem_on_close(
                 task=task,
@@ -1093,6 +1241,7 @@ def register(app: typer.Typer, get_container):
         # advances above: failures warn, the close never blocks on them.
         try:
             from mship.core.issue_close import close_linked_issues
+
             close_linked_issues(
                 task=task,
                 workitems=container.workitem_store(),
@@ -1115,14 +1264,20 @@ def register(app: typer.Typer, get_container):
         # the spec advanced while the task stays open. So this hook is always
         # fail-open: a failure is warned and the close still proceeds.
         from mship.core.lifecycle_hooks import HookContext, run_hooks
+
         hook_results = run_hooks(
-            "task.closed", HookContext(task_slug=task_slug),
-            config=config, workspace_root=Path(container.config_path()).parent,
-            shell=container.shell(), state_manager=state_mgr,
+            "task.closed",
+            HookContext(task_slug=task_slug),
+            config=config,
+            workspace_root=Path(container.config_path()).parent,
+            shell=container.shell(),
+            state_manager=state_mgr,
         )
         for hr in hook_results:
             if not hr.ok:
-                output.warning(f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}")
+                output.warning(
+                    f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}"
+                )
 
         # Scratch refs left on run hosts by `--remote` (spec remote-exact-copy).
         # Fail-open like the spec/WorkItem advances above: a run host that is
@@ -1132,9 +1287,13 @@ def register(app: typer.Typer, get_container):
         try:
             from mship.core.run_host import RunHostStore
             from mship.core.run_transfer import cleanup_run_refs
+
             cleanup_run_refs(
-                task, config=config, store=RunHostStore(container.state_dir()),
-                shell=container.shell(), warn=output.warning,
+                task,
+                config=config,
+                store=RunHostStore(container.state_dir()),
+                shell=container.shell(),
+                warn=output.warning,
             )
         except Exception:
             pass
@@ -1142,20 +1301,28 @@ def register(app: typer.Typer, get_container):
         wt_mgr = container.worktree_manager()
         from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
         from mship.core.worktree import WorktreeDirtyError
+
         try:
-            wt_mgr.abort(task_slug, force=force)  # core method retains the name; only CLI verb changed
+            wt_mgr.abort(
+                task_slug, force=force
+            )  # core method retains the name; only CLI verb changed
         except WorktreeDirtyError as e:
             output.error(str(e))
-            output.error("Resolve the changes (commit/push), or re-run `mship close --force` to discard them.")
+            output.error(
+                "Resolve the changes (commit/push), or re-run `mship close --force` to discard them."
+            )
             raise typer.Exit(code=1)
         except TaskMetadataRetentionConflictError as e:
             output.error(str(e))
             raise typer.Exit(code=1)
 
         if downstream and detach_downstream:
+
             def _detach(tasks):
                 for t in tasks.values():
-                    t.depends_on = [e for e in t.depends_on if e.upstream_slug != task.slug]
+                    t.depends_on = [
+                        e for e in t.depends_on if e.upstream_slug != task.slug
+                    ]
 
             state_mgr.mutate_tasks(downstream, _detach)
         elif downstream and cascade:
@@ -1184,6 +1351,7 @@ def register(app: typer.Typer, get_container):
         log_mgr.append(task_slug, log_msg)
         try:
             from mship.core.reconcile.cache import ReconcileCache
+
             ReconcileCache(container.state_dir()).remove_ignore(task_slug)
         except Exception:
             pass
@@ -1192,6 +1360,7 @@ def register(app: typer.Typer, get_container):
         # (spec mship-dispatch-v2 ac6). Best-effort: cleanup never blocks close.
         try:
             from mship.core.sdd_store import SddStore
+
             sdd_store = SddStore(container.state_dir())
             sdd_store.remove_task(task_slug)
             if downstream and cascade:
@@ -1204,73 +1373,110 @@ def register(app: typer.Typer, get_container):
         # Post-op diagnostic: if any affected repo's main-checkout path is
         # dirty after close completed, capture a snapshot. Silent — users
         # see the snapshot count via `mship doctor`. See spec 2026-04-21.
-        _capture_dirty_main_post_op("close", task, config, container.shell(), container.state_dir())
+        _capture_dirty_main_post_op(
+            "close", task, config, container.shell(), container.state_dir()
+        )
 
     @app.command(rich_help_panel="Workflow")
     def finish(
-        handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
-        base: Optional[str] = typer.Option(None, "--base", help="Global override of PR base branch for all repos"),
-        base_map: Optional[str] = typer.Option(None, "--base-map", help="Per-repo PR base overrides, e.g. 'cli=main,api=release/x'"),
-        force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
-        push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
-        bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
-        bypass_deps: bool = typer.Option(False, "--bypass-deps", help="Skip the dependency-readiness check (#104)."),
+        handoff: bool = typer.Option(
+            False, "--handoff", help="Generate CI handoff manifest"
+        ),
+        base: Optional[str] = typer.Option(
+            None, "--base", help="Global override of PR base branch for all repos"
+        ),
+        base_map: Optional[str] = typer.Option(
+            None,
+            "--base-map",
+            help="Per-repo PR base overrides, e.g. 'cli=main,api=release/x'",
+        ),
+        force_audit: bool = typer.Option(
+            False, "--force-audit", help="Bypass audit gate for this finish"
+        ),
+        push_only: bool = typer.Option(
+            False, "--push-only", help="Push branches only; skip gh pr create"
+        ),
+        bypass_reconcile: bool = typer.Option(
+            False,
+            "--bypass-reconcile",
+            help="Skip upstream PR drift check for this finish",
+        ),
+        bypass_deps: bool = typer.Option(
+            False, "--bypass-deps", help="Skip the dependency-readiness check (#104)."
+        ),
         body: Optional[str] = typer.Option(
-            None, "--body",
+            None,
+            "--body",
             help="Inline PR body. Use '-' to read from stdin. Mutually exclusive with --body-file.",
         ),
         body_file: Optional[str] = typer.Option(
-            None, "--body-file",
+            None,
+            "--body-file",
             help="Read PR body from this file. Use '-' to read from stdin. "
-                 "Mutually exclusive with --body. "
-                 "Recommended for agents: write a Summary + Test plan rather than "
-                 "letting finish fall back to the task description.",
+            "Mutually exclusive with --body. "
+            "Recommended for agents: write a Summary + Test plan rather than "
+            "letting finish fall back to the task description.",
         ),
         body_map: Optional[str] = typer.Option(
-            None, "--body-map",
+            None,
+            "--body-map",
             help="Per-repo PR body overrides, e.g. 'shared=/tmp/shared.md,api=/tmp/api.md'. "
-                 "Each value is a path to a markdown file. Repos not in the map fall back "
-                 "to --body / --body-file, then to the task description. See #114.",
+            "Each value is a path to a markdown file. Repos not in the map fall back "
+            "to --body / --body-file, then to the task description. See #114.",
         ),
         force: bool = typer.Option(
-            False, "--force", "-f",
+            False,
+            "--force",
+            "-f",
             help="Push new commits to an already-finished task's existing PR(s). "
-                 "Updates finished_at and appends a `re-finished` journal entry. "
-                 "Does not touch the PR body — use `gh pr edit` for that.",
+            "Updates finished_at and appends a `re-finished` journal entry. "
+            "Does not touch the PR body — use `gh pr edit` for that.",
         ),
         no_require_tests: bool = typer.Option(
-            False, "--no-require-tests",
+            False,
+            "--no-require-tests",
             help="Opt out of the default test-evidence gate: open the PR even "
-                 "when a repo with a configured test target lacks passing "
-                 "evidence. Prints a waiver line. Legitimate for evidence-less "
-                 "tasks; not bypass-logged.",
+            "when a repo with a configured test target lacks passing "
+            "evidence. Prints a waiver line. Legitimate for evidence-less "
+            "tasks; not bypass-logged.",
         ),
         require_tests: bool = typer.Option(
-            False, "--require-tests", hidden=True,
+            False,
+            "--require-tests",
+            hidden=True,
             help="Deprecated no-op: test evidence is now required by default. "
-                 "Use --no-require-tests to opt out.",
+            "Use --no-require-tests to opt out.",
         ),
         require_evidence: bool = typer.Option(
-            False, "--require-evidence",
+            False,
+            "--require-evidence",
             help="Block finish when any acceptance criterion on the bound spec lacks "
-                 "evidence. Default: WARN only. Mirrors --require-tests. "
-                 "See ac-evidence-loop.",
+            "evidence. Default: WARN only. Mirrors --require-tests. "
+            "See ac-evidence-loop.",
         ),
         title: Optional[str] = typer.Option(
-            None, "--title",
+            None,
+            "--title",
             help="Override the PR title (default: task.description). "
-                 "Multi-repo tasks use the same title for every PR. See #45.",
+            "Multi-repo tasks use the same title for every PR. See #45.",
         ),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        task: Optional[str] = typer.Option(
+            None,
+            "--task",
+            help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var.",
+        ),
         token: Optional[str] = typer.Option(
-            None, "--token", help="GitHub token for push + PR creation in "
+            None,
+            "--token",
+            help="GitHub token for push + PR creation in "
             "credential-less environments (else GH_TOKEN / GITHUB_TOKEN).",
         ),
         hotfix: bool = typer.Option(
-            False, "--hotfix",
+            False,
+            "--hotfix",
             help="Bypass the WorkItem gate for this finish (no WorkItem, or a "
-                 "feature WorkItem without an approved spec). Downgrades the "
-                 "block to a warning and records a bypass-log entry.",
+            "feature WorkItem without an approved spec). Downgrades the "
+            "block to a warning and records a bypass-log entry.",
         ),
     ):
         """Create PRs across repos in dependency order."""
@@ -1294,7 +1500,9 @@ def register(app: typer.Typer, get_container):
         if force and handoff:
             output.error("--force is incompatible with --handoff")
             raise typer.Exit(code=1)
-        if force and (body is not None or body_file is not None or body_map is not None):
+        if force and (
+            body is not None or body_file is not None or body_map is not None
+        ):
             output.error(
                 "--force doesn't touch PR bodies — use `gh pr edit <url> --body-file <path>` "
                 "to update an existing PR body"
@@ -1314,8 +1522,12 @@ def register(app: typer.Typer, get_container):
         if body is not None and body_file is not None:
             output.error("--body and --body-file are mutually exclusive")
             raise typer.Exit(code=1)
-        if (body is not None or body_file is not None or body_map is not None) and (push_only or handoff):
-            output.error("--body/--body-file/--body-map has no effect with --push-only or --handoff")
+        if (body is not None or body_file is not None or body_map is not None) and (
+            push_only or handoff
+        ):
+            output.error(
+                "--body/--body-file/--body-map has no effect with --push-only or --handoff"
+            )
             raise typer.Exit(code=1)
         custom_body: Optional[str] = None
         if body is not None:
@@ -1346,6 +1558,7 @@ def register(app: typer.Typer, get_container):
             UnknownRepoInBodyMapError,
             parse_body_map,
         )
+
         try:
             body_map_parsed = parse_body_map(body_map or "")
         except InvalidBodyMapError as e:
@@ -1358,6 +1571,7 @@ def register(app: typer.Typer, get_container):
             parse_base_map,
             resolve_base,
         )
+
         try:
             parsed_map = parse_base_map(base_map or "")
         except InvalidBaseMapError as e:
@@ -1378,8 +1592,13 @@ def register(app: typer.Typer, get_container):
         # Scoped to this task only — drift on another, unrelated task must not
         # block this one's finish (#455 Part 2).
         _run_gate(
-            get_container, command="finish", bypass=bypass_reconcile, output=output,
-            only_slug=t.slug, cli_base=base, base_map=parsed_map,
+            get_container,
+            command="finish",
+            bypass=bypass_reconcile,
+            output=output,
+            only_slug=t.slug,
+            cli_base=base,
+            base_map=parsed_map,
         )
 
         # --- WorkItem gate: every task must be linked to a WorkItem, and a
@@ -1399,6 +1618,7 @@ def register(app: typer.Typer, get_container):
         # --hotfix can still override it, and the non-hotfix path still exits
         # cleanly via output.error rather than a traceback.
         from mship.core import workitem_gate
+
         workspace_root = container.config_path().parent
         canonical_workitems = container.workitem_store()
         try:
@@ -1414,7 +1634,9 @@ def register(app: typer.Typer, get_container):
             )
         if not gate_result.ok:
             if hotfix:
-                output.warning(f"WorkItem gate bypassed (--hotfix): {gate_result.reason}")
+                output.warning(
+                    f"WorkItem gate bypassed (--hotfix): {gate_result.reason}"
+                )
                 workitem_gate.log_hotfix(workspace_root, "finish", task.slug)
             else:
                 output.error(f"Cannot finish: {gate_result.reason}")
@@ -1427,6 +1649,7 @@ def register(app: typer.Typer, get_container):
         if getattr(task, "work_item_id", None):
             try:
                 from mship.core.issue_link import linked_issue_refs
+
                 _wi = canonical_workitems.get(task.work_item_id)
                 if _wi is not None:
                     linked_issue_canonicals = linked_issue_refs(_wi)
@@ -1439,6 +1662,7 @@ def register(app: typer.Typer, get_container):
 
         # Load --body-map files now that task.affected_repos is available.
         from mship.core.body_resolver import load_body_map
+
         try:
             body_map_loaded = load_body_map(body_map_parsed, task.affected_repos)
         except UnknownRepoInBodyMapError as e:
@@ -1452,6 +1676,7 @@ def register(app: typer.Typer, get_container):
         if task.depends_on and not bypass_deps:
             decisions = _dependency_decisions(state)
             from mship.core.task_graph import is_ready
+
             blocked_by = [
                 edge.upstream_slug
                 for edge in task.depends_on
@@ -1466,11 +1691,16 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
 
         # --- Audit gate ---
-        from mship.core.audit_gate import run_audit_gate, AuditGateBlocked, compute_finish_audit_scope
+        from mship.core.audit_gate import (
+            run_audit_gate,
+            AuditGateBlocked,
+            compute_finish_audit_scope,
+        )
         from mship.core.repo_state import audit_repos
 
         shell = container.shell()
         from mship.core.audit_gate import collect_known_worktree_paths
+
         try:
             known = collect_known_worktree_paths(container.state_manager())
         except Exception:
@@ -1480,8 +1710,11 @@ def register(app: typer.Typer, get_container):
         # is unchanged — keyed off the error code, not the message.)
         active = frozenset(task.affected_repos)
         report = audit_repos(
-            config, shell, names=task.affected_repos,
-            known_worktree_paths=known, repos_with_active_task=active,
+            config,
+            shell,
+            names=task.affected_repos,
+            known_worktree_paths=known,
+            repos_with_active_task=active,
         )
 
         # finish is what creates the upstream via `git push -u` — so while the
@@ -1490,6 +1723,7 @@ def register(app: typer.Typer, get_container):
         # out of the gate's report; standalone `mship audit` still reports it.
         if task.finished_at is None:
             from mship.core.repo_state import without_no_upstream_on_task_branch
+
             report = without_no_upstream_on_task_branch(report, task.branch)
 
         # issue 366 #5: a config-only main-checkout edit (mothership.yaml /
@@ -1497,13 +1731,17 @@ def register(app: typer.Typer, get_container):
         # dirty_worktree on it. Fails closed: any non-config tracked drift is
         # retained by the filter and re-blocks the gate. spawn/exec unchanged.
         from mship.core.repo_state import without_config_only_dirty
+
         report = without_config_only_dirty(report)
 
         # Scope blocking to repos that will actually produce a PR (have local
         # commits past their base) plus their transitive deps. Drift in repos
         # that won't be pushed is informational, not blocking. See #112.
         scope_repos = compute_finish_audit_scope(
-            task, config, graph, container.pr_manager(),
+            task,
+            config,
+            graph,
+            container.pr_manager(),
         )
 
         def _log_bypass(codes: list[str]) -> None:
@@ -1525,7 +1763,9 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         if report.has_errors and not config.audit.block_finish and not force_audit:
-            output.print("[yellow]warning:[/yellow] finish proceeding despite audit errors")
+            output.print(
+                "[yellow]warning:[/yellow] finish proceeding despite audit errors"
+            )
 
         if handoff:
             from mship.core.handoff import generate_handoff
@@ -1547,18 +1787,21 @@ def register(app: typer.Typer, get_container):
             if output.is_tty:
                 output.success(f"Handoff manifest written to: {path}")
             else:
-                output.json({
-                    "handoff": str(path),
-                    "task": task.slug,
-                    "resolved_task": resolved_finish.task.slug,
-                    "resolution_source": resolved_finish.source,
-                })
+                output.json(
+                    {
+                        "handoff": str(path),
+                        "task": task.slug,
+                        "resolved_task": resolved_finish.task.slug,
+                        "resolution_source": resolved_finish.source,
+                    }
+                )
             return
 
         # PR creation flow
         pr_mgr = container.pr_manager()
         from mship.core.gh_auth import broker_config_from_env, resolve_token
         from mship.core.gh_preflight import repo_owner_names_from_config
+
         # Broker-pull fallback repo set: this task's affected repos, falling
         # back to every non-git_root repo in the workspace when the task has
         # none recorded (mirrors bootstrap's repo-set derivation).
@@ -1573,7 +1816,9 @@ def register(app: typer.Typer, get_container):
         broker_repos = [_owner_map[n] for n in finish_repos if n in _owner_map]
         broker_url, broker_bearer = broker_config_from_env()
         gh_token = resolve_token(
-            token, broker_url=broker_url, broker_bearer=broker_bearer,
+            token,
+            broker_url=broker_url,
+            broker_bearer=broker_bearer,
             repos=broker_repos or finish_repos,
         )
 
@@ -1596,9 +1841,12 @@ def register(app: typer.Typer, get_container):
                     raise typer.Exit(code=1)
                 if output.is_tty:
                     output.print(f"  {repo_name}: {task.branch} pushed")
-                push_list.append({"repo": repo_name, "branch": task.branch, "pushed": True})
+                push_list.append(
+                    {"repo": repo_name, "branch": task.branch, "pushed": True}
+                )
 
             from datetime import datetime as _dt, timezone as _tz
+
             if task.finished_at is None:
                 now = _dt.now(_tz.utc)
 
@@ -1609,16 +1857,22 @@ def register(app: typer.Typer, get_container):
                 task.finished_at = now
 
             if output.is_tty:
-                output.print("[green]Branch pushed.[/green] After merge/review, run `mship close` to clean up.")
+                output.print(
+                    "[green]Branch pushed.[/green] After merge/review, run `mship close` to clean up."
+                )
             else:
-                output.json({
-                    "task": task.slug,
-                    "pushed": [p["repo"] for p in push_list],
-                    "finished_at": task.finished_at.isoformat(),
-                    "resolved_task": resolved_finish.task.slug,
-                    "resolution_source": resolved_finish.source,
-                })
-                output.print("Branch pushed. After merge/review, run `mship close` to clean up.")
+                output.json(
+                    {
+                        "task": task.slug,
+                        "pushed": [p["repo"] for p in push_list],
+                        "finished_at": task.finished_at.isoformat(),
+                        "resolved_task": resolved_finish.task.slug,
+                        "resolution_source": resolved_finish.source,
+                    }
+                )
+                output.print(
+                    "Branch pushed. After merge/review, run `mship close` to clean up."
+                )
             return
 
         if gh_token is None:
@@ -1678,13 +1932,18 @@ def register(app: typer.Typer, get_container):
         # affected repo is empty AND no prior PRs exist, the error is still
         # the right signal (nothing to do at all). See #83.
         untouched_repos = {repo_name for repo_name, _, _ in empty_branches}
-        if empty_branches and not task.pr_urls and len(untouched_repos) == len(
-            [n for n in effective_bases if n not in task.pr_urls]
+        if (
+            empty_branches
+            and not task.pr_urls
+            and len(untouched_repos)
+            == len([n for n in effective_bases if n not in task.pr_urls])
         ):
             output.error("No commits to push — nothing to PR:")
             for repo_name, branch, eff_base in empty_branches:
                 output.error(f"  {repo_name}: {branch} has no commits past {eff_base}")
-            output.error("Commit your changes in each worktree, or run `mship close --yes --abandon`.")
+            output.error(
+                "Commit your changes in each worktree, or run `mship close --yes --abandon`."
+            )
             raise typer.Exit(code=1)
 
         # --- Test-evidence gate (#81) ---
@@ -1693,7 +1952,9 @@ def register(app: typer.Typer, get_container):
         # `not_applicable: [test]` can't produce evidence and only warn.
         # Skipped-untouched repos don't need evidence (we're not finishing them).
         from mship.core.test_evidence import (
-            decide_finish_gate, format_missing_summary, read_evidence,
+            decide_finish_gate,
+            format_missing_summary,
+            read_evidence,
         )
 
         evidence_repo_paths: dict[str, Path] = {}
@@ -1711,12 +1972,13 @@ def register(app: typer.Typer, get_container):
             update={"affected_repos": list(evidence_repo_paths.keys())}
         )
         evidence = read_evidence(
-            evidence_task, container.log_manager(),
-            shell=shell, repo_paths=evidence_repo_paths,
+            evidence_task,
+            container.log_manager(),
+            shell=shell,
+            repo_paths=evidence_repo_paths,
         )
         exempt_repos = {
-            r for r in evidence_repo_paths
-            if "test" in config.repos[r].not_applicable
+            r for r in evidence_repo_paths if "test" in config.repos[r].not_applicable
         }
         decision = decide_finish_gate(evidence, exempt_repos, opt_out=no_require_tests)
         # Name exempt repos in EVERY outcome that has them, not only the
@@ -1736,7 +1998,7 @@ def register(app: typer.Typer, get_container):
                 output.error(f"  {line}")
             output.error(
                 "Run `mship test`, record evidence via "
-                "`mship journal \"tests verified externally\" --test-state pass`, "
+                '`mship journal "tests verified externally" --test-state pass`, '
                 "or pass --no-require-tests to waive."
             )
             raise typer.Exit(code=1)
@@ -1759,8 +2021,11 @@ def register(app: typer.Typer, get_container):
         # via the task's WorkItem link; no bound spec ⇒ no-op. `bound_spec` is
         # reused by the PR-body assembly below (build_acceptance_block).
         from mship.core.workitem_gate import resolve_bound_spec
+
         try:
-            bound_spec = resolve_bound_spec(task, workspace_root, workitems=canonical_workitems)
+            bound_spec = resolve_bound_spec(
+                task, workspace_root, workitems=canonical_workitems
+            )
         except Exception as e:
             # The bound spec should exist but couldn't be resolved (ambiguous slug,
             # missing linked spec, or a corrupt store). Never SILENTLY skip a required
@@ -1770,22 +2035,32 @@ def register(app: typer.Typer, get_container):
                     "Could not resolve the bound spec to verify acceptance-criteria "
                     f"evidence — blocking finish (--require-evidence): {e}"
                 )
-                output.error("Resolve the spec binding or drop --require-evidence, then retry.")
+                output.error(
+                    "Resolve the spec binding or drop --require-evidence, then retry."
+                )
                 raise typer.Exit(code=1)
-            output.warning(f"Could not check acceptance-criteria evidence (spec binding unresolved): {e}")
+            output.warning(
+                f"Could not check acceptance-criteria evidence (spec binding unresolved): {e}"
+            )
             bound_spec = None
         if bound_spec is not None:
-            unverified_acs = [c.id for c in bound_spec.acceptance_criteria if not c.evidence]
+            unverified_acs = [
+                c.id for c in bound_spec.acceptance_criteria if not c.evidence
+            ]
             if unverified_acs:
                 if require_evidence:
-                    output.error("Acceptance criteria without evidence — blocking finish (--require-evidence):")
+                    output.error(
+                        "Acceptance criteria without evidence — blocking finish (--require-evidence):"
+                    )
                     output.error(f"  {bound_spec.id}: {', '.join(unverified_acs)}")
                     output.error(
                         "Attach evidence via `mship spec evidence <spec> <ac> <ref>`, then retry."
                     )
                     raise typer.Exit(code=1)
                 output.warning("Acceptance-criteria evidence warnings:")
-                output.warning(f"  {bound_spec.id}: {', '.join(unverified_acs)} lack evidence")
+                output.warning(
+                    f"  {bound_spec.id}: {', '.join(unverified_acs)} lack evidence"
+                )
                 output.warning(
                     "Pass `--require-evidence` to treat as blocking, or attach evidence via "
                     "`mship spec evidence <spec> <ac> <ref>`."
@@ -1824,12 +2099,17 @@ def register(app: typer.Typer, get_container):
                 if _al_artifact is not None:
                     bound_spec = _al_artifact.spec
                     _al_links = compute_evidence_links(
-                        bound_spec, _al_commits, passing_test_run_refs(task),
+                        bound_spec,
+                        _al_commits,
+                        passing_test_run_refs(task),
                     )
                     if _al_links:
                         for _al_link in _al_links:
                             set_criterion_evidence(
-                                bound_spec, _al_link.criterion_id, _al_link.kind, _al_link.ref,
+                                bound_spec,
+                                _al_link.criterion_id,
+                                _al_link.kind,
+                                _al_link.ref,
                             )
                         bound_spec.updated_at = _dt_al.now(_tz_al.utc)
                         _al_store.save_while_locked(bound_spec, _al_artifact)
@@ -1845,6 +2125,7 @@ def register(app: typer.Typer, get_container):
         # emitted before that repo's PR is created; opening the PR never depends
         # on it. Empty string when there's no bound spec or no ACs.
         from mship.core.pr import acceptance_block_for_finish
+
         _acceptance_blocks: dict[Path, str] = {}
         _acceptance_warnings: set[str] = set()
 
@@ -1853,11 +2134,18 @@ def register(app: typer.Typer, get_container):
                 return ""
             if repo_path not in _acceptance_blocks:
                 block, evidence_warning = acceptance_block_for_finish(
-                    bound_spec, workspace_root, repo_path, shell, config,
+                    bound_spec,
+                    workspace_root,
+                    repo_path,
+                    shell,
+                    config,
                     token=gh_token,
                 )
                 _acceptance_blocks[repo_path] = block
-                if evidence_warning is not None and evidence_warning not in _acceptance_warnings:
+                if (
+                    evidence_warning is not None
+                    and evidence_warning not in _acceptance_warnings
+                ):
                     _acceptance_warnings.add(evidence_warning)
                     output.warning(evidence_warning)
             return _acceptance_blocks[repo_path]
@@ -1888,7 +2176,9 @@ def register(app: typer.Typer, get_container):
             if stale_repos:
                 output.warning("Task has unpushed commits since last finish:")
                 for repo_name, n in stale_repos:
-                    output.warning(f"  {repo_name}: {n} commits past origin/{task.branch}")
+                    output.warning(
+                        f"  {repo_name}: {n} commits past origin/{task.branch}"
+                    )
                 output.warning("Pass `--force` to push them to the existing PR(s).")
 
         groups = _build_pr_groups(ordered, config, task, effective_bases)
@@ -1904,21 +2194,22 @@ def register(app: typer.Typer, get_container):
             # --- Skip path: all members have zero commits past base (#83).
             # Members that already have a PR URL are handled by the next branch;
             # this one is strictly "nothing to push, no PR yet."
-            if (
-                all(m in untouched_repos for m in group.members)
-                and not any(m in task.pr_urls for m in group.members)
+            if all(m in untouched_repos for m in group.members) and not any(
+                m in task.pr_urls for m in group.members
             ):
                 base_label = group.base or "(default)"
                 if output.is_tty:
                     output.print(
                         f"  {members_str}: skipped — no commits past {base_label}"
                     )
-                skipped_untouched.append({
-                    "repo": group.rep_name,
-                    "members": list(group.members),
-                    "base": group.base,
-                    "reason": "no_commits_ahead",
-                })
+                skipped_untouched.append(
+                    {
+                        "repo": group.rep_name,
+                        "members": list(group.members),
+                        "base": group.base,
+                        "reason": "no_commits_ahead",
+                    }
+                )
                 continue
 
             # --- Skip path: every member already has the PR URL recorded.
@@ -1927,13 +2218,15 @@ def register(app: typer.Typer, get_container):
                 url = task.pr_urls[group.rep_name]
                 if output.is_tty:
                     output.print(f"  {members_str}: already has PR {url}")
-                pr_list.append({
-                    "repo": group.rep_name,
-                    "members": list(group.members),
-                    "url": url,
-                    "order": i,
-                    "base": group.base,
-                })
+                pr_list.append(
+                    {
+                        "repo": group.rep_name,
+                        "members": list(group.members),
+                        "url": url,
+                        "order": i,
+                        "base": group.base,
+                    }
+                )
                 continue
 
             # --- --force re-push path: branch exists on origin, push new commits.
@@ -1948,13 +2241,15 @@ def register(app: typer.Typer, get_container):
                 url = task.pr_urls[group.rep_name]
                 if output.is_tty:
                     output.print(f"  {members_str}: {task.branch} re-pushed to {url}")
-                pr_list.append({
-                    "repo": group.rep_name,
-                    "members": list(group.members),
-                    "url": url,
-                    "order": i,
-                    "base": group.base,
-                })
+                pr_list.append(
+                    {
+                        "repo": group.rep_name,
+                        "members": list(group.members),
+                        "url": url,
+                        "order": i,
+                        "base": group.base,
+                    }
+                )
                 continue
 
             # --- Fresh path: push, ensure_upstream, find-or-create PR.
@@ -1976,7 +2271,11 @@ def register(app: typer.Typer, get_container):
             else:
                 # Build the PR body — appends `Closes #N` for any GitHub issue
                 # references in the task description, log entries, or commit subjects.
-                from mship.core.issue_refs import append_closes_footer, extract_issue_refs
+                from mship.core.issue_refs import (
+                    append_closes_footer,
+                    extract_issue_refs,
+                )
+
                 texts: list[str] = [task.description]
                 try:
                     entries = container.log_manager().read(task.slug)
@@ -1992,6 +2291,7 @@ def register(app: typer.Typer, get_container):
                 try:
                     eff_base = group.base or "HEAD"
                     import shlex as _shlex
+
                     subjects_res = shell.run(
                         f"git log --format=%s origin/{_shlex.quote(eff_base)}..{_shlex.quote(task.branch)}",
                         cwd=group.rep_path,
@@ -2021,8 +2321,10 @@ def register(app: typer.Typer, get_container):
                 if linked_issue_canonicals:
                     from mship.core.issue_link import slug_for_path
                     from mship.core.issue_refs import append_linked_closes
+
                     pr_body = append_linked_closes(
-                        pr_body, linked_issue_canonicals, slug_for_path(group.rep_path))
+                        pr_body, linked_issue_canonicals, slug_for_path(group.rep_path)
+                    )
                 acceptance_block = acceptance_block_for(group.rep_path)
                 if acceptance_block:
                     pr_body = pr_body + acceptance_block
@@ -2051,17 +2353,21 @@ def register(app: typer.Typer, get_container):
                 allow_unreadable_workitem=hotfix,
             )
 
-            pr_list.append({
-                "repo": group.rep_name,
-                "members": list(group.members),
-                "url": pr_url,
-                "order": i,
-                "base": group.base,
-            })
+            pr_list.append(
+                {
+                    "repo": group.rep_name,
+                    "members": list(group.members),
+                    "url": pr_url,
+                    "order": i,
+                    "base": group.base,
+                }
+            )
 
             base_label = group.base or "(default)"
             if output.is_tty:
-                output.print(f"  {members_str}: {task.branch} → {base_label}  ✓ {pr_url}")
+                output.print(
+                    f"  {members_str}: {task.branch} → {base_label}  ✓ {pr_url}"
+                )
 
         # Update PRs with coordination blocks (multi-repo only). Skip under
         # --force re-push so we don't clobber a user's manual PR-body edits.
@@ -2085,7 +2391,9 @@ def register(app: typer.Typer, get_container):
                     repo=pr_info["repo"],
                     action="re-finished",
                 )
-            elif pr_info["repo"] not in task.pr_urls or pr_info["url"] != task.pr_urls.get(pr_info["repo"]):
+            elif pr_info["repo"] not in task.pr_urls or pr_info[
+                "url"
+            ] != task.pr_urls.get(pr_info["repo"]):
                 # Newly-created PR this run
                 log_mgr.append(
                     t.slug,
@@ -2100,10 +2408,15 @@ def register(app: typer.Typer, get_container):
             from datetime import datetime as _dt_ann, timezone as _tz_ann
             from mship.core.message_store import MessageStore
             from mship.core.pr_watcher import announce_prs_on_thread
+
             _md = workspace_root / ".mothership"
             announce_prs_on_thread(
-                MessageStore(_md / "messages"), canonical_workitems,
-                t.slug, task, pr_list, _dt_ann.now(_tz_ann.utc),
+                MessageStore(_md / "messages"),
+                canonical_workitems,
+                t.slug,
+                task,
+                pr_list,
+                _dt_ann.now(_tz_ann.utc),
             )
         except Exception as e:
             output.warning(f"could not post the PR url to the task thread: {e}")
@@ -2117,17 +2430,24 @@ def register(app: typer.Typer, get_container):
         # can't cleanly abort the finish. This hook is always fail-open: a
         # failure is warned and finish still proceeds to stamp finished_at.
         from mship.core.lifecycle_hooks import HookContext, run_hooks
+
         hook_results = run_hooks(
-            "task.finished", HookContext(task_slug=t.slug),
-            config=config, workspace_root=workspace_root, shell=shell,
+            "task.finished",
+            HookContext(task_slug=t.slug),
+            config=config,
+            workspace_root=workspace_root,
+            shell=shell,
             state_manager=state_mgr,
         )
         for hr in hook_results:
             if not hr.ok:
-                output.warning(f"lifecycle hook '{hr.hook_name}' for task.finished failed: {hr.error}")
+                output.warning(
+                    f"lifecycle hook '{hr.hook_name}' for task.finished failed: {hr.error}"
+                )
 
         # Stamp finished_at on successful PR creation OR on --force re-push.
         from datetime import datetime as _dt, timezone as _tz
+
         if task.finished_at is None or force:
             now = _dt.now(_tz.utc)
 
@@ -2146,18 +2466,24 @@ def register(app: typer.Typer, get_container):
             else:
                 output.success(f"Created {len(pr_list)} PR(s) for task: {task.slug}")
             if len(pr_list) > 1 and not force:
-                output.print("Merge in dependency order as shown in each PR description.")
-            output.print("[green]Task finished.[/green] After merge, run `mship close` to clean up.")
+                output.print(
+                    "Merge in dependency order as shown in each PR description."
+                )
+            output.print(
+                "[green]Task finished.[/green] After merge, run `mship close` to clean up."
+            )
         else:
-            output.json({
-                "task": task.slug,
-                "prs": pr_list,
-                "re_pushed": repushed_repos,
-                "skipped_untouched": skipped_untouched,
-                "finished_at": task.finished_at.isoformat(),
-                "resolved_task": resolved_finish.task.slug,
-                "resolution_source": resolved_finish.source,
-            })
+            output.json(
+                {
+                    "task": task.slug,
+                    "prs": pr_list,
+                    "re_pushed": repushed_repos,
+                    "skipped_untouched": skipped_untouched,
+                    "finished_at": task.finished_at.isoformat(),
+                    "resolved_task": resolved_finish.task.slug,
+                    "resolution_source": resolved_finish.source,
+                }
+            )
             output.print("Task finished. After merge, run `mship close` to clean up.")
 
         # Post-op diagnostic: if any affected repo's main-checkout path is

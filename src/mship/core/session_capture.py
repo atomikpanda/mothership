@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ class SessionCaptureSelection:
     run: AppRun
     host: HostRegistration
     operation: ToolRequest
+    platform: str | None = None
 
 
 def _host_for_run(run: AppRun, *, store: WorkspaceStore) -> HostRegistration:
@@ -55,49 +57,58 @@ def select_session_capture(
     run_id: str | None,
     platform: str | None,
     operation_name: str = "capture",
+    choose: Callable[[Sequence[AppRun]], AppRun] | None = None,
+    profile_name: str | None = None,
+    host_name: str | None = None,
+    target_alias: str | None = None,
 ) -> SessionCaptureSelection:
-    """Resolve exactly one healthy AppRun and build a context-free observe request."""
-    if (
-        not isinstance(operation_name, str)
-        or not operation_name
-        or (
-            operation_name == "capture"
-            and (not isinstance(platform, str) or not platform)
-        )
-    ):
+    """Select recorded identity, never discover a new target or prepare source."""
+    from mship.core.persistence.app_run_repository import PrivateBindingError
+
+    if not isinstance(operation_name, str) or not operation_name:
         raise SessionCaptureError("recorded run operation is invalid")
     with store.read() as transaction:
-        if run_id is None:
+        if run_id is not None:
+            run = transaction.app_runs.get(transaction.connection, run_id)
+            candidates = [] if run is None else [run]
+        else:
             candidates = transaction.app_runs.list_candidates(
                 transaction.connection, task_slug=task.slug, repo=repo_name
             )
-            active = [
-                candidate for candidate in candidates if candidate.status == "active"
-            ]
-            if len(candidates) != 1 or len(active) != 1:
-                if not candidates:
-                    raise SessionCaptureError(
-                        "no healthy matching run; establish one with mship run or pass a valid --run-id"
-                    )
-                raise SessionCaptureError(
-                    "multiple or uncertain matching runs; pass --run-id <run-id>"
-                )
-            run = active[0]
-        else:
-            run = transaction.app_runs.get(transaction.connection, run_id)
-    if (
-        run is None
-        or run.task_slug != task.slug
-        or run.repo != repo_name
-        or run.status != "active"
-        or run.owner_ref is None
-        or run.owner_generation is None
+    candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.task_slug == task.slug
+        and candidate.repo == repo_name
+        and (profile_name is None or candidate.profile == profile_name)
+        and (host_name is None or candidate.host_name == host_name)
+        and (target_alias is None or target_alias in candidate.target_aliases)
+    ]
+    if not candidates:
+        raise SessionCaptureError(
+            "no matching run; establish one with mship run or pass a valid --run-id"
+        )
+    if any(
+        candidate.status != "active"
+        or candidate.owner_ref is None
+        or candidate.owner_generation is None
+        for candidate in candidates
     ):
         raise SessionCaptureError(
-            "recorded run is unavailable or no longer acknowledged"
+            "recorded run is uncertain or unavailable; pass an acknowledged --run-id"
         )
+    if len(candidates) == 1:
+        run = candidates[0]
+    elif choose is not None:
+        run = choose(tuple(candidates))
+        if run not in candidates:
+            raise SessionCaptureError(
+                "selected run does not match the recorded candidates"
+            )
+    else:
+        raise SessionCaptureError("multiple matching runs; pass --run-id <run-id>")
     repo = config.repos.get(repo_name)
-    if repo is None:
+    if repo is None or repo_name not in task.worktrees:
         raise SessionCaptureError("task repository is unavailable")
     profile = repo.run_profiles.get(run.profile)
     backend = repo.run_backends.get(run.backend)
@@ -105,12 +116,32 @@ def select_session_capture(
         profile is None
         or profile.backend != run.backend
         or backend is None
-        or backend.session_owner is None
         or operation_name not in backend.operations
         or operation_name not in run.capabilities
     ):
         raise SessionCaptureError(
             "recorded run does not support the requested operation"
+        )
+    try:
+        binding = store.app_runs.load_private_binding(run.private_binding_ref)
+    except PrivateBindingError as error:
+        raise SessionCaptureError("recorded target identity is unavailable") from error
+    bound_platform = binding.get("platform")
+    if backend.session_owner == "android":
+        bound_platform = "android"
+    if not isinstance(bound_platform, str) or not bound_platform:
+        platforms = repo.capture.platforms if repo.capture else []
+        bound_platform = platforms[0] if len(platforms) == 1 else None
+    if (
+        platform is not None
+        and bound_platform is not None
+        and platform != bound_platform
+    ):
+        raise SessionCaptureError("specified platform contradicts the recorded run")
+    resolved_platform = bound_platform or platform
+    if operation_name == "capture" and resolved_platform is None:
+        raise SessionCaptureError(
+            "recorded platform is unavailable; specify --platform"
         )
     host = _host_for_run(run, store=store)
     try:
@@ -133,7 +164,9 @@ def select_session_capture(
             task_key=backend.operations[operation_name],
             input_files={
                 "MSHIP_TARGET_REQUEST_FILE": json.dumps(
-                    request, separators=(",", ":"), sort_keys=True
+                    request,
+                    separators=(",", ":"),
+                    sort_keys=True,
                 )
             },
             preparation="observe",
@@ -146,4 +179,9 @@ def select_session_capture(
         )
     except (TypeError, ValueError) as error:
         raise SessionCaptureError("recorded run operation is invalid") from error
-    return SessionCaptureSelection(run=run, host=host, operation=operation)
+    return SessionCaptureSelection(
+        run=run,
+        host=host,
+        operation=operation,
+        platform=resolved_platform,
+    )

@@ -1,31 +1,13 @@
 import os
 from collections.abc import Callable
 from pathlib import Path
+from threading import Event, Lock
 from typing import Optional
 
 import typer
-from typer.core import TyperCommand
 
 from mship.cli.output import Output
-
-
-class _RemoteFlagCommand(TyperCommand):
-    """A `TyperCommand` that lets `--remote` double as a bare flag OR take a
-    value (`--remote=<role>`) — the "optional value option" Click recipe
-    (`is_flag=False, flag_value=...`) that `typer.Option` explicitly doesn't
-    support (see `typer.models.OptionInfo`, which warns and silently drops
-    both `is_flag`/`flag_value`). Rewriting an exact bare `--remote` token to
-    `--remote=` before Click's own parser runs lets the rest of the command
-    stay a normal `Optional[str] = typer.Option(None, "--remote")`: absent →
-    `None` (local path unchanged), bare `--remote` → `""` (auto-resolve the
-    role), `--remote=role` → `"role"` (explicit role). Only that one exact
-    token is touched; `--remote=role`, `--remote foo` (space-separated, not
-    supported — same limitation as the underlying Click recipe) and every
-    other argument pass through untouched."""
-
-    def parse_args(self, ctx, args):
-        args = ["--remote=" if a == "--remote" else a for a in args]
-        return super().parse_args(ctx, args)
+from mship.cli.remote_flags import RemoteFlagCommand
 
 
 def _relpath(path_str: str) -> str:
@@ -131,7 +113,12 @@ def _run_remote(
     """
     from mship.core.remote_client import RemoteExecError, exec_remote
     from mship.core.remote_dispatch import RemoteDispatchError, prepare_remote_source
-    from mship.core.run_host import RunHostError, RunHostResolver, RunHostStore, resolve_run_host
+    from mship.core.run_host import (
+        RunHostError,
+        RunHostResolver,
+        RunHostStore,
+        resolve_run_host,
+    )
 
     if task_obj is None:
         output.error(
@@ -196,39 +183,24 @@ def _run_profile(
     config,
     output: Output,
 ) -> int:
-    """Resolve, persist, and foreground one profile run through its logical task."""
+    """Preflight every profile context, then launch them in dependency order."""
     from mship.cli.run_target import choose_profile, choose_target
     from mship.core.run_host import RunHostStore
+    from mship.core.run_target.models import (
+        AppRun,
+        SelectedTarget,
+        TargetSelectionError,
+    )
     from mship.core.run_target.preferences import TargetPreferenceStore
     from mship.core.run_target.service import RemoteBackendExecutor, resolve_launch
 
-    if task_obj is None or len(target_repos) != 1:
-        output.error("profile runs require one task-bound repository")
-        return 1
-    repo_name = target_repos[0]
-    repo = config.repos[repo_name]
-    if profile_name is None:
-        profile_name = repo.default_run_profile
-        if profile_name is None:
-            try:
-                profile_name = choose_profile(
-                    tuple(sorted(repo.run_profiles)),
-                    interactive=output.is_tty and output.human_mode,
-                    input_fn=input,
-                    output=output,
-                )
-            except Exception as error:
-                output.error(str(error))
-                return 1
-    if profile_name not in repo.run_profiles:
-        output.error("requested run profile is not configured")
+    if task_obj is None:
+        output.error("profile runs require a task-bound repository")
         return 1
 
     def stream_event(event) -> None:
         if event.kind in {"stdout", "stderr"} and event.data:
             output.progress(event.data.decode("utf-8", "replace"))
-        elif event.kind == "ready":
-            output.progress("profile run is ready")
 
     executor = RemoteBackendExecutor(
         task_obj=task_obj,
@@ -238,39 +210,148 @@ def _run_profile(
         store=container.state_manager().workspace_store,
         event_sink=stream_event,
     )
+    registry = RunHostStore(container.state_dir())
+    preferences = TargetPreferenceStore(container.state_dir())
+    planned: dict[str, tuple[SelectedTarget, str]] = {}
+    unprofiled: list[str] = []
+
     try:
-        selected = resolve_launch(
-            config=config,
-            task=task_obj,
-            repo_name=repo_name,
-            profile_name=profile_name,
-            host_name=host_name,
-            remote_role=remote_role or None,
-            target_alias=target_alias,
-            registry=RunHostStore(container.state_dir()),
-            preferences=TargetPreferenceStore(container.state_dir()),
-            execute=executor,
-            choose=lambda candidates: choose_target(
-                candidates,
-                profile_name=profile_name or "",
-                backend_name=repo.run_profiles[profile_name or ""].backend,
-                interactive=output.is_tty and output.human_mode,
-                input_fn=input,
-                output=output,
-            ),
+        for repo_name in target_repos:
+            repo = config.repos[repo_name]
+            selected_profile = profile_name or repo.default_run_profile
+            if selected_profile is None:
+                if repo.run_profiles:
+                    selected_profile = choose_profile(
+                        tuple(sorted(repo.run_profiles)),
+                        interactive=output.is_tty and output.human_mode,
+                        input_fn=input,
+                        output=output,
+                    )
+                elif (
+                    profile_name is not None
+                    or host_name is not None
+                    or target_alias is not None
+                ):
+                    raise TargetSelectionError(
+                        "profile_missing",
+                        f"repository {repo_name!r} has no configured run profile",
+                    )
+                else:
+                    unprofiled.append(repo_name)
+                    continue
+            if selected_profile not in repo.run_profiles:
+                raise TargetSelectionError(
+                    "profile_missing",
+                    f"repository {repo_name!r} does not configure profile {selected_profile!r}",
+                )
+            selected = resolve_launch(
+                config=config,
+                task=task_obj,
+                repo_name=repo_name,
+                profile_name=selected_profile,
+                host_name=host_name,
+                remote_role=remote_role or None,
+                target_alias=target_alias,
+                registry=registry,
+                preferences=preferences,
+                execute=executor,
+                choose=lambda candidates, repo=repo, name=selected_profile: (
+                    choose_target(
+                        candidates,
+                        profile_name=name,
+                        backend_name=repo.run_profiles[name].backend,
+                        interactive=output.is_tty and output.human_mode,
+                        input_fn=input,
+                        output=output,
+                    )
+                ),
+            )
+            planned[repo_name] = (selected, selected_profile)
+    except TargetSelectionError as error:
+        output.error(str(error))
+        return 1
+
+    if unprofiled:
+        build = container.executor().execute(
+            "build", repos=unprofiled, task_slug=task_obj.slug
         )
-        final = executor.launch_selected(
-            selected, repo_name=repo_name, profile_name=profile_name
+        if not build.success:
+            for result in build.results:
+                if not result.success:
+                    output.error(f"{result.repo}: build failed before profile launch")
+            return 1
+
+    announced: set[str] = set()
+    announce_lock = Lock()
+
+    def announce_ready(repo_name: str, run: AppRun) -> None:
+        with announce_lock:
+            if repo_name in announced:
+                return
+            announced.add(repo_name)
+        message = f"{repo_name}: run {run.id} is ready"
+        if output.human_mode:
+            output.success(message)
+        else:
+            output.progress(message)
+
+    def start_selected(
+        selected: SelectedTarget, repo_name: str, selected_profile: str
+    ) -> Callable[[Callable[[AppRun], None], Event], AppRun]:
+        def launch(on_ready: Callable[[AppRun], None], cancel_event: Event) -> AppRun:
+            def ready(run: AppRun) -> None:
+                announce_ready(repo_name, run)
+                on_ready(run)
+
+            return executor.launch_selected(
+                selected,
+                repo_name=repo_name,
+                profile_name=selected_profile,
+                on_ready=ready,
+                cancel_event=cancel_event,
+            )
+
+        return launch
+
+    try:
+        finals = container.executor().launch_profiled(
+            {
+                repo_name: start_selected(selected, repo_name, selected_profile)
+                for repo_name, (selected, selected_profile) in planned.items()
+            },
+            cancel=executor.cancel_run,
         )
-    except Exception:
-        output.error("profile run could not be established")
+    except (TargetSelectionError, RuntimeError) as error:
+        output.error(str(error))
         return 1
-    if final.status == "unknown":
-        output.error("profile run outcome is unknown; establish a new run before observing")
+
+    run_statuses = {
+        repo_name: {"run_id": final.id, "status": final.status}
+        for repo_name, final in finals.items()
+    }
+    failed = False
+    for repo_name in target_repos:
+        final = finals.get(repo_name)
+        if final is None or final.status in {"active", "stopped"}:
+            if final is not None and final.status == "active":
+                announce_ready(repo_name, final)
+            continue
+        failed = True
+        if final.status == "unknown":
+            output.error(
+                f"{repo_name}: profile run outcome is unknown; establish a new run before observing"
+            )
+        elif repo_name in announced:
+            output.error(f"{repo_name}: profile run failed after ready acknowledgement")
+        else:
+            output.error(
+                f"{repo_name}: profile run failed before a trusted ready acknowledgement"
+            )
+    if output.json_mode:
+        output.json({"command": "run", "runs": run_statuses})
+    if failed:
         return 1
-    if final.status == "failed":
-        output.error("profile run failed before a trusted ready acknowledgement")
-        return 1
+
     return 0
 
 
@@ -319,7 +400,9 @@ def _update_profile_run(
         if backend.session_owner != "flutter":
             raise SessionCaptureError("recorded run is not a Flutter session")
         if backend.operations.get("run") in repo.task_outputs:
-            raise SessionCaptureError("source updates cannot change a result-producing run")
+            raise SessionCaptureError(
+                "source updates cannot change a result-producing run"
+            )
         snapshot = snapshot_remote_source(
             task_obj=task_obj,
             target_repos=[selected.run.repo],
@@ -372,6 +455,7 @@ def _update_profile_run(
         return 1
     output.success("updated recorded Flutter run")
     return 0
+
 
 def register(app: typer.Typer, get_container):
     @app.command(name="test", rich_help_panel="Workflow")
@@ -631,7 +715,7 @@ def register(app: typer.Typer, get_container):
         if not result.success:
             raise typer.Exit(code=1)
 
-    @app.command(name="run", cls=_RemoteFlagCommand, rich_help_panel="Runtime")
+    @app.command(name="run", cls=RemoteFlagCommand, rich_help_panel="Runtime")
     def run_cmd(
         repos: Optional[str] = typer.Option(
             None, "--repos", help="Comma-separated repo names to filter"
@@ -649,7 +733,9 @@ def register(app: typer.Typer, get_container):
             None, "--host", help="Constrain a profile run to one configured host."
         ),
         target: Optional[str] = typer.Option(
-            None, "--target", help="Constrain a profile run to a configured target alias."
+            None,
+            "--target",
+            help="Constrain a profile run to a configured target alias.",
         ),
         run_id: Optional[str] = typer.Option(
             None, "--run-id", help="Recorded Flutter run for --update-and-hot-reload."
@@ -721,7 +807,12 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         if update_and_hot_reload:
-            if run_id is None or profile is not None or host is not None or target is not None:
+            if (
+                run_id is None
+                or profile is not None
+                or host is not None
+                or target is not None
+            ):
                 output.error(
                     "--update-and-hot-reload requires exactly --run-id and no launch selectors"
                 )
@@ -738,7 +829,16 @@ def register(app: typer.Typer, get_container):
                 )
             )
 
-        if profile is not None or host is not None or target is not None:
+        if run_id is not None:
+            output.error("--run-id is only valid with --update-and-hot-reload")
+            raise typer.Exit(code=1)
+
+        if (
+            profile is not None
+            or host is not None
+            or target is not None
+            or any(config.repos[name].run_profiles for name in target_repos)
+        ):
             raise typer.Exit(
                 code=_run_profile(
                     task_obj=task_obj,
@@ -854,7 +954,7 @@ def register(app: typer.Typer, get_container):
 
         output.print("All background services have exited")
 
-    @app.command(name="build", cls=_RemoteFlagCommand, rich_help_panel="Workflow")
+    @app.command(name="build", cls=RemoteFlagCommand, rich_help_panel="Workflow")
     def build_cmd(
         run_all: bool = typer.Option(
             False, "--all", help="Build all repos even if one fails"
@@ -996,6 +1096,17 @@ def register(app: typer.Typer, get_container):
         repo: Optional[str] = typer.Option(
             None, "--repo", help="Constrain --run-id logs to one recorded repository."
         ),
+        profile: Optional[str] = typer.Option(
+            None, "--profile", help="Constrain recorded-run logs to one profile."
+        ),
+        host: Optional[str] = typer.Option(
+            None, "--host", help="Constrain recorded-run logs to one configured host."
+        ),
+        target: Optional[str] = typer.Option(
+            None,
+            "--target",
+            help="Constrain recorded-run logs to a friendly target alias.",
+        ),
         run_id: Optional[str] = typer.Option(
             None, "--run-id", help="Tail logs from one acknowledged profile run."
         ),
@@ -1013,8 +1124,13 @@ def register(app: typer.Typer, get_container):
         output = Output()
         config = container.config()
 
-        if run_id is None and all_services and service is not None:
+        if all_services and service is not None:
             output.error("Pass either <service> or --all, not both.")
+            raise typer.Exit(code=1)
+        if run_id is not None and all_services:
+            output.error(
+                "--run-id identifies one run and cannot be combined with --all"
+            )
             raise typer.Exit(code=1)
         if run_id is None and not all_services and service is None:
             available = ", ".join(sorted(config.repos.keys()))
@@ -1022,29 +1138,15 @@ def register(app: typer.Typer, get_container):
                 f"Service name required, or pass --all. Available: {available}."
             )
             raise typer.Exit(code=1)
-
-        targets = (
-            []
-            if run_id is not None
-            else sorted(config.repos.keys()) if all_services else [service]
-        )
-        for name in targets:
-            if name not in config.repos:
-                available = ", ".join(sorted(config.repos.keys()))
-                output.error(
-                    f"Unknown service '{name}'. Available services: {available}."
-                )
-                raise typer.Exit(code=1)
+        if repo is not None and service is not None and repo != service:
+            output.error("--repo and SERVICE must name the same repository")
+            raise typer.Exit(code=1)
 
         from pathlib import Path
 
         state_mgr = container.state_manager()
         state = state_mgr.load()
         shell = container.shell()
-
-        # Try to resolve a task so we can prefer its worktree cwds. If no
-        # anchor or multiple active tasks, silently fall back to repo paths;
-        # an explicit --task / MSHIP_TASK pointing at an unknown slug errors.
         resolved_task = None
         try:
             resolved_task, _ = resolve_task(
@@ -1053,79 +1155,134 @@ def register(app: typer.Typer, get_container):
                 env_task=_os.environ.get("MSHIP_TASK"),
                 cwd=Path.cwd(),
             )
-        except UnknownTaskError as e:
+        except UnknownTaskError as error:
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
-            output.error(f"Unknown task: {e.slug}. Known: {known}.")
+            output.error(f"Unknown task: {error.slug}. Known: {known}.")
             raise typer.Exit(1)
         except NoActiveTaskError, AmbiguousTaskError:
             resolved_task = None
-        if run_id is not None:
-            from mship.core.remote_client import exec_tool
-            from mship.core.run_host import RunHostResolver
-            from mship.core.session_capture import (
-                SessionCaptureError,
-                select_session_capture,
-            )
 
+        if run_id is not None:
             repo_name = (
                 repo
                 or service
                 or (
                     resolved_task.affected_repos[0]
-                    if resolved_task is not None and len(resolved_task.affected_repos) == 1
+                    if resolved_task is not None
+                    and len(resolved_task.affected_repos) == 1
                     else None
                 )
             )
-            if (
-                resolved_task is None
-                or repo_name is None
-                or (repo is not None and service is not None and repo != service)
-            ):
-                output.error("--run-id logs require an active task and one matching repository")
-                raise typer.Exit(code=1)
-            try:
-                selected = select_session_capture(
-                    store=state_mgr.workspace_store,
-                    config=config,
-                    task=resolved_task,
-                    repo_name=repo_name,
-                    run_id=run_id,
-                    platform=None,
-                    operation_name="logs",
+            if resolved_task is None or repo_name is None:
+                output.error(
+                    "--run-id logs require an active task and one matching repository"
                 )
-                result = exec_tool(
-                    request=selected.operation,
-                    host=selected.host,
-                    resolver=RunHostResolver(),
-                    event_sink=lambda event: (
-                        output.progress(event.data.decode("utf-8", "replace"))
-                        if event.kind in {"stdout", "stderr"} and event.data
-                        else None
-                    ),
+                raise typer.Exit(code=1)
+            targets = [repo_name]
+        else:
+            targets = sorted(config.repos) if all_services else [service]
+        for name in targets:
+            if name not in config.repos:
+                available = ", ".join(sorted(config.repos.keys()))
+                output.error(
+                    f"Unknown service '{name}'. Available services: {available}."
                 )
-            except (SessionCaptureError, ValueError) as error:
-                output.error(str(error))
                 raise typer.Exit(code=1)
-            if result.status not in {"completed", "running"}:
-                output.error("recorded run logs are unavailable")
-                raise typer.Exit(code=1)
-            return
+        from mship.core.run_target.models import TargetSelectionError
+        from mship.core.session_capture import SessionCaptureError
+
+        def log_selected_run(name: str) -> None:
+            import json
+
+            from mship.cli.run_target import choose_run
+            from mship.core.run_target.models import BackendExecution
+            from mship.core.run_target.service import RemoteBackendExecutor
+            from mship.core.session_capture import select_session_capture
+
+            assert resolved_task is not None
+            selected = select_session_capture(
+                store=state_mgr.workspace_store,
+                config=config,
+                task=resolved_task,
+                repo_name=name,
+                run_id=run_id,
+                platform=None,
+                operation_name="logs",
+                profile_name=profile,
+                host_name=host,
+                target_alias=target,
+                choose=lambda candidates: choose_run(
+                    candidates,
+                    interactive=output.is_tty and output.human_mode,
+                    input_fn=input,
+                    output=output,
+                ),
+            )
+            request = json.loads(
+                selected.operation.input_files["MSHIP_TARGET_REQUEST_FILE"]
+            )
+            remote_executor = RemoteBackendExecutor(
+                task_obj=resolved_task,
+                config=config,
+                shell=shell,
+                output=output,
+                store=state_mgr.workspace_store,
+                event_sink=lambda event: (
+                    output.progress(event.data.decode("utf-8", "replace"))
+                    if event.kind in {"stdout", "stderr"} and event.data
+                    else None
+                ),
+            )
+            result = remote_executor(
+                selected.host,
+                BackendExecution(
+                    task=selected.run.task_slug,
+                    repo=selected.run.repo,
+                    profile=selected.run.profile,
+                    backend=selected.run.backend,
+                    logical_task=selected.operation.task_key,
+                    operation="logs",
+                    request=request,
+                    run_id=selected.run.id,
+                    preparation="observe",
+                    max_stdout_bytes=None,
+                    max_stderr_bytes=None,
+                    timeout_seconds=None,
+                ),
+            )
+            if result.error_code is not None:
+                raise ValueError("recorded run logs are unavailable")
 
         for name in targets:
-            repo = config.repos[name]
-            actual_task = repo.tasks.get("logs", "logs")
-            env_runner = repo.env_runner or config.env_runner
+            repo_config = config.repos[name]
+            use_recorded_run = resolved_task is not None and (
+                run_id is not None or bool(repo_config.run_profiles)
+            )
+            if profile is not None or host is not None or target is not None:
+                use_recorded_run = True
+            if use_recorded_run:
+                if all_services:
+                    output.print(f"[bold]── {name} ──[/bold]")
+                try:
+                    log_selected_run(name)
+                except (
+                    SessionCaptureError,
+                    TargetSelectionError,
+                    ValueError,
+                    KeyError,
+                ) as error:
+                    output.error(str(error))
+                    raise typer.Exit(code=1)
+                continue
 
-            cwd = repo.path
+            actual_task = repo_config.tasks.get("logs", "logs")
+            env_runner = repo_config.env_runner or config.env_runner
+            cwd = repo_config.path
             if resolved_task is not None and name in resolved_task.worktrees:
-                wt_path = Path(resolved_task.worktrees[name])
-                if wt_path.exists():
-                    cwd = wt_path
+                worktree = Path(resolved_task.worktrees[name])
+                if worktree.exists():
+                    cwd = worktree
 
-            # Declarative target check (#125): without this, a missing
-            # `logs:` target lets go-task print its general help text
-            # instead of an actionable error. Reads the local Taskfile
-            # only — `includes:` aren't recursed into.
             from mship.util.taskfile import taskfile_has_target
 
             if not taskfile_has_target(cwd, actual_task):
@@ -1136,7 +1293,6 @@ def register(app: typer.Typer, get_container):
                     f"in mothership.yaml."
                 )
                 raise typer.Exit(code=1)
-
             if all_services:
                 output.print(f"[bold]── {name} ──[/bold]")
             result = shell.run_task(

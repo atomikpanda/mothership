@@ -1,0 +1,98 @@
+workspace: run-target-examples
+run_hosts: [android-lab, ios-lab, browser-lab, embedded-lab]
+
+# Compose these runtime tasks into an application repository. Tool installations,
+# app identity/templates, aliases and device identifiers stay host-private.
+repos:
+  app:
+    path: .
+    type: service
+    not_applicable: [setup]
+    tasks:
+      android-targets: android:targets
+      android-run: android:run
+      android-logs: android:logs
+      android-capture: android:capture
+      flutter-targets: flutter:targets
+      flutter-run: flutter:run
+      flutter-logs: flutter:logs
+      flutter-capture: flutter:capture
+      flutter-reload: flutter:reload
+      flutter-restart: flutter:restart
+      ios-targets: ios:targets
+      ios-run: ios:run
+      ios-logs: ios:logs
+      ios-capture: ios:capture
+      browser-targets: browser:targets
+      browser-run: browser:run
+      browser-logs: browser:logs
+      browser-capture: browser:capture
+      pio-targets: platformio:targets
+      pio-monitor: platformio:monitor
+      pio-logs: platformio:logs
+      pio-upload: platformio:upload
+    run_backends:
+      android-native:
+        session_owner: android
+        discover_task: android-targets
+        operations: {run: android-run, logs: android-logs, capture: android-capture}
+      flutter:
+        session_owner: flutter
+        discover_task: flutter-targets
+        operations:
+          run: flutter-run
+          logs: flutter-logs
+          capture: flutter-capture
+          reload: flutter-reload
+          restart: flutter-restart
+      ios-simctl:
+        discover_task: ios-targets
+        operations: {run: ios-run, logs: ios-logs, capture: ios-capture}
+      browser:
+        discover_task: browser-targets
+        operations: {run: browser-run, logs: browser-logs, capture: browser-capture}
+      platformio:
+        discover_task: pio-targets
+        operations: {run: pio-monitor, logs: pio-logs, upload: pio-upload}
+    run_profiles:
+      android-usb:
+        backend: android-native
+        hosts: {roles: [android-lab]}
+        options:
+          package: com.example.app
+          component: com.example.app/.MainActivity
+          instrumentation: null
+          platform: android
+          transport: usb
+      flutter-usb:
+        backend: flutter
+        hosts: {roles: [android-lab]}
+        options:
+          entrypoint: lib/main.dart
+          flavor: null
+          mode: debug
+          platform: android
+          transport: usb
+      flutter-simulator:
+        backend: flutter
+        hosts: {roles: [ios-lab]}
+        options:
+          entrypoint: lib/main.dart
+          flavor: null
+          mode: debug
+          platform: ios
+          transport: simulator
+      ios-latest:
+        backend: ios-simctl
+        hosts: {roles: [ios-lab]}
+        options: {}
+      browser:
+        backend: browser
+        hosts: {roles: [browser-lab]}
+        options: {}
+      board-monitor:
+        backend: platformio
+        hosts: {roles: [embedded-lab]}
+        options: {}
+    capture:
+      platforms: [android, ios, browser]

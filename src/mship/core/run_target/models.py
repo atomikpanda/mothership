@@ -370,8 +370,12 @@ def host_endpoint_fingerprint(endpoint: str) -> str:
 
 def _validate_source_update_receipt(receipt: dict[str, JsonValue]) -> None:
     if not isinstance(receipt, dict) or set(receipt) != {
-        "update_id", "owner_ref", "generation", "old_source_revision",
-        "new_source_revision", "stage",
+        "update_id",
+        "owner_ref",
+        "generation",
+        "old_source_revision",
+        "new_source_revision",
+        "stage",
     }:
         raise ValueError("source update receipt is invalid")
     for field, value in receipt.items():
@@ -413,6 +417,7 @@ class AppRun:
     created_at: datetime
     updated_at: datetime
     binary_provenance: dict[str, JsonValue] | None
+    target_aliases: tuple[str, ...] = ()
     source_update_receipt: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
@@ -449,6 +454,12 @@ class AppRun:
             raise ValueError("app run capabilities must contain non-empty strings")
         if len(set(self.capabilities)) != len(self.capabilities):
             raise ValueError("app run capabilities must not contain duplicates")
+        if not all(isinstance(alias, str) and alias for alias in self.target_aliases):
+            raise ValueError("app run target aliases must contain non-empty strings")
+        if len(set(self.target_aliases)) != len(self.target_aliases):
+            raise ValueError("app run target aliases must not contain duplicates")
+        for alias in self.target_aliases:
+            _safe_text(alias, field="app run target alias")
         if (self.owner_ref is None) != (self.owner_generation is None):
             raise ValueError(
                 "app run owner reference and generation must be supplied together"
@@ -481,6 +492,7 @@ class AppRun:
             "host_scope": self.host_scope,
             "host_endpoint_fingerprint": self.host_endpoint_fingerprint,
             "safe_target_label": self.safe_target_label,
+            "target_aliases": self.target_aliases,
             "operation": self.operation,
             "protocol_version": self.protocol_version,
             "capabilities": self.capabilities,

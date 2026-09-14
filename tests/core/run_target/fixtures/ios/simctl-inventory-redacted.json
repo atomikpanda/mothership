@@ -1,0 +1,36 @@
+{
+  "runtimes": [
+    {
+      "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+      "version": "18.2",
+      "isAvailable": true
+    },
+    {
+      "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-17-4",
+      "version": "17.4",
+      "isAvailable": true
+    }
+  ],
+  "devices": {
+    "com.apple.CoreSimulator.SimRuntime.iOS-18-2": [
+      {
+        "udid": "AAAAAAAA-1111-2222-3333-AAAAAAAAAAAA",
+        "name": "Redacted iPhone",
+        "state": "Shutdown",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro",
+        "dataPath": "/private/var/redacted/CoreSimulator/AAAAAAAA-1111-2222-3333-AAAAAAAAAAAA/data"
+      }
+    ],
+    "com.apple.CoreSimulator.SimRuntime.iOS-17-4": [
+      {
+        "udid": "BBBBBBBB-1111-2222-3333-BBBBBBBBBBBB",
+        "name": "Redacted iPhone",
+        "state": "Shutdown",
+        "isAvailable": true,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
+        "dataPath": "/private/var/redacted/CoreSimulator/BBBBBBBB-1111-2222-3333-BBBBBBBBBBBB/data"
+      }
+    ]
+  }
+}

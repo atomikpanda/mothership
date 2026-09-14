@@ -5,22 +5,70 @@ see a change work — not just unit tests passing.
 
 ## Bring the stack up
 
-```bash
-mship run
-```
+### Profile-free services
 
-`run` starts the task's services in **dependency order**, waiting on each
-repo's healthcheck before starting its dependents — `tcp`, `http`, `sleep`, or
-a custom task, declared per repo in `mothership.yaml`
-([Configuration](../configuration.md)). Long-running services
-(`start_mode: background`) stay alive so you can interact with them.
-
-Ports and URLs are **task-scoped**: two tasks running in parallel don't fight
-over `localhost:3000`. Filter to part of the stack with `--repos`:
+The ordinary service workflow is unchanged:
 
 ```bash
 mship run --repos api,svc-users
+mship logs api
+mship capture --repo web --platform browser
 ```
+
+`run` starts the selected services in **dependency order**, waiting on each
+repo's healthcheck before starting its dependents — `tcp`, `http`, `sleep`, or
+a custom task, declared per repo in `mothership.yaml`
+([Configuration](../configuration.md)). Long-running services
+(`start_mode: background`) stay alive so you can interact with them. Ports and
+URLs are **task-scoped**: two tasks running in parallel don't fight over
+`localhost:3000`.
+
+### Profile-aware app sessions (opt-in)
+
+When a task-bound repo declares `run_profiles`, the same `run --repos` command
+opens a selected app session rather than changing to a separate command:
+
+```bash
+# Run this from the task worktree, or supply --task <task>.
+mship run --repos app
+# app: run <run-id> is ready
+
+# Observe the acknowledged session that run established.
+mship logs app --run-id <run-id>
+mship capture --repo app --run-id <run-id> --kind image
+```
+
+For a configured repo, bare `run` uses its `default_run_profile`. Without a
+default, an interactive terminal offers the configured profiles; a headless
+call must name `--profile`. `--host` and `--target` constrain launch selection.
+Mship resolves and preflights every selected profile before launching an app,
+retains dependency-ready boundaries, and records one run ID per selected repo.
+
+The run ID is an observation identity, not another device selector. `logs` and
+`capture` use it to contact the exact recorded owner on its recorded host; they
+do not rediscover a target, transfer source, run setup, relaunch the app, or
+silently substitute a different session. If an active task/repo has exactly one
+acknowledged matching run, `mship logs app` and `mship capture --repo app` reuse
+it without `--run-id`. Several matches prompt in a TTY and otherwise require
+`--run-id`; a missing, stale, inactive, or uncertain run must be replaced with
+a new `mship run`, not recovered by an observation command.
+
+`--profile`, `--host`, and `--target` on `logs` or `capture` filter recorded
+runs. When combined with `--run-id`, every filter must agree with that record;
+contradictions fail rather than selecting something else. The capture platform
+is inferred from the recorded session. Supplying `--platform` only validates
+that it agrees; `--kind image|layout|all` chooses the artifact(s), not a
+platform, device, or session.
+
+Profiles are opt-in, configured wrappers. They do not adopt an app started
+outside mship, install tools or SDK components, create emulators, pair devices,
+or provision targets. The portable
+[five-backend example](../../examples/run-targets/mothership.yaml) shows the
+Android-native, Flutter, iOS-simctl, browser, and PlatformIO configuration
+shapes; it is not evidence that a host, relay, toolchain, or device is ready.
+For the full configuration schema, see [Configuration](../configuration.md);
+for selected-host and remote-session behavior, see
+[Profile-aware runs and observations](../remote-run.md#profile-aware-runs-and-observations).
 
 ## Build artifacts
 
@@ -50,9 +98,9 @@ archaeology.
 
 ## Capturing what's on screen
 
-For UI repos, `mship capture` drives the repo's capture target (simulator
-screenshots, layout dumps) and files artifacts under
-`.mothership/captures/<task>/`.
+For UI repos without a selected profile session, `mship capture --repo <repo>`
+drives that repo's capture target (simulator screenshots, layout dumps) and
+files artifacts under `.mothership/captures/<task>/`.
 
 ### Promoting a capture to evidence
 
@@ -64,7 +112,7 @@ Passing `--evidence <spec-id>:<criterion-id>` promotes a capture into durable
 evidence for that acceptance criterion:
 
 ```bash
-mship capture --evidence my-spec:ac3
+mship capture --repo app --evidence my-spec:ac3
 ```
 
 The artifact is copied into `.mothership/evidence/<spec-id>/` under a
@@ -114,12 +162,18 @@ carry.
 
 ## Running on another machine
 
-A run target that needs hardware you don't have (an iOS simulator on a Mac, an
-Android box, a beefier builder) can execute on a **run host**:
+A legacy `run` or `capture` target that needs hardware you do not have (an iOS
+simulator on a Mac, an Android box, or a beefier builder) can use a configured
+**run host**:
 
 ```bash
+# Requires an active task (or pass --task <task>).
 mship run --remote=ios-sim-host
 ```
 
-Same commands, same env contract, output streamed back live. Setup and
-troubleshooting: [Remote run](../remote-run.md).
+The host must already be configured and ready; mship does not provision its
+tools or devices. A selected profile capture remains an observation of the
+recorded owner: it performs no source transfer, setup, launch replacement, or
+target rediscovery. Setup, host selection, recovery, and the distinction
+between legacy remote execution and selected-session observation are covered in
+[Profile-aware runs and observations](../remote-run.md#profile-aware-runs-and-observations).

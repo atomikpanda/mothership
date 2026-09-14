@@ -68,6 +68,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import Iterator, Protocol
 
@@ -202,25 +203,33 @@ def _hub_dir(workspace_root: Path, task: str) -> Path:
 def _acquire_task_execution_lock(
     workspace_root: Path,
     task: str,
-) -> io.TextIOWrapper:
+    *,
+    repo: str | None = None,
+) -> ExitStack:
+    """Keep legacy task-wide exclusion while isolating distinct source roots."""
     if fcntl is None:
         raise OSError("POSIX file locking is unavailable")
-
     lock_dir = workspace_root / ".mothership" / "remote-exec-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
-    lock_file = (lock_dir / f"{digest}.lock").open("a+")
+    locks = ExitStack()
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+        task_file = locks.enter_context((lock_dir / f"{digest}.lock").open("a+"))
+        mode = fcntl.LOCK_EX if repo is None else fcntl.LOCK_SH
+        fcntl.flock(task_file.fileno(), mode | fcntl.LOCK_NB)
+        if repo is not None:
+            digest = hashlib.sha256(f"{task}\0{repo}".encode()).hexdigest()
+            repo_file = locks.enter_context((lock_dir / f"{digest}.lock").open("a+"))
+            fcntl.flock(repo_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        lock_file.close()
+        locks.close()
         if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
             raise BlockingIOError(exc.errno, exc.strerror) from exc
         raise
     except BaseException:
-        lock_file.close()
+        locks.close()
         raise
-    return lock_file
+    return locks
 
 
 def _run_shell(
@@ -489,14 +498,15 @@ def _build_artifact_tar(
                 if expected_artifacts is None
                 else expected_artifacts.get(artifact.path.name)
             )
-            if expected is None:
+            if expected is None and expected_artifacts is not None:
                 raise OSError("capture artifact has no owner acknowledgement")
             fd = os.open(
                 artifact.path.name,
                 os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
                 dir_fd=directory_fd,
             )
-            with _CaptureDigestReader(io.FileIO(fd, "rb", closefd=True)) as stream:
+            reader = _CaptureDigestReader if expected is not None else io.BufferedReader
+            with reader(io.FileIO(fd, "rb", closefd=True)) as stream:
                 info = os.fstat(stream.fileno())
                 if (
                     not stat.S_ISREG(info.st_mode)
@@ -504,7 +514,7 @@ def _build_artifact_tar(
                     or info.st_size <= 0
                 ):
                     raise OSError("capture artifact is not a private regular file")
-                if info.st_size != expected[0]:
+                if expected is not None and info.st_size != expected[0]:
                     raise OSError(
                         "capture artifact size does not match owner acknowledgement"
                     )
@@ -515,7 +525,11 @@ def _build_artifact_tar(
                 member.size = info.st_size
                 member.mode = 0o600
                 tar.addfile(member, stream)
-                if stream.digest.hexdigest() != expected[1]:
+                if (
+                    expected is not None
+                    and isinstance(stream, _CaptureDigestReader)
+                    and stream.digest.hexdigest() != expected[1]
+                ):
                     raise OSError(
                         "capture artifact bytes do not match owner acknowledgement"
                     )
@@ -578,10 +592,7 @@ def run_verb_stream(
             run_ref_repos=run_ref_repos,
         )
     finally:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
+        lock_file.close()
 
 
 class _PreparationError(Exception):
@@ -1186,6 +1197,30 @@ def _resolve_tool_request(
                 _decode_profile_json(action)
         elif request.install_from_result is not None:
             return None
+        if (
+            TARGET_REQUEST_FILE in request.input_files
+            and request.preparation == "observe"
+        ):
+            allowed_inputs = {TARGET_REQUEST_FILE}
+            if session_config is not None:
+                allowed_inputs.add("MSHIP_SESSION_OPERATION_FILE")
+            if request.env or set(request.input_files) - allowed_inputs:
+                return None
+            if (
+                request.owner_ref is None
+                or request.generation is None
+                or request.source_revision is None
+            ):
+                return None
+            parent_inputs = _operations(deps).inputs_for_owner(
+                task=request.task,
+                repo=request.repo,
+                owner_ref=request.owner_ref,
+                generation=request.generation,
+                source_revision=request.source_revision,
+            )
+            if parent_inputs is None:
+                return None
         profile_inputs = {
             TARGET_REQUEST_FILE,
             TARGET_CONTEXT_FILE,
@@ -1230,6 +1265,7 @@ def run_tool_stream(
     on_session_prepared: Callable[[OwnerContext], None] | None = None,
     source_update_id: str | None = None,
     owner_operation: str | None = None,
+    capture_directory: Path | None = None,
 ) -> Generator[ToolEvent, None, None]:
     """Execute one typed tool operation without a second transport/owner."""
     task_key = request.task_key
@@ -1241,8 +1277,10 @@ def run_tool_stream(
     request = resolved
     try:
         session_config = _session_configuration(request, deps)
-        if session_config is not None:
-            request = replace(request, env={"MSHIP_SESSION_PYTHON": sys.executable})
+        if TARGET_REQUEST_FILE in request.input_files:
+            request = replace(
+                request, env={**request.env, "MSHIP_SESSION_PYTHON": sys.executable}
+            )
         session = None
         if session_config is not None and request.preparation != "discover":
             profile_request, backend = session_config
@@ -1263,9 +1301,41 @@ def run_tool_stream(
                 ):
                     raise SessionError("invalid", "Invalid internal source operation")
                 session = replace(session, operation=owner_operation)
-        elif capture_kinds is not None or install_from_result is not None:
+        elif install_from_result is not None:
             yield ToolEvent("result", result=ToolResult("invalid"))
             return
+        elif (
+            request.preparation == "launch"
+            and TARGET_CONTEXT_FILE in request.input_files
+        ):
+            selected_request = _decode_profile_json(
+                request.input_files[TARGET_REQUEST_FILE]
+            )
+            if selected_request["operation"] == "run":
+                session = SessionPreparation(
+                    operation="run",
+                    owner_kind=None,
+                    sealed_context=request.input_files[TARGET_CONTEXT_FILE],
+                )
+        elif capture_kinds is not None:
+            if capture_directory is None or request.preparation != "observe":
+                yield ToolEvent("result", result=ToolResult("invalid"))
+                return
+            profile_request = _decode_profile_json(
+                request.input_files[TARGET_REQUEST_FILE]
+            )
+            if profile_request.get("operation") != "capture":
+                yield ToolEvent("result", result=ToolResult("invalid"))
+                return
+            request = replace(
+                request,
+                env={
+                    **request.env,
+                    "MSHIP_CAPTURE_DIR": str(capture_directory),
+                    "MSHIP_CAPTURE_KINDS": ",".join(capture_kinds),
+                    "MSHIP_CAPTURE_PLATFORM": capture_platform or "",
+                },
+            )
     except ValueError, SessionError:
         yield ToolEvent("result", result=ToolResult("invalid"))
         return
@@ -1290,7 +1360,12 @@ def run_tool_stream(
         yield ToolEvent("result", result=ToolResult("unsupported"))
         return
     try:
-        lock_file = _acquire_task_execution_lock(deps.workspace_root, request.task)
+        repo_config = deps.config.repos[request.repo]
+        lock_file = _acquire_task_execution_lock(
+            deps.workspace_root,
+            request.task,
+            repo=repo_config.git_root or request.repo,
+        )
     except BlockingIOError:
         yield ToolEvent("result", result=ToolResult("busy"))
         return
@@ -1298,7 +1373,7 @@ def run_tool_stream(
         yield ToolEvent("result", result=ToolResult("evidence_error"))
         return
     try:
-        admission = operations.admission_status(request.task)
+        admission = operations.admission_status(request.task, repo=request.repo)
         if admission != "available":
             yield ToolEvent("result", result=ToolResult(admission))
             return
@@ -1411,10 +1486,7 @@ def run_tool_stream(
     except OSError, ValueError:
         yield ToolEvent("result", result=ToolResult("evidence_error"))
     finally:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
+        lock_file.close()
 
 
 def source_owner_operation(
@@ -1546,6 +1618,7 @@ def run_observe_capture_stream(
     capture_fd: int | None = None
     capture_parent_fd: int | None = None
     capture_authority: tuple[OwnerContext, OwnerRequest] | None = None
+    generic = False
 
     def prepared(context: OwnerContext) -> None:
         nonlocal capture_directory, capture_fd, capture_parent_fd
@@ -1623,13 +1696,43 @@ def run_observe_capture_stream(
             or operation.task_key is None
             or operation.argv
             or operation.install_from_result is not None
-            or platform not in {"android", "ios"}
+            or not isinstance(platform, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", platform)
             or not kinds
             or len(kinds) > 2
             or len(set(kinds)) != len(kinds)
             or any(kind not in _cap.ALL_KINDS for kind in kinds)
         ):
             raise SessionError("invalid", "Invalid session capture request")
+        generic = _session_configuration(operation, deps) is None
+        if generic:
+            resolved = _resolve_tool_request(operation, deps=deps)
+            if (
+                resolved is None
+                or operation.owner_ref is None
+                or operation.generation is None
+            ):
+                raise SessionError("invalid", "Invalid selected capture operation")
+            context = _decode_profile_json(resolved.input_files[TARGET_CONTEXT_FILE])
+            binding = context.get("private_binding")
+            bound_platform = (
+                binding.get("platform") if isinstance(binding, dict) else None
+            )
+            if bound_platform != platform:
+                raise SessionError(
+                    "invalid", "Capture platform does not match selected target"
+                )
+            root = Path(tempfile.mkdtemp(prefix="mship-observe-capture-")).resolve()
+            capture_directory = root / "outputs"
+            capture_directory.mkdir(mode=0o700)
+            capture_parent_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            capture_fd = os.open(
+                "outputs",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=capture_parent_fd,
+            )
         result = None
         events = run_tool_stream(
             operation,
@@ -1637,6 +1740,7 @@ def run_observe_capture_stream(
             capture_kinds=tuple(kinds),
             capture_platform=platform,
             on_session_prepared=prepared,
+            capture_directory=capture_directory if generic else None,
         )
         try:
             for event in events:
@@ -1657,14 +1761,19 @@ def run_observe_capture_stream(
             raise SessionError(
                 "unavailable", "Session capture omitted a requested artifact"
             )
-        if capture_authority is None:
-            raise SessionError(
-                "unknown", "Capture owner acknowledgement is unavailable"
-            )
-        authority, capture_request = capture_authority
-        manifest = authority.verify_capture(capture_request)
-        if set(manifest) != {artifact.path.name for artifact in artifacts}:
-            raise SessionError("unknown", "Capture artifact identity changed")
+        manifest = None
+        if generic:
+            if _resolve_tool_request(operation, deps=deps) is None:
+                raise SessionError("unknown", "Capture owner is no longer live")
+        else:
+            if capture_authority is None:
+                raise SessionError(
+                    "unknown", "Capture owner acknowledgement is unavailable"
+                )
+            authority, capture_request = capture_authority
+            manifest = authority.verify_capture(capture_request)
+            if set(manifest) != {artifact.path.name for artifact in artifacts}:
+                raise SessionError("unknown", "Capture artifact identity changed")
         data = _build_artifact_tar(
             artifacts,
             directory_fd=capture_fd,

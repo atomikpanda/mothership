@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from secrets import token_urlsafe
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from mship.core.run_host import RunHostError, RunHostResolver
@@ -181,7 +182,7 @@ class RemoteBackendExecutor:
                     run_ref_repos=prepared.run_ref_repos,
                     source_revision=source_revision,
                 )
-            except (RemoteDispatchError, run_transfer.RunTransferError, RunHostError):
+            except RemoteDispatchError, run_transfer.RunTransferError, RunHostError:
                 self._prepared[key] = _PreparedHost(
                     run_ref_repos=(),
                     source_revision=source_revision,
@@ -237,7 +238,9 @@ class RemoteBackendExecutor:
             or run.host_name != host.name
             or run.host_scope != host.scope
             or run.host_endpoint_fingerprint
-            != host_endpoint_fingerprint("|".join(registration_identity(host.connection)))
+            != host_endpoint_fingerprint(
+                "|".join(registration_identity(host.connection))
+            )
             or run.status != "active"
             or run.owner_ref is None
             or run.owner_generation is None
@@ -296,7 +299,9 @@ class RemoteBackendExecutor:
             or run.host_name != host.name
             or run.host_scope != host.scope
             or run.host_endpoint_fingerprint
-            != host_endpoint_fingerprint("|".join(registration_identity(host.connection)))
+            != host_endpoint_fingerprint(
+                "|".join(registration_identity(host.connection))
+            )
         ):
             return None
         from mship.core.persistence.app_run_repository import PrivateBindingError
@@ -328,6 +333,7 @@ class RemoteBackendExecutor:
         execution: BackendExecution,
         *,
         event_sink: Callable[[Any], None] | None = None,
+        cancel_event: Event | None = None,
     ) -> BackendResult:
         """Map one owner-side execution policy to the typed remote tool route."""
         from mship.core.remote_client import exec_tool
@@ -377,12 +383,6 @@ class RemoteBackendExecutor:
             if not isinstance(profile_revision_value, str):
                 return self._result(error_code="identity_lost")
             stored_profile_revision = profile_revision_value
-            # Session observers authenticate only the sealed parent identity. The
-            # registry derives its context/bindings and refuses caller copies.
-            if backend.session_owner is None:
-                input_files["MSHIP_TARGET_CONTEXT_FILE"] = json.dumps(
-                    context, separators=(",", ":"), sort_keys=True
-                )
         else:
             prepared = self._prepared_host(host, execution)
             if prepared is None or prepared.failure is not None:
@@ -406,7 +406,7 @@ class RemoteBackendExecutor:
             profile_revision_value=profile_revision_value,
         ):
             return self._result(error_code="invalid")
-        if backend.session_owner is not None and execution.preparation == "launch":
+        if execution.preparation == "launch" and execution.run_id is not None:
             context = self._launch_context(host, execution)
             if context is None:
                 return self._result(error_code="identity_lost")
@@ -432,15 +432,12 @@ class RemoteBackendExecutor:
                 max_stderr_bytes=execution.max_stderr_bytes,
                 timeout_seconds=execution.timeout_seconds,
             )
-        except (TypeError, ValueError, UnicodeError):
+        except TypeError, ValueError, UnicodeError:
             return self._result(error_code="invalid")
 
         session_source_revision: Callable[[str, str], str | None] | None = None
-        if (
-            backend.session_owner is not None
-            and execution.preparation == "launch"
-            and execution.run_id is not None
-        ):
+        if execution.preparation == "launch" and execution.run_id is not None:
+
             def session_source_revision(owner_ref: str, generation: str) -> str | None:
                 with self.store.read() as transaction:
                     current = transaction.app_runs.get(
@@ -462,6 +459,7 @@ class RemoteBackendExecutor:
                 event_sink=self.event_sink if event_sink is None else event_sink,
                 transport=self.transport,
                 session_source_revision=session_source_revision,
+                cancel_event=cancel_event,
             )
         except RunHostError:
             return self._result(error_code="auth_error")
@@ -483,6 +481,68 @@ class RemoteBackendExecutor:
             stderr=stderr,
         )
 
+    def revalidate_selected(
+        self,
+        selected: SelectedTarget,
+        *,
+        repo_name: str,
+        profile_name: str,
+    ) -> None:
+        """Confirm the exact discovered target still exists before launch.
+
+        This intentionally interrogates only the selected host and compares the
+        sealed candidate identity.  It never reranks candidates or substitutes
+        another target after a selected target disappears.
+        """
+        repo = self.config.repos.get(repo_name)
+        if repo is None or repo_name not in self.task_obj.worktrees:
+            raise TargetSelectionError(
+                "owner_unavailable", "task repository is unavailable"
+            )
+        profile = repo.run_profiles.get(profile_name)
+        backend = (
+            repo.run_backends.get(profile.backend) if profile is not None else None
+        )
+        if profile is None or backend is None or "run" not in backend.operations:
+            raise TargetSelectionError(
+                "identity_lost", "selected profile is no longer available"
+            )
+        expected_revision = profile_revision(
+            profile, backend, prepared_source_revision=selected.backend_revision
+        )
+        if selected.profile_revision != expected_revision:
+            raise TargetSelectionError(
+                "identity_lost", "selected profile identity changed"
+            )
+        request = DiscoveryRequest(
+            protocol_version=1,
+            backend=profile.backend,
+            backend_revision=selected.backend_revision,
+            profile=profile_name,
+            profile_revision=selected.profile_revision,
+            task=self.task_obj.slug,
+            repo=repo_name,
+            operation="run",
+            options=profile.options,
+            target_alias=None,
+        )
+        inventory = discover_on_host(selected.host, request, backend, execute=self)
+        if inventory.error is not None:
+            raise TargetSelectionError(
+                "identity_lost", "selected target could not be revalidated"
+            )
+        matching = [
+            candidate
+            for candidate in inventory.candidates
+            if candidate.target_key == selected.candidate.target_key
+            and candidate.binding == selected.candidate.binding
+            and candidate.ready
+            and "run" in candidate.capabilities
+        ]
+        if len(matching) != 1:
+            raise TargetSelectionError(
+                "identity_lost", "selected target is no longer available"
+            )
 
     def launch_selected(
         self,
@@ -490,14 +550,20 @@ class RemoteBackendExecutor:
         *,
         repo_name: str,
         profile_name: str,
+        on_ready: Callable[[AppRun], None] | None = None,
+        cancel_event: Event | None = None,
     ) -> AppRun:
         """Persist one selected session before launch, activating it only on ready."""
         repo = self.config.repos.get(repo_name)
         if repo is None or repo_name not in self.task_obj.worktrees:
-            raise TargetSelectionError("owner_unavailable", "task repository is unavailable")
+            raise TargetSelectionError(
+                "owner_unavailable", "task repository is unavailable"
+            )
         profile = repo.run_profiles.get(profile_name)
         if profile is None:
-            raise TargetSelectionError("profile_missing", "requested run profile is not configured")
+            raise TargetSelectionError(
+                "profile_missing", "requested run profile is not configured"
+            )
         backend = repo.run_backends.get(profile.backend)
         if backend is None or "run" not in backend.operations:
             raise TargetSelectionError(
@@ -506,10 +572,19 @@ class RemoteBackendExecutor:
         if selected.profile_revision != profile_revision(
             profile, backend, prepared_source_revision=selected.backend_revision
         ):
-            raise TargetSelectionError("identity_lost", "selected profile identity changed")
+            raise TargetSelectionError(
+                "identity_lost", "selected profile identity changed"
+            )
+        self.revalidate_selected(
+            selected,
+            repo_name=repo_name,
+            profile_name=profile_name,
+        )
 
         now = datetime.now(timezone.utc)
-        binding_ref = self.store.app_runs.store_private_binding(selected.candidate.binding)
+        binding_ref = self.store.app_runs.store_private_binding(
+            selected.candidate.binding
+        )
         run = AppRun(
             id=token_urlsafe(24),
             task_slug=self.task_obj.slug,
@@ -524,6 +599,7 @@ class RemoteBackendExecutor:
                 "|".join(registration_identity(selected.host.connection))
             ),
             safe_target_label=selected.candidate.label,
+            target_aliases=selected.candidate.aliases,
             private_binding_ref=binding_ref,
             operation="run",
             protocol_version=1,
@@ -567,6 +643,7 @@ class RemoteBackendExecutor:
         )
         ready_seen = False
         ready_invalid = False
+        acknowledged_owner: tuple[str, str] | None = None
 
         def current_transition(
             status: str, owner_ref: str | None, generation: str | None
@@ -579,10 +656,15 @@ class RemoteBackendExecutor:
                     current.task_slug != run.task_slug
                     or current.repo != run.repo
                     or current.host_name != run.host_name
-                    or current.host_endpoint_fingerprint != run.host_endpoint_fingerprint
+                    or current.host_endpoint_fingerprint
+                    != run.host_endpoint_fingerprint
                 ):
                     return None
-                if current.status == status:
+                if (
+                    current.status == status
+                    and current.owner_ref == owner_ref
+                    and current.owner_generation == generation
+                ):
                     return current
                 try:
                     return transaction.app_runs.transition(
@@ -594,14 +676,23 @@ class RemoteBackendExecutor:
                         owner_generation=generation,
                         now=datetime.now(timezone.utc),
                     )
-                except (KeyError, ValueError, RuntimeError):
+                except KeyError, ValueError, RuntimeError:
                     return None
 
+        def mark_unknown() -> None:
+            with self.store.read() as transaction:
+                current = transaction.app_runs.get(transaction.connection, run.id)
+            if current is not None:
+                current_transition(
+                    "unknown", current.owner_ref, current.owner_generation
+                )
+
         def launch_event(event: Any) -> None:
-            nonlocal ready_seen, ready_invalid
+            nonlocal acknowledged_owner, ready_seen, ready_invalid
             if self.event_sink is not None:
                 self.event_sink(event)
-            if backend.session_owner is None or getattr(event, "kind", None) != "ready":
+            kind = getattr(event, "kind", None)
+            if kind not in {"started", "ready"}:
                 return
             result = getattr(event, "result", None)
             owner_ref = getattr(result, "owner_ref", None)
@@ -614,36 +705,162 @@ class RemoteBackendExecutor:
                 or source_revision != run.backend_revision
             ):
                 ready_invalid = True
-                current_transition("unknown", None, None)
+                mark_unknown()
+                return
+            if kind == "started":
+                acknowledged = current_transition("starting", owner_ref, generation)
+                if (
+                    acknowledged is None
+                    or acknowledged.status != "starting"
+                    or acknowledged.owner_ref != owner_ref
+                    or acknowledged.owner_generation != generation
+                ):
+                    ready_invalid = True
+                    mark_unknown()
+                else:
+                    acknowledged_owner = (owner_ref, generation)
+                return
+            with self.store.read() as transaction:
+                current = transaction.app_runs.get(transaction.connection, run.id)
+            if (
+                acknowledged_owner is None
+                or current is None
+                or current.owner_ref != owner_ref
+                or current.owner_generation != generation
+                or acknowledged_owner != (owner_ref, generation)
+            ):
+                ready_invalid = True
+                mark_unknown()
                 return
             activated = current_transition("active", owner_ref, generation)
             if activated is None or activated.status != "active":
                 ready_invalid = True
-                current_transition("unknown", None, None)
+                mark_unknown()
                 return
+            if on_ready is not None:
+                on_ready(activated)
             ready_seen = True
 
-        result = self(selected.host, execution, event_sink=launch_event)
+        result = self(
+            selected.host,
+            execution,
+            event_sink=launch_event,
+            cancel_event=cancel_event,
+        )
         with self.store.read() as transaction:
             current = transaction.app_runs.get(transaction.connection, run.id)
-        if current is None:
-            raise TargetSelectionError("identity_lost", "selected run is no longer available")
-        if backend.session_owner is not None:
+        stopped_by_host = (
+            acknowledged_owner is not None
+            and result.error_code == "cancelled"
+            and (result.owner_ref, result.owner_generation) == acknowledged_owner
+        )
+        if (
+            current is not None
+            and not ready_seen
+            and cancel_event is not None
+            and cancel_event.is_set()
+            and current.owner_ref is not None
+        ):
+            self.cancel_run(current)
+            with self.store.read() as transaction:
+                current = transaction.app_runs.get(transaction.connection, run.id)
+        if current is not None:
             if ready_invalid or not ready_seen:
-                status = "unknown" if result.error_code in {"identity_lost", "protocol_error"} else "failed"
+                status = "unknown" if result.error_code is not None else "failed"
                 current_transition(status, current.owner_ref, current.owner_generation)
             elif current.status == "active":
-                terminal_status = "failed" if result.error_code is not None else "stopped"
-                current_transition(terminal_status, current.owner_ref, current.owner_generation)
-        elif result.error_code is not None:
-            current_transition("failed", None, None)
-        elif current.status == "starting" and result.owner_ref is not None:
-            current_transition("active", result.owner_ref, result.owner_generation)
+                if stopped_by_host:
+                    current_transition(
+                        "stopped", current.owner_ref, current.owner_generation
+                    )
+                elif result.error_code is not None:
+                    current_transition(
+                        "failed", current.owner_ref, current.owner_generation
+                    )
+                elif result.exit_code is not None:
+                    current_transition(
+                        "stopped", current.owner_ref, current.owner_generation
+                    )
         with self.store.read() as transaction:
             final = transaction.app_runs.get(transaction.connection, run.id)
         if final is None:
-            raise TargetSelectionError("identity_lost", "selected run is no longer available")
+            # Close may remove the record before this stream consumes its result.
+            # A caller-local cancellation has no owner receipt and is not proof.
+            if (
+                acknowledged_owner is not None
+                and not ready_invalid
+                and (
+                    stopped_by_host
+                    or (result.error_code is None and result.exit_code == 0)
+                )
+            ):
+                return replace(
+                    run,
+                    owner_ref=acknowledged_owner[0],
+                    owner_generation=acknowledged_owner[1],
+                    status="stopped",
+                    revision=run.revision + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            raise TargetSelectionError(
+                "identity_lost", "selected run is no longer available"
+            )
         return final
+
+    def cancel_run(self, run: AppRun) -> None:
+        """Stop only the exact acknowledged owner for a scheduled profile run."""
+        if (
+            run.task_slug != self.task_obj.slug
+            or run.owner_ref is None
+            or run.owner_generation is None
+        ):
+            return
+        from mship.core.remote_client import RemoteExecError, stop_session
+        from mship.core.run_host import RunHostError, RunHostStore
+
+        host = RunHostStore(self.store.state_dir).effective_hosts().get(run.host_name)
+        if (
+            host is None
+            or host.scope != run.host_scope
+            or host_endpoint_fingerprint(
+                "|".join(registration_identity(host.connection))
+            )
+            != run.host_endpoint_fingerprint
+        ):
+            outcome = "unknown"
+        else:
+            try:
+                outcome = stop_session(
+                    task=run.task_slug,
+                    repo=run.repo,
+                    owner_ref=run.owner_ref,
+                    generation=run.owner_generation,
+                    source_revision=run.backend_revision,
+                    host=host,
+                    resolver=self._resolver,
+                    transport=self.transport,
+                )
+            except RemoteExecError, RunHostError, ValueError:
+                outcome = "unknown"
+        with self.store.write(immediate=True) as transaction:
+            current = transaction.app_runs.get(transaction.connection, run.id)
+            if (
+                current is None
+                or current.owner_ref != run.owner_ref
+                or current.owner_generation != run.owner_generation
+                or current.status not in {"starting", "active", "updating"}
+            ):
+                return
+            transaction.app_runs.transition(
+                transaction.connection,
+                run_id=current.id,
+                expected_revision=current.revision,
+                status="stopped" if outcome == "stopped" else "unknown",
+                owner_ref=current.owner_ref,
+                owner_generation=current.owner_generation,
+                now=datetime.now(timezone.utc),
+            )
+
 
 def resolve_launch(
     *,

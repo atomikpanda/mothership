@@ -244,22 +244,35 @@ class AndroidProfileOptions:
     package: str
     component: str
     instrumentation: str | None
+    platform: str | None = None
+    transport: str | None = None
 
     @classmethod
     def from_value(
         cls, value: object, binding: AndroidBinding
     ) -> "AndroidProfileOptions":
-        data = strict_object(value, {"package", "component", "instrumentation"})
-        package = _text(data["package"], pattern=_PACKAGE, field="profile package")
+        if not isinstance(value, dict) or set(value) not in (
+            {"package", "component", "instrumentation"},
+            {"package", "component", "instrumentation", "platform", "transport"},
+        ):
+            raise _error("invalid", "Invalid Android profile options")
+        package = _text(value["package"], pattern=_PACKAGE, field="profile package")
         component = _text(
-            data["component"], pattern=_COMPONENT, field="profile component"
+            value["component"], pattern=_COMPONENT, field="profile component"
         )
-        instrument = data["instrumentation"]
+        instrument = value["instrumentation"]
         if instrument is not None:
             instrument = _text(instrument, pattern=_COMPONENT, field="instrumentation")
+        platform, transport = value.get("platform"), value.get("transport")
+        if platform is not None and platform != "android":
+            raise _error("unavailable", "Android profile platform is unavailable")
+        if transport is not None and transport not in {"usb", "emulator"}:
+            raise _error("invalid", "Invalid Android profile transport")
+        if transport is not None and transport != binding.transport:
+            raise _error("unavailable", "Android profile transport is unavailable")
         if package != binding.package or component != binding.component:
             raise _error("invalid", "Android profile does not match selected target")
-        return cls(package, component, instrument)
+        return cls(package, component, instrument, platform, transport)
 
 
 @dataclass(frozen=True)

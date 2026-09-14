@@ -1,0 +1,19 @@
+{
+  "devices_l": "R58MREDACTED\tdevice usb:1-2 product:oriole model:Pixel_8 device:oriole transport_id:7\nemulator-5554\tdevice product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:3\nR58UNAUTHORIZED\tunauthorized usb:1-3 transport_id:8\n",
+  "properties": {
+    "R58MREDACTED": {
+      "ro.serialno": "redacted-hardware-serial",
+      "ro.build.fingerprint": "google/oriole/oriole:15/AP4A.250205.002/1234567:userdebug/dev-keys",
+      "ro.product.device": "oriole",
+      "ro.build.version.sdk": "35",
+      "ro.kernel.qemu.avd_name": ""
+    },
+    "emulator-5554": {
+      "ro.serialno": "emulator-redacted-5554",
+      "ro.build.fingerprint": "google/sdk_gphone64_x86_64/emu64xa:35/AP3A.241105.007/1234567:userdebug/dev-keys",
+      "ro.product.device": "emu64xa",
+      "ro.build.version.sdk": "35",
+      "ro.kernel.qemu.avd_name": "Pixel_9_API_35"
+    }
+  }
+}

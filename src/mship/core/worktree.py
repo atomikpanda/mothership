@@ -36,7 +36,9 @@ class WorktreeDirtyError(RuntimeError):
 
     def __init__(self, task_slug: str, dirty: dict[str, str]) -> None:
         self.task_slug = task_slug
-        self.dirty = dirty  # repo_name -> reason ("uncommitted changes" | "unpushed commits")
+        self.dirty = (
+            dirty  # repo_name -> reason ("uncommitted changes" | "unpushed commits")
+        )
         details = "; ".join(f"{repo}: {reason}" for repo, reason in dirty.items())
         super().__init__(
             f"Refusing to tear down '{task_slug}': {details}. "
@@ -70,11 +72,15 @@ def _symlink_gitignore_footgun(repo_path: Path, name: str) -> bool:
 
     On any error we bail to False (no warning) to avoid false positives.
     """
+
     def _probe(path_fragment: str) -> subprocess.CompletedProcess | None:
         try:
             return subprocess.run(
                 ["git", "check-ignore", "--", path_fragment],
-                cwd=repo_path, capture_output=True, text=True, check=False,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
             )
         except OSError:
             return None
@@ -87,10 +93,7 @@ def _symlink_gitignore_footgun(repo_path: Path, name: str) -> bool:
     # Fallback for post-symlink case: probe via non-existent parent to force
     # pure pattern matching when the direct dir-form probe hits the
     # "beyond a symbolic link" error.
-    if (
-        dir_r.returncode == 128
-        and "beyond a symbolic link" in dir_r.stderr.lower()
-    ):
+    if dir_r.returncode == 128 and "beyond a symbolic link" in dir_r.stderr.lower():
         dir_r = _probe(f"_mship_probe_absent_/{name}/")
         if dir_r is None:
             return False
@@ -184,7 +187,10 @@ class WorktreeManager:
         based on whether `skipped` is non-empty.
         """
         result: dict[str, list] = {
-            "copied": [], "updated": [], "unchanged": [], "skipped": [],
+            "copied": [],
+            "updated": [],
+            "unchanged": [],
+            "skipped": [],
             "warnings": [],
         }
         if not repo_config.bind_files:
@@ -262,7 +268,7 @@ class WorktreeManager:
         # Warn on missing literals (no glob chars) before running the enum.
         for entry in repo_config.bind_files:
             if any(c in entry for c in "*?["):
-                continue   # it's a glob; zero-match handled silently below
+                continue  # it's a glob; zero-match handled silently below
             if not (source_root / entry).exists():
                 warnings.append(
                     f"{repo_name}: bind_files source missing: {entry} (will not be copied)"
@@ -308,7 +314,10 @@ class WorktreeManager:
         overwrite=True — that would risk destroying user data.
         """
         result: dict[str, list] = {
-            "copied": [], "updated": [], "unchanged": [], "skipped": [],
+            "copied": [],
+            "updated": [],
+            "unchanged": [],
+            "skipped": [],
             "warnings": [],
         }
         if not repo_config.symlink_dirs:
@@ -579,12 +588,18 @@ class WorktreeManager:
                 effective = parent_wt / repo_config.path
                 worktrees[repo_name] = effective
 
-                symlink_warnings = self._create_symlinks(repo_name, repo_config, effective)
+                symlink_warnings = self._create_symlinks(
+                    repo_name, repo_config, effective
+                )
                 setup_warnings.extend(symlink_warnings)
                 bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
                 setup_warnings.extend(bind_warnings)
 
-                if not is_passive and not skip_setup and shutil.which("task") is not None:
+                if (
+                    not is_passive
+                    and not skip_setup
+                    and shutil.which("task") is not None
+                ):
                     actual_setup = repo_config.tasks.get("setup", "setup")
                     setup_result = self._shell.run_task(
                         task_name="setup",
@@ -637,7 +652,9 @@ class WorktreeManager:
                 #     defeat the stacked base).
                 start_point = None
                 if not offline and self._git.has_remote(repo_path):
-                    self._git.fetch_remote_ref(repo_path=repo_path, ref=base)  # refresh; may flap
+                    self._git.fetch_remote_ref(
+                        repo_path=repo_path, ref=base
+                    )  # refresh; may flap
                 if self._git.ref_exists(repo_path, f"origin/{base}"):
                     start_point = f"origin/{base}"
                 elif self._git.ref_exists(repo_path, base):
@@ -658,8 +675,10 @@ class WorktreeManager:
                 cut_base = repo_config.base_branch or default_base or "main"
                 if not offline and self._git.has_remote(repo_path):
                     if self._git.fetch_remote_ref(repo_path=repo_path, ref=cut_base):
-                        start_point = f"origin/{cut_base}"        # cut from fetched tip
-                        self._git.fast_forward_if_clean(repo_path=repo_path, base=cut_base)
+                        start_point = f"origin/{cut_base}"  # cut from fetched tip
+                        self._git.fast_forward_if_clean(
+                            repo_path=repo_path, base=cut_base
+                        )
                     else:
                         setup_warnings.append(
                             f"{repo_name}: could not fetch origin/{cut_base} — worktree cut "
@@ -673,7 +692,9 @@ class WorktreeManager:
                 # that rather than silently defaulting to HEAD.
                 if start_point is None and self._git.ref_exists(repo_path, cut_base):
                     start_point = cut_base
-                elif start_point is None and self._git.ref_exists(repo_path, f"origin/{cut_base}"):
+                elif start_point is None and self._git.ref_exists(
+                    repo_path, f"origin/{cut_base}"
+                ):
                     start_point = f"origin/{cut_base}"
                 if start_point is None:
                     # MOS-203: the preflight above should already have caught
@@ -794,6 +815,24 @@ class WorktreeManager:
             if dirty:
                 raise WorktreeDirtyError(task_slug, dirty)
 
+        # App-run rows carry private target bindings and may describe a live
+        # owner.  The close facade must reconcile and remove them first; this
+        # lower-level primitive never guesses a host or process from durable
+        # metadata after worktrees have begun disappearing.
+        with self._state_manager.workspace_store.read() as transaction:
+            has_app_runs = bool(
+                transaction.app_runs.list_for_task(
+                    transaction.connection, task_slug=task_slug
+                )
+            )
+        if has_app_runs:
+            from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
+
+            raise TaskMetadataRetentionConflictError(
+                task_slug,
+                "recorded app runs require close cleanup before worktree teardown",
+            )
+
         removal_failed = False
         for repo_name, wt_path in task.worktrees.items():
             repo_config = self._config.repos[repo_name]
@@ -814,7 +853,9 @@ class WorktreeManager:
                 # Leave it on disk for `mship prune` to reap.
                 removal_failed = True
                 logger.warning(
-                    "worktree remove failed for %s (%s); left intact", repo_name, wt_path,
+                    "worktree remove failed for %s (%s); left intact",
+                    repo_name,
+                    wt_path,
                 )
             try:
                 self._git.branch_delete(
@@ -855,7 +896,4 @@ class WorktreeManager:
 
     def list_worktrees(self) -> dict[str, dict[str, Path]]:
         state = self._state_manager.load()
-        return {
-            slug: dict(task.worktrees)
-            for slug, task in state.tasks.items()
-        }
+        return {slug: dict(task.worktrees) for slug, task in state.tasks.items()}

@@ -131,43 +131,60 @@ def owner_profile_input_files(
         source_revision=source_revision,
     )
     backend = config.run_backends[request.backend]
-    if backend.session_owner is not None and preparation == "observe":
+    if preparation == "observe":
         if TARGET_CONTEXT_FILE in input_files or parent_input_files is None:
             raise ValueError("session observation requires parent-owned target context")
-        if any(key not in parent_input_files for key in (TARGET_CONTEXT_FILE, TARGET_BINDINGS_FILE)):
+        if any(
+            key not in parent_input_files
+            for key in (TARGET_CONTEXT_FILE, TARGET_BINDINGS_FILE)
+        ):
             raise ValueError("session parent inputs are unavailable")
         parent_context = _decode_profile_json(parent_input_files[TARGET_CONTEXT_FILE])
         expected = {
-            "task": task, "repo": repo, "profile": request.profile,
-            "backend": request.backend, "backend_revision": source_revision,
+            "task": task,
+            "repo": repo,
+            "profile": request.profile,
+            "backend": request.backend,
+            "backend_revision": source_revision,
             "profile_revision": request.profile_revision,
             "session_owner": backend.session_owner,
         }
         if any(parent_context.get(key) != value for key, value in expected.items()):
             raise ValueError("session observation identity does not match parent")
+        capabilities = parent_context.get("capabilities")
+        if not isinstance(capabilities, list) or request.operation not in capabilities:
+            raise ValueError("recorded owner does not grant this operation")
         files = dict(input_files)
-        files[TARGET_REQUEST_FILE] = json.dumps(request.model_dump(mode="json"), separators=(",", ":"))
+        files[TARGET_REQUEST_FILE] = json.dumps(
+            request.model_dump(mode="json"), separators=(",", ":")
+        )
         files[TARGET_BINDINGS_FILE] = parent_input_files[TARGET_BINDINGS_FILE]
-        # The registry, not this request, supplies the sealed context to the child.
+        files[TARGET_CONTEXT_FILE] = parent_input_files[TARGET_CONTEXT_FILE]
+        # The live registry supplies both target identity and original host bindings.
         return files
     normalized_context: str | None = None
     context_payload = input_files.get(TARGET_CONTEXT_FILE)
     if context_payload is not None:
         try:
             context = _decode_profile_json(context_payload)
-            if backend.session_owner is not None:
-                expected = {
-                    "protocol_version": 1, "task": task, "repo": repo,
-                    "profile": request.profile, "profile_revision": request.profile_revision,
-                    "backend": request.backend, "backend_revision": source_revision,
-                }
-                if (preparation != "launch"
-                        or any(context.get(key) != value for key, value in expected.items())
-                        or not isinstance(context.get("run_id"), str)
-                        or not isinstance(context.get("private_binding"), dict)):
-                    raise ValueError("session launch identity does not match selection")
-                context["session_owner"] = backend.session_owner
-                context["task_keys"] = dict(backend.operations)
+            expected = {
+                "protocol_version": 1,
+                "task": task,
+                "repo": repo,
+                "profile": request.profile,
+                "profile_revision": request.profile_revision,
+                "backend": request.backend,
+                "backend_revision": source_revision,
+            }
+            if (
+                preparation != "launch"
+                or any(context.get(key) != value for key, value in expected.items())
+                or not isinstance(context.get("run_id"), str)
+                or not isinstance(context.get("private_binding"), dict)
+            ):
+                raise ValueError("session launch identity does not match selection")
+            context["session_owner"] = backend.session_owner
+            context["task_keys"] = dict(backend.operations)
             normalized_context = json.dumps(
                 context,
                 separators=(",", ":"),
@@ -175,7 +192,11 @@ def owner_profile_input_files(
             )
         except (RecursionError, TypeError, ValueError) as error:
             raise ValueError("invalid profile context") from error
-    if backend.session_owner is not None and preparation == "launch" and normalized_context is None:
+    if (
+        backend.session_owner is not None
+        and preparation == "launch"
+        and normalized_context is None
+    ):
         raise ValueError("session launch requires a selected run context")
     if home is None:
         home = Path.home()

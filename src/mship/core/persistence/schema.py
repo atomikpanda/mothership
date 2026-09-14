@@ -102,6 +102,7 @@ app_runs = Table(
     Column("operation", Text, nullable=False),
     Column("protocol_version", Integer, nullable=False),
     Column("capabilities_json", Text, nullable=False),
+    Column("target_aliases_json", Text, nullable=False, server_default=text("'[]'")),
     Column("owner_ref", Text),
     Column("owner_generation", Text),
     Column("status", Text, nullable=False),
@@ -172,14 +173,21 @@ task_results = Table(
         name="outcome_exit_code",
     ),
     Index("ix_task_results_workspace_task", "workspace_id", "task_slug", "created_at"),
-    Index("ix_task_results_workspace_item", "workspace_id", "work_item_id", "created_at"),
+    Index(
+        "ix_task_results_workspace_item", "workspace_id", "work_item_id", "created_at"
+    ),
 )
 
 task_result_artifacts = Table(
     "task_result_artifacts",
     metadata,
     Column("id", Text, primary_key=True),
-    Column("result_id", Text, ForeignKey("task_results.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "result_id",
+        Text,
+        ForeignKey("task_results.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("ordinal", Integer, nullable=False),
     Column("name", Text, nullable=False),
     Column("media_type", Text, nullable=False),

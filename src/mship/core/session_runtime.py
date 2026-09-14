@@ -32,7 +32,7 @@ class SessionPreparation:
     """An internal server capability, never decoded from the public request."""
 
     operation: str
-    owner_kind: str
+    owner_kind: str | None
     sealed_context: str | None = field(default=None, repr=False)
     install: InstallFromResult | None = None
     result_store: TaskResultStore | None = field(default=None, repr=False)
@@ -40,8 +40,18 @@ class SessionPreparation:
     capture_platform: str | None = None
 
     def __post_init__(self) -> None:
-        if self.owner_kind not in {"android", "flutter"}:
+        if self.owner_kind not in {None, "android", "flutter"}:
             raise SessionError("invalid", "Invalid configured session owner")
+        if self.owner_kind is None:
+            if (
+                self.operation != "run"
+                or self.sealed_context is None
+                or self.install is not None
+                or self.capture_kinds is not None
+                or self.capture_platform is not None
+            ):
+                raise SessionError("invalid", "Invalid generic session")
+            return
         if self.install is not None and self.owner_kind != "android":
             raise SessionError(
                 "invalid", "Flutter cannot consume a native installation grant"

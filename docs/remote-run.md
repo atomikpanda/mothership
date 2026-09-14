@@ -33,7 +33,7 @@ writes, and pool acquisition retain five-second timeouts. There is no overall
 client run deadline; interrupt the command when you want to stop waiting.
 This does not disable timeouts imposed by a proxy or relay on the route.
 
-Without `--remote`, nothing changes — `mship run/capture/build` behave exactly as before.
+Without `--remote`, legacy unprofiled `mship run`, `capture`, and `build` behavior is unchanged. A task-bound `run` that selects a repository declaring `run_profiles` deliberately enters the profile-aware path even without an explicit `--profile`; see [Profile-aware runs and observations](#profile-aware-runs-and-observations).
 
 ## Declaring roles (`mothership.yaml`)
 
@@ -162,221 +162,136 @@ mship capture --repo ios-app --remote=ios-sim-host
 
 Bare `--remote` (no `=role`) auto-resolves in this order: the target repo's declared `run_host`, else the sole entry in `run_hosts` if there's exactly one. Two or more roles with nothing chosen is an ambiguous-role error (see below).
 
-## Profile-aware Android and Flutter sessions
+## Profile-aware runs and observations
 
-The ordinary `mship run`, `capture`, and `logs` commands retain their legacy
-meaning. A configured run profile is the opt-in path for a durable,
-target-aware session:
+`run_profiles` is the opt-in, task-bound path for durable target-aware runs. A
+bare run selects each configured repository's `default_run_profile`; when no
+default is declared, human TTY output presents a profile chooser, while a
+non-interactive run requires `--profile`. `--profile` chooses a configured
+profile, `--host` restricts it to a configured host registration, and `--target`
+restricts it to a discovered configured target alias:
 
 ```bash
-# Establish one selected, acknowledged profile run.
-mship run --task feature-a --repos app --profile android-debug \
+# Default profile, or the TTY chooser for each selected profiled repository.
+mship run --task feature-a --repos app
+
+# Explicit profile launch, constrained to an approved host and target alias.
+mship run --task feature-a --repos app --profile android-usb \
   --host lab-android --target pixel-8
-
-# Observe that exact recorded run; neither command chooses another target.
-mship capture --task feature-a --repo app --run-id <run-id> --platform android
-mship logs --task feature-a --repo app --run-id <run-id>
-
-# Only Flutter sessions support an explicit source handoff and reload.
-mship run --task feature-a --repos app --run-id <run-id> \
-  --update-and-hot-reload
 ```
 
-Profile launch requires exactly one task-bound repository. `--profile` selects a
-configured profile; `--host` constrains it to one configured host registration,
-and `--target` constrains it to a configured target alias. A repository's
-`default_run_profile` supplies the profile only after `--host` or `--target`
-has entered the profile-aware path; a bare `mship run` retains normal behavior.
+Each selected profiled repository must resolve against the active task. Before
+any application launches, mship discovers and preflights every selected profile;
+the dependency graph's ready boundaries remain in force. Each launched
+repository gets one separate run ID. A selected repository with no profiles
+keeps the ordinary unprofiled flow; requesting a profile, host, or target for
+such a repository is an error rather than a fallback.
 
-`--run-id` is an observation identity, not a device selector. Capture requires
-an active task and matching repository; its optional `--remote` value must
-match the recorded host role. Logs with `--run-id` also require an active task
-and one matching repository. The stored run must be active, acknowledged, and
-still have the requested configured capability. A missing, changed, inactive,
-or ambiguous run is refused: mship does not rediscover a replacement target,
-switch host, fall back to legacy capture/logs, or launch a new owner. When no
-`--run-id` is supplied, capture may use the sole healthy matching recorded run;
-multiple or uncertain recorded runs require an explicit ID and likewise never
-cause target rediscovery.
+### Automatic observation selectors
 
-### Public profile configuration and private task wrappers
+`capture` and `logs` observe recorded runs rather than selecting a new device.
+For a task-bound repository with profiles (or existing recorded candidates),
+they automatically reuse exactly one matching active, acknowledged `AppRun`.
+Several matching runs use the TTY chooser when available or require a more
+specific selector in non-interactive use; no matching run tells the operator to
+establish one with `mship run`. The optional selectors narrow **recorded** runs:
+`--run-id` selects its identity, and `--profile`, `--host`, and `--target`
+filter the profile, original host, and attested target alias respectively.
 
-`run_profiles` selects a named backend, eligible host roles, and the backend's
-reviewed options. `run_backends` maps logical task names through the repository
-`tasks` map. `session_owner` is exactly `android` or `flutter` for these
-owners. The following compact example shows both owners; names are illustrative
-but keys and option shapes are literal:
+```bash
+# Reuse the sole acknowledged run for app, if there is exactly one.
+mship capture --task feature-a --repo app
+mship logs app --task feature-a
 
-```yaml
-repos:
-  app:
-    path: /srv/app
-    type: service
-    tasks:
-      android-discover: session:android-discover
-      android-run: session:android-run
-      android-capture: session:android-capture
-      android-logs: session:android-logs
-      flutter-discover: session:flutter-discover
-      flutter-run: session:flutter-run
-      flutter-capture: session:flutter-capture
-      flutter-logs: session:flutter-logs
-      flutter-reload: session:flutter-reload
-    run_backends:
-      android-native:
-        session_owner: android
-        discover_task: android-discover
-        operations:
-          run: android-run
-          capture: android-capture
-          logs: android-logs
-      flutter:
-        session_owner: flutter
-        discover_task: flutter-discover
-        operations:
-          run: flutter-run
-          capture: flutter-capture
-          logs: flutter-logs
-          reload: flutter-reload
-    run_profiles:
-      android-debug:
-        backend: android-native
-        hosts: {roles: [android-lab]}
-        options:
-          package: com.example.app
-          component: com.example.app/.MainActivity
-          instrumentation: null
-      flutter-debug:
-        backend: flutter
-        hosts: {roles: [android-lab]}
-        options:
-          entrypoint: lib/main.dart
-          flavor: null
-          mode: debug
+# Observe a particular recorded run; these do not launch or rediscover a target.
+mship capture --task feature-a --repo app --run-id <run-id>
+mship logs app --task feature-a --run-id <run-id>
 ```
 
-The configured logical tasks are deliberately thin, silent wrappers. On the
-host, the server supplies `MSHIP_SESSION_PYTHON`; use it rather than relying on
-the shell's `python`. Discovery invokes the adapter with `discover`; the
-ordinary `run`, `capture`, `logs`, and `reload` wrappers invoke it with no
-operation argument, because the sealed owner channel supplies the operation.
+The recorded private binding determines the observation platform. `capture`
+infers it when `--platform` is omitted; a supplied `--platform` must agree with
+the recorded platform. `--kind` remains an artifact-kind selector
+(`image`, `layout`, or `all`), not a backend operation selector. A supplied
+`--remote` must name one of the recorded host's roles, rather than rerouting
+the observation. `logs --all` means every configured service/repository; it
+never means every device or every recorded run.
 
-```yaml
-# Taskfile.yml in app (the task aliases above map to these names)
-version: '3'
-tasks:
-  session:android-discover:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.android_session discover'
-  session:android-run:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.android_session'
-  session:android-capture:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.android_session'
-  session:android-logs:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.android_session'
-  session:flutter-discover:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.flutter_session discover'
-  session:flutter-run:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.flutter_session'
-  session:flutter-capture:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.flutter_session'
-  session:flutter-logs:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.flutter_session'
-  session:flutter-reload:
-    silent: true
-    cmds:
-      - '"{{.MSHIP_SESSION_PYTHON}}" -m mship.core.flutter_session'
-```
+The run ID is an observation identity, not a device selector. An observation
+uses the exact recorded host registration, owner reference, generation, source
+revision, profile/backend revision, and private binding. A changed host,
+configuration, target, source identity, missing binding, inactive run, or
+unacknowledged owner is refused. Mship does not transfer source, rerun setup,
+rediscover a target, launch a replacement, or fall back to legacy
+capture/logging for that observation.
 
-Do not put device serials, endpoints, credentials, or binding paths in this
-public configuration. Host tools and the owner-private bindings must already
-exist; normal profile discovery/launch never installs SDK components, creates
-an emulator, pairs a device, provisions a target, or uses an ambient fallback.
-The private binding file is
+### Profile configuration, host bindings, and examples
+
+`run_profiles` names a backend, eligible host roles, and reviewed options;
+`run_backends` maps discovery and operation names through the repository's
+`tasks:` mapping. The portable
+[five-backend configuration example](../examples/run-targets/mothership.yaml)
+is the complete opt-in schema. Its
+[root Taskfile](../examples/run-targets/Taskfile.yml) composes executable thin
+wrappers for [Android CLI](../examples/run-targets/android-cli/),
+[Flutter](../examples/run-targets/flutter/), [iOS simulator](../examples/run-targets/ios/),
+[browser](../examples/run-targets/browser/), and
+[PlatformIO](../examples/run-targets/platformio/). Use these linked examples
+instead of copying unreviewed command lines into public configuration.
+
+Keep executable paths, target aliases, SDK/app templates, device identities,
+credentials, and state directories in the owner-private
 `$XDG_CONFIG_HOME/mothership/run-target-bindings.yaml` (or
-`~/.config/mothership/run-target-bindings.yaml`). For a native Android backend,
-its selected raw binding is
-`backends.<backend>.paths.android.bindings.<target_key>`; discovery exposes only
-the envelope `{target_key, android: <raw binding>}`. Android fixture mapping
-identity includes the selected device and the complete `kind`, `local`, and
-`remote` tuple—not one port endpoint alone.
-Creation uses `--no-rebind`; cleanup refuses a missing device identity, an
-ambiguous listing, or a mapping that no longer matches its recorded tuple.
-ADB removal itself accepts only an endpoint, not an expected-value comparison:
-an external replacement between the final identity check and removal remains
-a protocol limitation.
+`~/.config/mothership/run-target-bindings.yaml`). Discovery is read-only:
+normal launch and observation do not install SDK components, create emulators,
+pair or provision devices, start a daemon, or adopt an ambient target. The
+selected host must already have the required SDK/toolchain and a prepared
+application or simulator state. `host_tools` provides explicit mise tool
+installation and readiness inspection only; it does not provision platform
+components or targets.
 
-### Owner boundaries, update, and provenance
+The Android and Flutter backends retain their concrete native owners and binary
+provenance rules. Generic project-script backends use the existing
+`OwnerContext.from_environ()` lifecycle: call `begin()` before the first owner
+mutation, acknowledge ready only after admission, and call
+`finish(cleanup_known=...)` after cleanup has proved its result. The iOS
+example supports configured simulators; physical iOS stays unavailable until a
+concrete native USB owner exists. The browser example manages configured
+Playwright instances, not an attached native Safari session.
 
-The `android` owner is the native Android manager: it owns the sealed Android
-binding, launch, capture, instrumentation, fixture setup, and cleanup for its
-one selected session. It does not manage iOS. `flutter` is a distinct,
-framework-owned `flutter run --machine` session with its own target validation
-and lifecycle; a Flutter target may be Android or iOS, but this does **not**
-create a native iOS session manager.
+PlatformIO intentionally maps its durable `run` operation to board monitoring.
+Its `upload` mapping is a separate typed, finite operation, not a new generic
+CLI command or a lifetime-owning session.
 
-Native and Flutter owners share exclusive app admission within one host account.
-A second live owner of the same platform/device/app is `busy` before installation
-or launch; stopping that rejected request cannot stop the first owner's app.
-Different apps or devices remain independent. A recovered native journal alone
-cannot authorize force-stop: without its live lease, recovery may acknowledge an
-already-absent app but leaves a still-running app `unknown`.
+### Owner cleanup and provenance
 
-`--update-and-hot-reload` is intentionally narrow: it requires exactly
-`--run-id` and no `--profile`, `--host`, or `--target`; it also requires one
-task-bound repository, a recorded active Flutter run with `reload` capability,
-and a non-result-producing configured `run` task. It snapshots and transfers
-the selected repository to the recorded host, reserves the exact owner,
-applies the certified source, commits the new recorded source identity, then
-asks that same Flutter owner to reload. It cannot select or recreate another
-session. A `busy` reply means the owner/update lease is occupied; an
-`unknown` result means the outcome cannot be safely established. Neither is a
-reason to retry automatically, replace the owner, or observe as though the
-old run were healthy; establish a new run when mship reports an unknown
-outcome.
-The owned worktree must still be clean and at its certified original HEAD.
-Dependency, native/build, Taskfile, and host-tool configuration changes require
-setup or a fresh launch and are refused by this source-only operation. Reload
-success requires an owner-signed completion receipt bound to the exact source
-transaction; task exit status or echoed JSON cannot certify it.
+On normal `mship close`, mship resolves the exact recorded host registration
+and asks the exact recorded owner/generation to stop. Only after a confirmed
+stop does it mark the run stopped, delete its metadata, and remove an
+unreferenced private binding. A failed, unknown, unreachable, changed, or
+unmatched host/owner leaves its recovery metadata and private binding intact
+and blocks close; it is never redirected to a role-derived replacement host.
 
-Source provenance and binary provenance are different. A source snapshot
+Source provenance and binary provenance are distinct. A source snapshot
 certifies the worktree revision delivered to a host; it does not attest an APK,
-app bundle, or running binary. The one internal installation capability is
-`InstallFromResult(result_id, artifact_id, sha256)`: the host verifies the
-specified immutable result artifact and digest before granting it to an owner.
-It has no public `mship install` command, and consumers still own platform
+app bundle, or running binary. The internal
+`InstallFromResult(result_id, artifact_id, sha256)` capability verifies an
+immutable result artifact and digest before granting it to an owner, but it has
+no public `mship install`, upload, or attach command. Consumers retain platform
 binary verification, installation policy, and their provenance record.
 
-Selected capture and source update use existing authenticated remote operations,
-not a new public lifecycle API. `POST /exec/session-capture` carries the
-recorded owner observation and uses the established nonce-framed capture stream
-to return `screen.png`/layout artifacts. `POST /exec/source-update` performs
-the bounded, staged Flutter source handoff. Both compose with the existing
-#507 typed tool/owner channel and its authenticated host selection; neither
-accepts a caller-supplied device binding or silently reroutes a session.
+`--update-and-hot-reload` remains Flutter-only: it requires exactly `--run-id`,
+one task-bound repository, a recorded active run with `reload`, and no
+`--profile`, `--host`, or `--target`. It transfers a certified source update to
+that exact owner; it cannot select or recreate a session. Dependency, native
+build, Taskfile, or host-tool changes require setup or a fresh launch.
 
 ### Session verification boundary
 
 Current evidence is Linux-only supervised fake-tool and HTTP-fixture coverage
-of the owner/channel, source handoff, and capture framing. It is not acceptance
-evidence for a real Android device, iOS device or simulator, emulator
-provisioning, production relay, or hardware toolchain.
+of the owner/channel, source handoff, capture framing, and cleanup contracts.
+It is not acceptance evidence for Android or iOS hardware, an iOS simulator,
+emulator provisioning, browser-engine execution, firmware upload, or a
+production relay path.
 
 ## Pinned host tools
 
@@ -694,12 +609,11 @@ typed request with redirects disabled. Relay authentication may refresh once
 only before any streamed event is accepted; there is no token fallback or local
 fallback.
 
-This internal surface activates neither profile CLI flags nor real backend
-implementations. In particular, #530 adds no `mship run --profile`, profile
-capture, or profile logs command; it grants no device-session authority,
-stable reconnect, or caller provisioning. The existing public relay boundary is
-unchanged: #506 relay integration and native/device evidence remain separate
-release work.
+This internal surface powers the profile CLI path and recorded-run observation;
+it is not a caller-provisioning or arbitrary-command API. It grants no
+automatic device/session recovery, SDK/device provisioning, or public
+`mship install`, upload, or attach command. Native/device and real relay
+acceptance remain separate evidence boundaries.
 
 ### Environment, ownership and durable evidence
 
