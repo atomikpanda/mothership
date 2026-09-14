@@ -47,6 +47,10 @@ _STATUS_VALUES = frozenset(
         "unknown",
         "evidence_error",
         "unsupported",
+        "unreachable",
+        "unauthed",
+        "unauthorized",
+        "workspace_unavailable",
     }
 )
 _PREPARATIONS = frozenset({"discover", "launch", "observe"})
@@ -193,6 +197,8 @@ class ToolRequest:
     max_stdout_bytes: int | None = None
     max_stderr_bytes: int | None = None
     timeout_seconds: float | None = None
+    # Server-recognized host-tools operation; no caller argv may accompany it.
+    host_tools_action: Literal["diagnose", "bootstrap"] | None = None
 
     def __post_init__(self) -> None:
         task = _name(self.task, field_name="task")
@@ -205,10 +211,13 @@ class ToolRequest:
         if not isinstance(self.argv, tuple) or len(self.argv) > _MAX_ARGV_COUNT:
             _reject("invalid argv")
         argv = tuple(_text(value, field_name="argv") for value in self.argv)
-        if not argv and self.preparation != "observe" and task_key is None:
+        if not argv and self.preparation != "observe" and task_key is None and self.host_tools_action is None:
             _reject("argv is required")
         if task_key is not None and argv:
             _reject("task key requires empty argv")
+        if self.host_tools_action is not None:
+            if self.host_tools_action not in {"diagnose", "bootstrap"} or argv or task_key is not None:
+                _reject("invalid host tools action")
         if (
             not isinstance(self.input_files, Mapping)
             or len(self.input_files) > _MAX_ENV_COUNT
@@ -291,6 +300,7 @@ class ToolRequest:
         object.__setattr__(self, "source_revision", source_revision)
         object.__setattr__(self, "owner_ref", owner_ref)
         object.__setattr__(self, "generation", generation)
+        object.__setattr__(self, "host_tools_action", self.host_tools_action)
         object.__setattr__(self, "timeout_seconds", timeout)
         try:
             request_size = len(
@@ -304,7 +314,7 @@ class ToolRequest:
             _reject("tool request exceeds size limit")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "task": self.task,
             "repo": self.repo,
             "argv": list(self.argv),
@@ -321,6 +331,9 @@ class ToolRequest:
             "max_stderr_bytes": self.max_stderr_bytes,
             "timeout_seconds": self.timeout_seconds,
         }
+        if self.host_tools_action is not None:
+            payload["host_tools_action"] = self.host_tools_action
+        return payload
 
     @classmethod
     def from_dict(cls, data: object) -> "ToolRequest":
@@ -343,9 +356,10 @@ class ToolRequest:
                 "max_stdout_bytes",
                 "max_stderr_bytes",
                 "timeout_seconds",
+                "host_tools_action",
             }
         )
-        optional = frozenset({"task_key", "input_files"})
+        optional = frozenset({"task_key", "input_files", "host_tools_action"})
         if set(data) - fields or not (fields - optional) <= set(data):
             _reject("invalid tool payload")
         if not isinstance(data["argv"], list) or not isinstance(
@@ -368,6 +382,7 @@ class ToolRequest:
             max_stdout_bytes=data["max_stdout_bytes"],
             max_stderr_bytes=data["max_stderr_bytes"],
             timeout_seconds=data["timeout_seconds"],
+            host_tools_action=data.get("host_tools_action"),
         )
 
 
@@ -380,6 +395,9 @@ class ToolResult:
     source_revision: str | None = None
     stdout: bytes = field(default=b"", repr=False)
     stderr: bytes = field(default=b"", repr=False)
+    # Optional server-created safe host-tools projection. Never reflects request
+    # argv/env or child output and remains omitted for ordinary tool results.
+    host_tools_report: Mapping[str, object] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, str) or self.status not in _STATUS_VALUES:
@@ -404,12 +422,24 @@ class ToolResult:
             or len(self.stderr) > MAX_DISCOVERY_STDERR_BYTES
         ):
             _reject("invalid stderr")
+        report = self.host_tools_report
+        if report is not None:
+            if not isinstance(report, Mapping):
+                _reject("invalid host tools report")
+            try:
+                encoded_report = json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            except (TypeError, UnicodeError):
+                _reject("invalid host tools report")
+            if len(encoded_report) > _MAX_TEXT_BYTES * 4:
+                _reject("invalid host tools report")
+            report = MappingProxyType(dict(report))
         object.__setattr__(self, "owner_ref", owner_ref)
         object.__setattr__(self, "generation", generation)
         object.__setattr__(self, "source_revision", source_revision)
+        object.__setattr__(self, "host_tools_report", report)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "status": self.status,
             "exit_code": self.exit_code,
             "owner_ref": self.owner_ref,
@@ -418,23 +448,28 @@ class ToolResult:
             "stdout": base64.b64encode(self.stdout).decode("ascii"),
             "stderr": base64.b64encode(self.stderr).decode("ascii"),
         }
+        if self.host_tools_report is not None:
+            payload["host_tools_report"] = dict(self.host_tools_report)
+        return payload
 
     @classmethod
     def from_dict(cls, data: object) -> "ToolResult":
-        data = _object(
-            data,
-            fields=frozenset(
-                {
-                    "status",
-                    "exit_code",
-                    "owner_ref",
-                    "generation",
-                    "source_revision",
-                    "stdout",
-                    "stderr",
-                }
-            ),
+        if not isinstance(data, Mapping):
+            _reject("invalid tool payload")
+        fields = frozenset(
+            {
+                "status",
+                "exit_code",
+                "owner_ref",
+                "generation",
+                "source_revision",
+                "stdout",
+                "stderr",
+                "host_tools_report",
+            }
         )
+        if set(data) - fields or not (fields - {"host_tools_report"}) <= set(data):
+            _reject("invalid tool payload")
         return cls(
             status=data["status"],
             exit_code=data["exit_code"],
@@ -451,6 +486,7 @@ class ToolResult:
                 field_name="stderr",
                 max_bytes=MAX_DISCOVERY_STDERR_BYTES,
             ),
+            host_tools_report=data.get("host_tools_report"),
         )
 
 

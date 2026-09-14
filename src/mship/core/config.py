@@ -8,6 +8,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from mship.core.run_target.models import BackendConfig, RunProfile, safe_identifier
 from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
+from mship.core.host_tools import HostToolsConfig
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,9 @@ class RepoConfig(BaseModel):
     # re-run-on-change. Deliberately explicit rather than inferred — an operator
     # can see and widen a declared key; they cannot inspect a heuristic.
     setup_inputs: list[str] = []
+    # Optional selected-host mise declaration.  The nested model is strict while
+    # WorkspaceConfig remains intentionally permissive for compatibility.
+    host_tools: HostToolsConfig | None = None
     # Strict profile/backend schema is deliberately scoped to these new nested
     # values; WorkspaceConfig retains its established permissive compatibility.
     run_profiles: dict[str, RunProfile] = {}

@@ -73,6 +73,7 @@ except ModuleNotFoundError:
 from mship.core import capture as _cap
 from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
+from mship.core import host_tools
 from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
 from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
 from mship.core.tool_process import ToolOperationRegistry
@@ -640,8 +641,19 @@ def _setup_events(
     if not remote_setup.needs_setup(key_path, key):
         yield ToolEvent("result", result=ToolResult("completed", exit_code=0))
         return
-    yield ToolEvent("stdout", data=f"setup: {name} (task {actual})\n".encode())
-    request = ToolRequest(task=prepared.task, repo=name, argv=("task", actual))
+    setup_argv: tuple[str, ...] = ("task", actual)
+    setup_env: dict[str, str] = {}
+    if config.host_tools is not None:
+        setup_argv = ("mise", "exec", "--", "task", actual)
+        setup_env = host_tools.mise_environment(
+            worktree=context.worktree,
+            state_dir=deps.workspace_root / ".mothership",
+            declaration=config.host_tools,
+            safe=False,
+        )
+    request = ToolRequest(
+        task=prepared.task, repo=name, argv=setup_argv, env=setup_env
+    )
     stream = _operations(deps).run(
         request,
         context,
@@ -781,6 +793,199 @@ def _run_verb_stream_unlocked(
     yield f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode()
 
 
+def _host_tool_runner(
+    *,
+    command: host_tools.HostToolCommand,
+    context: ToolContext,
+    deps: RemoteExecDeps,
+) -> host_tools.HostToolInvocation:
+    """Run one server-created mise/catalog probe through the existing owner."""
+    request = ToolRequest(
+        task=context.task,
+        repo=context.repo,
+        argv=command.argv,
+        env=command.environment,
+        preparation="launch" if command.mutating else "discover",
+        max_stdout_bytes=None if command.mutating else 64 * 1024,
+        max_stderr_bytes=None if command.mutating else 16 * 1024,
+        timeout_seconds=None if command.mutating else 20,
+    )
+    probe_context = replace(context, env_runner=None)
+    events = _operations(deps).run(
+        request, probe_context, cancel_event=deps.cancel_event, spawn=deps.shell.spawn_argv
+    )
+    result = ToolResult("protocol_error")
+    try:
+        for event in events:
+            if event.kind == "result" and event.result is not None:
+                result = event.result
+    finally:
+        events.close()
+    return host_tools.HostToolInvocation(
+        status=result.status,
+        exit_code=result.exit_code,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def _host_tool_report(
+    request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
+) -> ToolResult | None:
+    """Resolve a typed host-tools request after server source materialization."""
+    if request.host_tools_action is None:
+        return None
+    declaration = deps.config.repos[request.repo].host_tools
+    if declaration is None:
+        resolution = host_tools.HostToolResolution(
+            host_tools.server_identity(deps.workspace_root / ".mothership"),
+            context.task,
+            context.repo,
+            context.source_revision,
+            None,
+            None,
+            None,
+            "invalid_configuration",
+        )
+    else:
+        state_dir = deps.workspace_root / ".mothership"
+        identity = host_tools.server_identity(state_dir)
+        runner = lambda command: _host_tool_runner(command=command, context=context, deps=deps)
+        if request.host_tools_action == "bootstrap":
+            resolution = host_tools.bootstrap(
+                declaration=declaration,
+                worktree=context.worktree,
+                state_dir=state_dir,
+                identity=identity,
+                task=context.task,
+                repo=context.repo,
+                source_revision=context.source_revision,
+                run=runner,
+            )
+        else:
+            resolution = host_tools.diagnose(
+                declaration=declaration,
+                worktree=context.worktree,
+                state_dir=state_dir,
+                identity=identity,
+                task=context.task,
+                repo=context.repo,
+                source_revision=context.source_revision,
+                run=runner,
+            )
+    report = host_tools.doctor_report(resolution).safe_dict()
+    return ToolResult(
+        "completed",
+        exit_code=0,
+        host_tools_report=report,
+    )
+
+
+def _bootstrap_host_tool_events(
+    request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
+) -> Generator[ToolEvent, None, None]:
+    """Bootstrap once, forwarding the actual install stream before its report."""
+    declaration = deps.config.repos[request.repo].host_tools
+    state_dir = deps.workspace_root / ".mothership"
+    if declaration is None:
+        report = _host_tool_report(request, context, deps=deps)
+        yield ToolEvent("result", result=report or ToolResult("invalid"))
+        return
+    identity = host_tools.server_identity(state_dir)
+    runner = lambda command: _host_tool_runner(command=command, context=context, deps=deps)
+    resolution = host_tools.diagnose(
+        declaration=declaration, worktree=context.worktree, state_dir=state_dir,
+        identity=identity, task=context.task, repo=context.repo,
+        source_revision=context.source_revision, run=runner,
+    )
+    if resolution.status == "healthy":
+        host_tools.record_receipt(state_dir, resolution)
+        yield ToolEvent("result", result=ToolResult("completed", exit_code=0, host_tools_report=host_tools.doctor_report(resolution).safe_dict()))
+        return
+    if resolution.status in {"invalid_configuration", "missing_mise"}:
+        yield ToolEvent("result", result=ToolResult("completed", exit_code=1, host_tools_report=host_tools.doctor_report(resolution).safe_dict()))
+        return
+    environment = host_tools.mise_environment(
+        worktree=context.worktree, state_dir=state_dir, declaration=declaration,
+        locked=resolution.lock_digest is not None, safe=False,
+    )
+    install = ToolRequest(
+        task=context.task, repo=context.repo, argv=("mise", "install"),
+        env=environment, preparation="launch",
+    )
+    stream = _operations(deps).run(
+        install, replace(context, env_runner=None), cancel_event=deps.cancel_event,
+        spawn=deps.shell.spawn_argv,
+    )
+    outcome = ToolResult("protocol_error")
+    owner: ToolResult | None = None
+    try:
+        for event in stream:
+            if event.kind == "started" and event.result is not None:
+                owner = event.result
+                yield event
+            elif event.kind in {"stdout", "stderr"}:
+                yield event
+            elif event.kind == "result" and event.result is not None:
+                outcome = event.result
+    finally:
+        stream.close()
+    if outcome.status == "completed" and outcome.exit_code == 0:
+        resolution = host_tools.diagnose(
+            declaration=declaration, worktree=context.worktree, state_dir=state_dir,
+            identity=identity, task=context.task, repo=context.repo,
+            source_revision=context.source_revision, run=runner,
+        )
+        if resolution.status == "healthy":
+            host_tools.record_receipt(state_dir, resolution)
+    result = ToolResult(
+        "completed", exit_code=0 if resolution.status == "healthy" else 1,
+        owner_ref=None if owner is None else owner.owner_ref,
+        generation=None if owner is None else owner.generation,
+        source_revision=None if owner is None else owner.source_revision,
+        host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+    )
+    yield ToolEvent("result", result=result)
+def _resolve_host_tools_for_launch(
+    request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
+) -> ToolResult | ToolRequest | None:
+    """Gate setup and launch on server-side readiness; never provision here."""
+    declaration = deps.config.repos[request.repo].host_tools
+    if declaration is None:
+        return request
+    state_dir = deps.workspace_root / ".mothership"
+    resolution = host_tools.diagnose(
+        declaration=declaration,
+        worktree=context.worktree,
+        state_dir=state_dir,
+        identity=host_tools.server_identity(state_dir),
+        task=context.task,
+        repo=context.repo,
+        source_revision=context.source_revision,
+        run=lambda command: _host_tool_runner(command=command, context=context, deps=deps),
+    )
+    if resolution.status != "healthy":
+        return ToolResult(
+            "completed",
+            exit_code=1,
+            host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+        )
+    actual = request.argv[1] if len(request.argv) == 2 and request.argv[0] == "task" else None
+    if actual is None:
+        return None
+    if any(key.startswith("MISE_") for key in request.env):
+        return ToolResult("invalid")
+    environment = host_tools.mise_environment(
+        worktree=context.worktree,
+        state_dir=state_dir,
+        declaration=declaration,
+        safe=False,
+    )
+    return replace(
+        request,
+        argv=("mise", "exec", "--", "task", actual),
+        env={**request.env, **environment},
+    )
 def _resolve_tool_request(
     request: ToolRequest, *, deps: RemoteExecDeps
 ) -> ToolRequest | None:
@@ -788,6 +993,13 @@ def _resolve_tool_request(
     repo_config = deps.config.repos.get(request.repo)
     if repo_config is None:
         return None
+    if request.host_tools_action is not None:
+        if request.env or request.input_files or request.task_key is not None:
+            return None
+        expected = "discover" if request.host_tools_action == "diagnose" else "launch"
+        if request.preparation != expected:
+            return None
+        return request
     try:
         profile_inputs = {
             TARGET_REQUEST_FILE,
@@ -877,6 +1089,26 @@ def run_tool_stream(
         ):
             yield ToolEvent("result", result=ToolResult("materialization_error"))
             return
+        if request.host_tools_action == "bootstrap":
+            yield from _bootstrap_host_tool_events(request, context, deps=deps)
+            return
+        if request.host_tools_action is not None:
+            report = _host_tool_report(request, context, deps=deps)
+            if report is None:
+                yield ToolEvent("result", result=ToolResult("invalid"))
+            else:
+                yield ToolEvent("result", result=report)
+            return
+        host_tools_resolution = _resolve_host_tools_for_launch(
+            request, context, deps=deps
+        )
+        if isinstance(host_tools_resolution, ToolResult):
+            yield ToolEvent("result", result=host_tools_resolution)
+            return
+        if host_tools_resolution is None:
+            yield ToolEvent("result", result=ToolResult("invalid"))
+            return
+        request = host_tools_resolution
         if request.preparation == "launch":
             setup_result = ToolResult("protocol_error")
             setup_stream = _setup_events(prepared, request.repo, context)

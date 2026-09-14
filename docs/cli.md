@@ -170,7 +170,7 @@ mship view status|journal|diff|spec [--watch]
 mship view spec --web                               # serve rendered spec on localhost
 mship graph
 mship worktrees
-mship doctor [--no-network]                         # workspace health; --no-network skips connectivity probes
+mship doctor [--no-network] [--remote[=role] --task TASK --repo REPO] # local health or read-only selected-host tools report
 mship net status [--no-network]                     # connectivity topology: serve, relay, run hosts, gh auth, egress
 mship ui [--no-browser] [--host h] [--port p]       # open the serve-host console (opens a browser, else prints a copyable link)
 ```
@@ -263,6 +263,13 @@ that selected directory identity until `--apply` writes a private backup and
 replaces the named direct mapping. No relay command accepts, prints, or stores a
 fleet credential, refresh credential, bearer, standing token, or mutable public
 relay URL.
+For a repository that declares `host_tools`, inspect only its selected remote
+worktree with `mship doctor --remote[=role] --task TASK --repo REPO`. Provision
+that exact reviewed mise declaration only with
+`mship bootstrap --host-tools --remote[=role] --task TASK --repo REPO`.
+Neither command probes the caller's toolchain, runs application setup/tasks, or
+accepts SDK licenses. Ordinary `doctor` and `bootstrap` retain their existing
+local workspace behavior.
 
 #530's profile/runtime code does **not** add `--profile`, `--host`, or
 `--target` flags to `mship run`; it does not add profile capture or profile logs

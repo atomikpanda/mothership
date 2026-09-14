@@ -1382,3 +1382,18 @@ def test_run_target_config_identifiers_reject_empty_or_control_characters(run_pr
             run_backends=run_backends,
             default_run_profile=default,
         )
+
+
+def test_host_tools_declaration_is_strict_and_optional():
+    repo = RepoConfig(
+        path=Path("."),
+        type="service",
+        host_tools={"mise": {"manifest": ".mise.toml"}},
+    )
+    assert repo.host_tools is not None
+    with pytest.raises(ValueError, match="extra_forbidden"):
+        RepoConfig(
+            path=Path("."),
+            type="service",
+            host_tools={"mise": {"manifest": ".mise.toml", "unexpected": True}},
+        )

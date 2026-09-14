@@ -331,8 +331,16 @@ def _exec_tool_once(
                 "POST", url, headers=headers, json=request.to_dict()
             ) as response:
                 if response.status_code >= 400:
-                    # Do not parse or surface an untrusted error payload: it can
-                    # contain credentials echoed by an intermediary.
+                    # Host-tools reports preserve only typed transport/auth
+                    # categories. Ordinary requests retain the established
+                    # auth_error/protocol_error behavior.
+                    if request.host_tools_action is not None:
+                        status = {
+                            401: "unauthed",
+                            403: "unauthorized",
+                            503: "workspace_unavailable",
+                        }.get(response.status_code, "unreachable")
+                        return ToolResult(status=status)
                     return ToolResult(
                         status="auth_error"
                         if response.status_code in {401, 403}
@@ -351,21 +359,30 @@ def _exec_tool_once(
                     _raw_chunks(response),
                     nonce,
                 ):
-                    if request.preparation == "discover" and event.kind in {
-                        "stdout",
-                        "stderr",
-                    }:
+                    if (
+                        request.preparation == "discover"
+                        and request.host_tools_action != "bootstrap"
+                        and event.kind in {"stdout", "stderr"}
+                    ):
                         return ToolResult(status="protocol_error")
                     result = event.result
                     if result is not None:
                         if (
-                            event.kind == "started"
-                            or result.status in {"running", "completed"}
-                            or accepted is not None
-                        ) and (
-                            result.owner_ref is None
-                            or result.generation is None
-                            or result.source_revision is None
+                            not (
+                                request.host_tools_action is not None
+                                and event.kind == "result"
+                                and result.host_tools_report is not None
+                            )
+                            and (
+                                event.kind == "started"
+                                or result.status in {"running", "completed"}
+                                or accepted is not None
+                            )
+                            and (
+                                result.owner_ref is None
+                                or result.generation is None
+                                or result.source_revision is None
+                            )
                         ):
                             return ToolResult(status="protocol_error")
                         if (
@@ -397,6 +414,7 @@ def _exec_tool_once(
                             event.kind == "result"
                             and result.status == "completed"
                             and accepted is None
+                            and request.host_tools_action is None
                             and (request.preparation != "observe" or bool(request.argv))
                         ):
                             return ToolResult(status="protocol_error")
@@ -427,7 +445,11 @@ def _exec_tool_once(
                 if event_sink is not None:
                     event_sink(terminal_event)
                 return final
-    except (httpx.HTTPError, ToolProtocolError, UnicodeError, ValueError):
+    except httpx.HTTPError:
+        return ToolResult(
+            status="unreachable" if request.host_tools_action is not None else "protocol_error"
+        )
+    except (ToolProtocolError, UnicodeError, ValueError):
         return ToolResult(status="protocol_error")
 
 

@@ -162,6 +162,27 @@ mship capture --repo ios-app --remote=ios-sim-host
 
 Bare `--remote` (no `=role`) auto-resolves in this order: the target repo's declared `run_host`, else the sole entry in `run_hosts` if there's exactly one. Two or more roles with nothing chosen is an ambiguous-role error (see below).
 
+## Pinned host tools
+
+A repo may optionally declare a strict `host_tools.mise` manifest and native
+lock in `mothership.yaml`. The declaration is read only from the selected
+host's materialized task worktree; global, ancestor, local, fragment, and
+environment-selected mise configuration are isolated and rejected if discovered.
+
+```bash
+# Read-only, selected-host diagnosis. Requires one task and repo.
+mship doctor --remote=android-emu-host --task feature-a --repo app
+
+# The only command that installs declared mise tools. It runs bare `mise install`,
+# rechecks the same declaration, and records a safe host-local readiness receipt.
+mship bootstrap --host-tools --remote=android-emu-host --task feature-a --repo app
+```
+
+Normal remote execution never installs tools: it verifies readiness before
+repository setup and runs the authorized task as `mise exec -- task <actual>`
+with mise auto-install disabled. These commands never install Android SDK
+components, accept licenses, touch devices, or execute a caller-side probe.
+
 ## The two-credential model
 
 Two different credentials are in play, and they never mix:

@@ -262,6 +262,7 @@ Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends
 | `capture` | UI-capture config — a `platforms:` list `mship capture` can target (`--platform` required when more than one). |
 | `run_host` | Logical run-host role this repo uses for `--remote` execution (`mship build`/`capture`). Must name an entry in the workspace `run_hosts:` list. |
 | `setup_inputs` | Manifests/lockfiles whose content decides whether a **remote** run re-runs `task setup` on the run host (glob patterns, matched inside the materialized worktree). Undeclared means setup runs on first materialization only — declaring them is what enables re-run-on-change. See [`remote-run.md`](remote-run.md). |
+| `host_tools` | Optional strict selected-host mise declaration. Its manifest (and optional native lock) is validated only in the server-materialized worktree; it enables `doctor --remote` readiness inspection and explicit `bootstrap --host-tools`, never implicit provisioning. |
 | `run_profiles` | Internal profile definitions. Each profile names a configured `backend`, non-empty host `roles` (all declared in workspace `run_hosts`), optional host `tags`, and JSON-compatible `options`. Defining one does not add a CLI profile command. |
 | `run_backends` | Internal backend definitions: `discover_task` and an `operations` map from operation to logical task key. Every referenced key must exist in this repo's `tasks:` mapping; the host resolves the key rather than accepting arbitrary argv. |
 | `default_run_profile` | Optional configured profile name. It must name an entry in `run_profiles`; it is not currently consumed by `mship run`, `capture`, or `logs`. |
@@ -288,7 +289,22 @@ repos:
     setup_inputs: [build.gradle, gradle/libs.versions.toml]   # remote runs re-run `task setup` when these change
     capture:
       platforms: [android, ios]    # `mship capture --platform android|ios`
+    host_tools:
+      mise:
+        manifest: .mise.toml
+        lock: mise.lock
+      requirements:
+        - {id: android-sdk, kind: sdk}
+        - {id: android-adb, kind: tool}
 ```
+
+When the native `mise.lock` references a dependency graph, sidecars may be
+declared only as digest-pinned regular files. A lock entry may use either
+`{path = "uv.lock", digest = "sha256:..."}` or the bounded directory form
+`{directory = ".aube", files = {"graph.json" = "sha256:..."}}`. Every listed
+file must stay beneath the materialized worktree, be non-symlinked, and match
+its digest; at most 64 files per directory, 128 files total, and 1 MiB of
+sidecar bytes are admitted. The directory itself is not recursively trusted.
 
 ### Internal profile/backend configuration
 
