@@ -419,6 +419,49 @@ def test_linux_group_scan_accepts_zombie_with_unreadable_unrelated_stat(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process ownership")
+def test_darwin_cleanup_reaps_zombie_group_without_signalling(monkeypatch):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 3
+        while not shell_module._owned_process_exited(proc):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        monkeypatch.setattr(shell_module.sys, "platform", "darwin")
+
+        def reject_zombie_signal(_group, _signal):
+            raise PermissionError("Darwin refuses signalling zombie-only groups")
+
+        monkeypatch.setattr(shell_module.os, "killpg", reject_zombie_signal)
+        shell_module._terminate_owned_process_group(proc)
+        assert proc.returncode == 0
+    finally:
+        proc.wait(timeout=3)
+
+
+def test_darwin_group_scan_does_not_hide_live_descendant(monkeypatch):
+    monkeypatch.setattr(
+        shell_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=b"424242 Z\n424242 S+\n999999 Z\n"
+        ),
+    )
+    assert shell_module._darwin_group_has_executable_member(424242)
+
+
+def test_darwin_group_scan_rejects_unverifiable_inventory(monkeypatch):
+    monkeypatch.setattr(
+        shell_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=b"unparseable\n"
+        ),
+    )
+    with pytest.raises(ValueError):
+        shell_module._darwin_group_has_executable_member(424242)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process ownership")
 def test_cleanup_never_signals_a_group_after_its_leader_was_reaped(monkeypatch):
     proc = shell_module.subprocess.Popen(
         [shell_module.sys.executable, "-c", "pass"],

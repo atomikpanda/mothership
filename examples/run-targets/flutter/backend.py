@@ -93,11 +93,11 @@ def _run(argv: tuple[str, ...]) -> bytes:
 def _template(bindings: Mapping[str, object]) -> dict[str, object]:
     paths = bindings.get("paths")
     value = paths.get("flutter") if isinstance(paths, dict) else None
-    allowed = {
+    allowed = (
         _TEMPLATE_FIELDS | {"android"},
         _TEMPLATE_FIELDS | {"ios"},
         _TEMPLATE_FIELDS | {"android", "ios"},
-    }
+    )
     if not isinstance(value, dict) or set(value) not in allowed:
         raise ExampleError("Flutter host bindings are unavailable")
     executable = value["executable"]

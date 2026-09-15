@@ -70,6 +70,15 @@ For the full configuration schema, see [Configuration](../configuration.md);
 for selected-host and remote-session behavior, see
 [Profile-aware runs and observations](../remote-run.md#profile-aware-runs-and-observations).
 
+The native iOS example launches an already-installed bundle on an already-booted
+simulator. It verifies the exact bundle/PID acknowledgement from `simctl launch`
+before reporting readiness and refuses a pre-existing app process. Closing its
+run terminates that owned app, not the simulator. Launching a Flutter-built bundle
+this way is still a native iOS session: it does not establish a Flutter framework
+owner or enable hot reload. Transferred source alone does not prove which source
+built the installed binary; binary provenance remains unknown without verified
+build evidence.
+
 ## Build artifacts
 
 ```bash

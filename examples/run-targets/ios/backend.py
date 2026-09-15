@@ -527,12 +527,17 @@ def _assert_app_absent(
 def _launch_pid(xcrun: str, binding: Mapping[str, str]) -> int:
     output = _run((xcrun, "simctl", "launch", binding["uuid"], binding["bundle_id"]))
     try:
-        value = output.decode("ascii").strip()
+        bundle_id, separator, value = output.decode("ascii").strip().partition(": ")
     except UnicodeDecodeError as error:
         raise _fail(
             "identity-lost", "iOS simulator launch did not acknowledge an app identity"
         ) from error
-    if not value.isdecimal() or not 0 < int(value) <= 2**31 - 1:
+    if (
+        not separator
+        or bundle_id != binding["bundle_id"]
+        or not value.isdecimal()
+        or not 0 < int(value) <= 2**31 - 1
+    ):
         raise _fail(
             "identity-lost", "iOS simulator launch did not acknowledge an app identity"
         )

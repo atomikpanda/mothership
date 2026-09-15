@@ -170,3 +170,16 @@ def test_flutter_owner_materialization_refuses_context_without_platform(
 
     with pytest.raises(backend.ExampleError, match="explicit platform"):
         backend._owner_bindings()
+
+
+def test_flutter_discovery_reports_unavailable_binding_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    backend = _module("flutter_mobile_discovery", _FLUTTER)
+    monkeypatch.setattr(backend, "load_request", _request)
+    monkeypatch.setattr(backend, "load_bindings", lambda: {"paths": {}})
+
+    backend.discover()
+
+    inventory = json.loads(capsys.readouterr().out)
+    assert inventory["errors"][0]["code"] == "flutter_unavailable"

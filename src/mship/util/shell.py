@@ -78,6 +78,8 @@ def _has_owned_process_group(proc: subprocess.Popen) -> bool:
     pid = getattr(proc, "pid", None)
     if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform == "darwin":
+        return _darwin_group_has_executable_member(pid)
     return (
         _linux_group_has_executable_member(pid)
         if sys.platform.startswith("linux")
@@ -178,6 +180,24 @@ def _linux_group_has_executable_member(process_group: int) -> bool:
                 if state not in {b"X", b"Z", b"x"}:
                     return True
 
+    return not found_member and _has_owned_process_group_id(process_group)
+
+
+def _darwin_group_has_executable_member(process_group: int) -> bool:
+    """Inspect group members without reaping the leader that pins its identity."""
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pgid=,stat="],
+        capture_output=True,
+        check=True,
+        timeout=2,
+    )
+    found_member = False
+    for line in result.stdout.splitlines():
+        group, state = line.split()
+        if int(group) == process_group:
+            found_member = True
+            if not state.startswith(b"Z"):
+                return True
     return not found_member and _has_owned_process_group_id(process_group)
 
 
@@ -285,7 +305,15 @@ def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> Non
         if os.name != "nt" and isinstance(pid, int) and pid > 0:
             # A waitable leader pins its PID until the last group signal.
             # Never recover ownership from an already-reaped numeric PGID.
-            _owned_process_exited(proc)
+            exited = _owned_process_exited(proc)
+            # Darwin returns EPERM when a group contains only zombies.
+            # Keep the waitable leader pinned until the last group signal.
+            if (
+                exited
+                and sys.platform == "darwin"
+                and not _darwin_group_has_executable_member(pid)
+            ):
+                return
             os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
             return
         if proc.poll() is not None:
@@ -307,6 +335,8 @@ def _wait_for_owned_process_group_quiescence(proc: subprocess.Popen) -> None:
     while (
         _linux_group_has_executable_member(pid)
         if sys.platform.startswith("linux")
+        else _darwin_group_has_executable_member(pid)
+        if sys.platform == "darwin"
         else _has_owned_process_group_id(pid)
     ):
         remaining = deadline - time.monotonic()

@@ -167,6 +167,37 @@ def test_lifetime_refuses_preexisting_foreign_app_before_launch(
         )
 
 
+def test_launch_acknowledges_exact_bundle_and_pid(monkeypatch: pytest.MonkeyPatch):
+    backend = _backend()
+    monkeypatch.setattr(
+        backend, "_run", lambda *_args: b"com.example.product: 731\n"
+    )
+    assert backend._launch_pid(
+        "/opt/xcrun", {"uuid": _UUID, "bundle_id": "com.example.product"}
+    ) == 731
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        b"com.example.other: 731\n",
+        b"731\n",
+        b"com.example.product: 0\n",
+        b"com.example.product: 2147483648\n",
+        b"com.example.product: 731\nunexpected\n",
+    ],
+)
+def test_launch_rejects_unacknowledged_identity(
+    monkeypatch: pytest.MonkeyPatch, receipt: bytes
+):
+    backend = _backend()
+    monkeypatch.setattr(backend, "_run", lambda *_args: receipt)
+    with pytest.raises(backend.BackendError, match="identity"):
+        backend._launch_pid(
+            "/opt/xcrun", {"uuid": _UUID, "bundle_id": "com.example.product"}
+        )
+
+
 def test_run_lifetime_terminates_only_the_verified_owned_launch_on_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
