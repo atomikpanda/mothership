@@ -44,7 +44,7 @@ function sha(value) {
 }
 
 function output(value) {
-  return new Promise((resolve) => process.stdout.write(JSON.stringify(value), resolve));
+  return new Promise((resolve) => process.stdout.write(JSON.stringify(value) + '\n', resolve));
 }
 
 async function playwright(modulePath) {
@@ -280,8 +280,12 @@ async function observe(payload) {
   if (!validReceipt(payload.receipt)) fail();
   const api = await playwright(payload.playwright_module);
   const browser = await api[payload.receipt.engine].connect(payload.receipt.endpoint);
-  await selectedPage(browser, payload.receipt);
-  await output({ page_url: payload.receipt.page_url, page_marker: payload.receipt.page_marker });
+  try {
+    await selectedPage(browser, payload.receipt);
+    await output({ page_url: payload.receipt.page_url, page_marker: payload.receipt.page_marker });
+  } finally {
+    await browser.close();
+  }
 }
 
 async function capture(payload) {
@@ -290,16 +294,20 @@ async function capture(payload) {
       || typeof payload.capture_layout !== 'boolean') fail();
   const api = await playwright(payload.playwright_module);
   const browser = await api[payload.receipt.engine].connect(payload.receipt.endpoint);
-  const page = await selectedPage(browser, payload.receipt);
-  if (payload.kinds.includes('image')) await page.screenshot({ path: join(payload.directory, 'screen.png') });
-  if (payload.kinds.includes('layout')) {
-    if (!payload.capture_layout) fail();
-    const html = await page.content();
-    if (Buffer.byteLength(html, 'utf8') > LIMIT) fail();
-    await writeFile(join(payload.directory, 'layout.html'), html, { mode: 0o600, flag: 'w' });
-    await chmod(join(payload.directory, 'layout.html'), 0o600);
+  try {
+    const page = await selectedPage(browser, payload.receipt);
+    if (payload.kinds.includes('image')) await page.screenshot({ path: join(payload.directory, 'screen.png') });
+    if (payload.kinds.includes('layout')) {
+      if (!payload.capture_layout) fail();
+      const html = await page.content();
+      if (Buffer.byteLength(html, 'utf8') > LIMIT) fail();
+      await writeFile(join(payload.directory, 'layout.html'), html, { mode: 0o600, flag: 'w' });
+      await chmod(join(payload.directory, 'layout.html'), 0o600);
+    }
+    await output({ page_url: payload.receipt.page_url, page_marker: payload.receipt.page_marker });
+  } finally {
+    await browser.close();
   }
-  await output({ page_url: payload.receipt.page_url, page_marker: payload.receipt.page_marker });
 }
 
 
@@ -307,20 +315,24 @@ async function logs(payload) {
   if (!validReceipt(payload.receipt)) fail();
   const api = await playwright(payload.playwright_module);
   const browser = await api[payload.receipt.engine].connect(payload.receipt.endpoint);
-  const page = await selectedPage(browser, payload.receipt);
-  page.on('console', (message) => {
-    process.stdout.write(JSON.stringify({
-      type: 'console', level: message.type(), text: message.text().slice(0, 4096),
-    }) + '\n');
-  });
-  page.on('pageerror', (error) => {
-    process.stdout.write(JSON.stringify({ type: 'pageerror', text: String(error.message).slice(0, 4096) }) + '\n');
-  });
-  await new Promise((resolve) => {
-    const stop = () => resolve(undefined);
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-  });
+  try {
+    const page = await selectedPage(browser, payload.receipt);
+    page.on('console', (message) => {
+      process.stdout.write(JSON.stringify({
+        type: 'console', level: message.type(), text: message.text().slice(0, 4096),
+      }) + '\n');
+    });
+    page.on('pageerror', (error) => {
+      process.stdout.write(JSON.stringify({ type: 'pageerror', text: String(error.message).slice(0, 4096) }) + '\n');
+    });
+    await new Promise((resolve) => {
+      const stop = () => resolve(undefined);
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+    });
+  } finally {
+    await browser.close();
+  }
 }
 let launchCleanupReported = false;
 

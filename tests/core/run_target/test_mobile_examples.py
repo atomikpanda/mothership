@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -183,3 +185,71 @@ def test_flutter_discovery_reports_unavailable_binding_without_crashing(
 
     inventory = json.loads(capsys.readouterr().out)
     assert inventory["errors"][0]["code"] == "flutter_unavailable"
+
+
+def test_flutter_ios_discovery_and_probe_work_with_large_sdk_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    backend = _module("flutter_large_ios_catalog", _FLUTTER)
+    device_id = "AAAAAAAA-1111-2222-3333-AAAAAAAAAAAA"
+    data_path = tmp_path / "simulator"
+    data_path.mkdir()
+    inventory = {
+        "devices": {
+            "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{
+                "udid": device_id,
+                "isAvailable": True,
+                "state": "Booted",
+                "dataPath": str(data_path),
+                "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+            }]
+        }
+    }
+    sdk_data = tmp_path / "devices.json"
+    sdk_data.write_text(json.dumps(inventory))
+    xcrun = tmp_path / "xcrun"
+    xcrun.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"data = json.load(open({str(sdk_data)!r}))\n"
+        "if 'devices' not in sys.argv:\n"
+        "    data['devicetypes'] = ['unrelated device metadata' * 10000]\n"
+        "print(json.dumps(data))\n"
+    )
+    xcrun.chmod(0o700)
+    template = {
+        "executable": sys.executable,
+        "app_id": "com.example.product",
+        "modes": ["debug"],
+        "flavors": [None],
+        "ios": {"xcrun": str(xcrun)},
+    }
+    monkeypatch.setattr(backend, "load_request", _request)
+    monkeypatch.setattr(backend, "load_bindings", lambda: {"paths": {"flutter": template}})
+
+    backend.discover()
+
+    candidate = json.loads(capsys.readouterr().out)["candidates"][0]
+    assert candidate["ready"] is True
+    assert candidate["rank"] == [1, 26, 5, 0]
+    descriptor = candidate["binding"]
+    probe = descriptor["ios"]["probe_argv"]
+    # The child must retain the installed environment, not resolve out of its venv.
+    receipt = json.loads(subprocess.check_output(probe, timeout=10))
+    assert receipt["target_fingerprint"] == descriptor["target_fingerprint"]
+    inventory["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-26-5"][0][
+        "deviceTypeIdentifier"
+    ] = "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
+    sdk_data.write_text(json.dumps(inventory))
+    changed = json.loads(subprocess.check_output(probe, timeout=10))
+    assert changed["target_fingerprint"] != descriptor["target_fingerprint"]
+    inventory["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-26-5"][0][
+        "state"
+    ] = "Shutdown"
+    sdk_data.write_text(json.dumps(inventory))
+    backend.discover()
+    stopped = json.loads(capsys.readouterr().out)["candidates"][0]
+    assert stopped["ready"] is False
+    assert stopped["capabilities"] == []
+    refused = subprocess.run(probe, capture_output=True, timeout=10)
+    assert refused.returncode != 0

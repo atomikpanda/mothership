@@ -79,6 +79,19 @@ owner or enable hot reload. Transferred source alone does not prove which source
 built the installed binary; binary provenance remains unknown without verified
 build evidence.
 
+The Flutter example uses its own framework owner. Its simulator inventory is
+device-only and advertises operations only for booted targets; discovery never
+boots a simulator. Keep the configured Python environment available for the
+lifetime of the run: exact-target probes use that same environment. The Flutter
+project and reviewed `lib/...` entrypoint must exist at the selected worktree
+root with dependencies prepared before launch.
+
+The browser example still has an acceptance blocker: a separate Playwright
+connection cannot see the launch connection's page, so its recorded-run logs
+and capture do not yet work. Discovery and launch readiness are not proof of
+browser observation support. Do not use its advertised observation capabilities
+as a release-readiness signal until that owner/control path is corrected.
+
 ## Build artifacts
 
 ```bash

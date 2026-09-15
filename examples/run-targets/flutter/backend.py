@@ -215,7 +215,9 @@ def _ios_inventory(xcrun: str, device_id: str) -> tuple[str, tuple[int, int, int
     if not os.path.isabs(xcrun) or not os.access(xcrun, os.X_OK):
         raise SessionError("unavailable", "Flutter iOS platform tool is unavailable")
     try:
-        value = json.loads(_run((xcrun, "simctl", "list", "--json")).decode("utf-8"))
+        value = json.loads(
+            _run((xcrun, "simctl", "list", "devices", "--json")).decode("utf-8")
+        )
         devices = value["devices"]
     except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SessionError("unknown", "Flutter iOS inventory is malformed") from error
@@ -229,6 +231,7 @@ def _ios_inventory(xcrun: str, device_id: str) -> tuple[str, tuple[int, int, int
         if isinstance(item, dict)
         and item.get("udid") == device_id
         and item.get("isAvailable") is True
+        and item.get("state") == "Booted"
     ]
     if len(matches) != 1:
         raise SessionError("unavailable", "Flutter iOS simulator is unavailable")
@@ -249,9 +252,7 @@ def _ios_inventory(xcrun: str, device_id: str) -> tuple[str, tuple[int, int, int
         raise SessionError(
             "identity-unknown", "Flutter iOS simulator identity is unavailable"
         ) from error
-    rank = tuple(
-        ([0, 0, 0] + [int(value) for value in re.findall(r"\d+", runtime)[-3:]])[-3:]
-    )
+    rank = _runtime_rank({"sdk": runtime}, "ios", None)
     fingerprint = sha256(
         json.dumps(
             [
@@ -289,7 +290,7 @@ def _ios_target(
     return (
         {
             "probe_argv": [
-                str(Path(sys.executable).resolve()),
+                str(Path(sys.executable).absolute()),
                 str(Path(__file__).resolve()),
                 "--ios-probe",
                 xcrun,
@@ -345,7 +346,9 @@ def _ios_inventory_devices(template: Mapping[str, object]) -> list[dict[str, obj
     if not isinstance(xcrun, str):
         return []
     try:
-        value = json.loads(_run((xcrun, "simctl", "list", "--json")).decode("utf-8"))
+        value = json.loads(
+            _run((xcrun, "simctl", "list", "devices", "--json")).decode("utf-8")
+        )
         devices = value["devices"]
     except KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, SessionError:
         return []
