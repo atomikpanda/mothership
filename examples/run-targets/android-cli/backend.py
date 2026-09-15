@@ -14,7 +14,13 @@ from typing import Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common import ExampleError, emit_inventory, load_bindings, load_context, load_request
+from common import (
+    ExampleError,
+    emit_inventory,
+    load_bindings,
+    load_context,
+    load_request,
+)
 from mship.core.android_session import (
     AndroidBinding,
     AndroidProfileOptions,
@@ -201,7 +207,12 @@ def _dynamic_identity(serial: str, line: str) -> dict[str, object]:
         "build_fingerprint": _adb_shell(serial, "ro.build.fingerprint"),
         "product_device": _adb_shell(serial, "ro.product.device"),
         "api_level": _adb_shell(serial, "ro.build.version.sdk"),
-        "avd_name": _adb_shell(serial, "ro.kernel.qemu.avd_name"),
+        "avd_name": (
+            _adb_shell(serial, "ro.boot.qemu.avd_name")
+            or _adb_shell(serial, "ro.kernel.qemu.avd_name")
+        )
+        if transport == "emulator"
+        else "",
     }
     if not all(
         properties[name]
@@ -386,6 +397,7 @@ def _owner_bindings() -> dict[str, object]:
 def _invoke_owner() -> int:
     bindings = _owner_bindings()
     with tempfile.NamedTemporaryFile(
+        dir=Path(tempfile.gettempdir()).resolve(strict=True),
         mode="w",
         encoding="utf-8",
         prefix="mship-android-",

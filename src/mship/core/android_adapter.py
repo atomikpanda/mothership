@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 from typing import Sequence
+import xml.etree.ElementTree as ET
 
 from mship.core.session_inputs import SessionError
 from mship.util.shell import tool_runtime_environment
@@ -171,7 +172,6 @@ def probe_android(adb: str, serial: str, transport: str) -> dict[str, object]:
         "ro.build.fingerprint",
         "ro.product.device",
         "ro.build.version.sdk",
-        "ro.kernel.qemu.avd_name",
     ):
         value = _text(_adb(adb, serial, "shell", "getprop", key))
         properties[key] = value or None
@@ -195,7 +195,13 @@ def probe_android(adb: str, serial: str, transport: str) -> dict[str, object]:
         raise _failure(
             "identity-unknown", "Recorded Android API identity is unavailable"
         )
-    avd_name = properties["ro.kernel.qemu.avd_name"]
+    avd_name = None
+    if transport == "emulator":
+        avd_name = (
+            _text(_adb(adb, serial, "shell", "getprop", "ro.boot.qemu.avd_name"))
+            or _text(_adb(adb, serial, "shell", "getprop", "ro.kernel.qemu.avd_name"))
+            or None
+        )
     if transport == "emulator" and avd_name is None:
         raise _failure(
             "identity-unknown", "Recorded Android emulator identity is unavailable"
@@ -222,7 +228,10 @@ def foreground_android(adb: str, serial: str) -> str | None:
     if match and _PACKAGE.fullmatch(match.group(1)):
         return match.group(1)
     output = _text(_adb(adb, serial, "shell", "dumpsys", "activity", "activities"))
-    match = re.search(r"mResumedActivity:.*?\s([A-Za-z][\w.]+)/(?:[\w.$]+)", output)
+    match = re.search(
+        r"(?:topResumedActivity=|m?ResumedActivity:).*?\s([A-Za-z][\w.]+)/(?:[\w.$]+)",
+        output,
+    )
     return match.group(1) if match and _PACKAGE.fullmatch(match.group(1)) else None
 
 
@@ -322,8 +331,18 @@ def capture_android(
                 cancel=cancel,
                 timeout=30,
             )
-            if not layout.strip() or b"<" not in layout:
-                raise _failure("unhealthy", "Android layout capture was empty")
+            # UIAutomator appends a human-readable status after its XML on stdout.
+            end = layout.find(b"</hierarchy>")
+            if end < 0:
+                raise _failure("unhealthy", "Android layout capture was malformed")
+            layout = layout[: end + len(b"</hierarchy>")]
+            try:
+                if ET.fromstring(layout).tag != "hierarchy":
+                    raise ValueError("Unexpected Android layout root")
+            except (ET.ParseError, ValueError) as error:
+                raise _failure(
+                    "unhealthy", "Android layout capture was malformed"
+                ) from error
             layout_path = directory / "layout.xml"
             layout_path.write_bytes(layout)
             created.append(layout_path)

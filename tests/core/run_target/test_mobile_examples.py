@@ -74,26 +74,53 @@ def test_android_fixture_distinguishes_usb_emulator_and_unauthorized_without_adb
     assert devices["R58UNAUTHORIZED"][0] == "unauthorized"
 
 
-def test_android_dynamic_receipt_ranks_api_and_keeps_serial_only_in_binding(
+@pytest.mark.parametrize(
+    "avd_property", ["ro.boot.qemu.avd_name", "ro.kernel.qemu.avd_name"]
+)
+def test_android_discovery_accepts_modern_and_legacy_avd_identity(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    avd_property: str,
 ):
     backend = _module("android_mobile_receipt", _ANDROID)
     fixture = json.loads(
         (_FIXTURES / "mobile-android-devices-redacted.json").read_text()
     )
-    properties = fixture["properties"]["R58MREDACTED"]
+    properties = fixture["properties"]["emulator-5554"]
+    properties[avd_property] = properties.pop("ro.kernel.qemu.avd_name")
+    template = _android_template()
+    request = _request()
+    request["options"] = {
+        "package": template["package"],
+        "component": template["component"],
+        "instrumentation": None,
+        "platform": "android",
+        "transport": "emulator",
+    }
+    monkeypatch.setattr(backend, "load_request", lambda: request)
     monkeypatch.setattr(
-        backend, "_adb_shell", lambda _serial, property_name: properties[property_name]
+        backend,
+        "load_bindings",
+        lambda: {"paths": {"android": template}, "aliases": {}},
+    )
+    monkeypatch.setattr(
+        backend, "_adb_service", lambda _: b"emulator-5554 device product:device"
     )
 
-    raw = backend._dynamic_binding(
-        _android_template(), "R58MREDACTED", fixture["devices_l"].splitlines()[0]
-    )
+    def shell(_serial, command, *, getprop=True):
+        if getprop:
+            return properties.get(command, "")
+        if command.startswith("cmd package path "):
+            return "package:/data/app/base.apk"
+        if command.startswith("cmd package resolve-activity "):
+            return template["component"]
+        raise AssertionError(command)
 
-    assert raw["transport"] == "usb"
-    assert raw["api_level"] == 35
-    assert raw["serial"] == "R58MREDACTED"
-    assert backend._target_key(raw["serial"]).startswith("android-")
+    monkeypatch.setattr(backend, "_adb_shell", shell)
+    backend.discover()
+    (candidate,) = json.loads(capsys.readouterr().out)["candidates"]
+    assert candidate["ready"]
+    assert candidate["binding"]["android"]["avd_name"] == "Pixel_9_API_35"
 
 
 def test_flutter_fixture_classifies_android_and_preserves_platform_in_private_descriptor():
@@ -196,13 +223,15 @@ def test_flutter_ios_discovery_and_probe_work_with_large_sdk_catalog(
     data_path.mkdir()
     inventory = {
         "devices": {
-            "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{
-                "udid": device_id,
-                "isAvailable": True,
-                "state": "Booted",
-                "dataPath": str(data_path),
-                "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
-            }]
+            "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+                {
+                    "udid": device_id,
+                    "isAvailable": True,
+                    "state": "Booted",
+                    "dataPath": str(data_path),
+                    "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+                }
+            ]
         }
     }
     sdk_data = tmp_path / "devices.json"
@@ -225,7 +254,9 @@ def test_flutter_ios_discovery_and_probe_work_with_large_sdk_catalog(
         "ios": {"xcrun": str(xcrun)},
     }
     monkeypatch.setattr(backend, "load_request", _request)
-    monkeypatch.setattr(backend, "load_bindings", lambda: {"paths": {"flutter": template}})
+    monkeypatch.setattr(
+        backend, "load_bindings", lambda: {"paths": {"flutter": template}}
+    )
 
     backend.discover()
 
@@ -243,9 +274,9 @@ def test_flutter_ios_discovery_and_probe_work_with_large_sdk_catalog(
     sdk_data.write_text(json.dumps(inventory))
     changed = json.loads(subprocess.check_output(probe, timeout=10))
     assert changed["target_fingerprint"] != descriptor["target_fingerprint"]
-    inventory["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-26-5"][0][
-        "state"
-    ] = "Shutdown"
+    inventory["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-26-5"][0]["state"] = (
+        "Shutdown"
+    )
     sdk_data.write_text(json.dumps(inventory))
     backend.discover()
     stopped = json.loads(capsys.readouterr().out)["candidates"][0]

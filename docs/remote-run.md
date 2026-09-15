@@ -287,11 +287,23 @@ build, Taskfile, or host-tool changes require setup or a fresh launch.
 
 ### Session verification boundary
 
-Current evidence is Linux-only supervised fake-tool and HTTP-fixture coverage
-of the owner/channel, source handoff, capture framing, and cleanup contracts.
-It is not acceptance evidence for Android or iOS hardware, an iOS simulator,
-emulator provisioning, browser-engine execution, firmware upload, or a
-production relay path.
+Real authenticated direct-TCP Android acceptance has passed on Studio with
+Ground Control and an Android 16 / API 36 emulator: read-only discovery,
+target-pinned launch, logs, log-client cancellation without stopping the parent,
+screenshot and parseable XML layout capture, and acknowledged app cleanup.
+The emulator stays running after close. The APK was built and installed
+separately; this does not claim an `InstallFromResult` provenance grant or a
+paired Ground Control workspace workflow.
+
+Android emulator identity supports both `ro.boot.qemu.avd_name` and the older
+`ro.kernel.qemu.avd_name`. Foreground checks recognize current and older
+resumed-activity output. The Android example resolves the host temporary
+directory before creating private bindings, and layout capture separates
+UIAutomator's status trailer from its validated XML document.
+
+This is single-host emulator acceptance, not physical Android USB, cross-host
+replacement/outage, firmware upload, or public-relay acceptance. Separate
+native iOS simulator and Flutter owner evidence does not establish those gates.
 
 ## Pinned host tools
 

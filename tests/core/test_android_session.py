@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import threading
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -91,6 +92,74 @@ def test_capture_cancellation_removes_only_partial_capture_output(
     assert not (tmp_path / "screen.png").exists()
 
 
+def test_layout_capture_returns_xml_without_uiautomator_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        android_adapter,
+        "_adb",
+        lambda *args, **kwargs: (
+            b'<?xml version="1.0"?><hierarchy rotation="0"><node text="Home"/></hierarchy>'
+            b"UI hierchary dumped to: /dev/tty\n"
+        ),
+    )
+    android_adapter.capture_android(
+        "/opt/android/adb", "emulator-5554", tmp_path, ("layout",), threading.Event()
+    )
+    root = ET.parse(tmp_path / "layout.xml").getroot()
+    assert root.tag == "hierarchy"
+    assert root.find("node").attrib["text"] == "Home"
+
+
+def test_layout_capture_rejects_malformed_hierarchy(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        android_adapter,
+        "_adb",
+        lambda *args, **kwargs: b"<hierarchy><node></hierarchy>",
+    )
+    with pytest.raises(SessionError) as error:
+        android_adapter.capture_android(
+            "/opt/android/adb",
+            "emulator-5554",
+            tmp_path,
+            ("layout",),
+            threading.Event(),
+        )
+    assert error.value.code == "unhealthy"
+    assert not (tmp_path / "layout.xml").exists()
+
+
+@pytest.mark.parametrize(
+    "activity_dump,expected",
+    [
+        (
+            "topResumedActivity=ActivityRecord{38202027 u0 com.example.app/.MainActivity t26}",
+            "com.example.app",
+        ),
+        (
+            "mResumedActivity: ActivityRecord{38202027 u0 com.example.app/.MainActivity t26}",
+            "com.example.app",
+        ),
+        (
+            "topResumedActivity=null\nActivityRecord{38202027 u0 com.example.app/.MainActivity t26}",
+            None,
+        ),
+    ],
+)
+def test_foreground_identity_reads_resumed_activity_without_window_focus(
+    monkeypatch, activity_dump, expected
+):
+    monkeypatch.setattr(
+        android_adapter,
+        "_adb",
+        lambda *args, **kwargs: (
+            activity_dump.encode() if args[-1] == "activities" else b""
+        ),
+    )
+    assert (
+        android_adapter.foreground_android("/opt/android/adb", "emulator-5554")
+        == expected
+    )
+
+
 def test_emulator_probe_rejects_missing_avd_identity(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         android_adapter,
@@ -98,8 +167,15 @@ def test_emulator_probe_rejects_missing_avd_identity(monkeypatch: pytest.MonkeyP
         lambda *_args: ("device", "emulator-5554 device product:test"),
     )
 
-    values = iter([b"serial", b"fingerprint", b"product", b"35", b""])
-    monkeypatch.setattr(android_adapter, "_adb", lambda *_args, **_kwargs: next(values))
+    properties = {
+        "ro.serialno": b"serial",
+        "ro.build.fingerprint": b"fingerprint",
+        "ro.product.device": b"product",
+        "ro.build.version.sdk": b"35",
+    }
+    monkeypatch.setattr(
+        android_adapter, "_adb", lambda *args, **_kwargs: properties.get(args[-1], b"")
+    )
 
     with pytest.raises(SessionError, match="emulator identity"):
         android_adapter.probe_android("/opt/android/adb", "emulator-5554", "emulator")
@@ -343,6 +419,33 @@ def _request(operation: str, *, capture: CaptureGrant | None = None) -> OwnerReq
         expires_at=4_102_444_800.0,
         capture=capture,
     )
+
+
+def test_modern_emulator_owner_rejects_changed_boot_avd_identity(tmp_path):
+    adb, state_path = _fake_adb(tmp_path)
+    state = json.loads(state_path.read_text())
+    identity = state["devices"]["emulator-5554"]["identity"]
+    identity["ro.boot.qemu.avd_name"] = identity.pop("ro.kernel.qemu.avd_name")
+    state_path.write_text(json.dumps(state))
+    owner, _ = _owner(tmp_path, adb)
+    try:
+        result = owner.handle(_request("launch"), {}, threading.Event(), lambda _: None)
+        assert result["state"] == "active"
+        state = json.loads(state_path.read_text())
+        state["devices"]["emulator-5554"]["identity"]["ro.boot.qemu.avd_name"] = (
+            "Replaced"
+        )
+        state_path.write_text(json.dumps(state))
+        assert owner._status()["state"] == "unknown"
+        with pytest.raises(SessionError, match="identity changed"):
+            owner.handle(_request("launch"), {}, threading.Event(), lambda _: None)
+    finally:
+        state = json.loads(state_path.read_text())
+        state["devices"]["emulator-5554"]["identity"]["ro.boot.qemu.avd_name"] = (
+            "Pixel_API_35"
+        )
+        state_path.write_text(json.dumps(state))
+        assert owner.shutdown()
 
 
 def test_second_app_owner_cannot_stop_first_and_can_launch_after_release(tmp_path):
