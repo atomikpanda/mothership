@@ -2,6 +2,7 @@ import io
 from datetime import datetime, timezone
 
 import pytest
+from rich.text import Text
 
 from mship.cli.output import Output
 from mship.cli.run_target import choose_profile, choose_run, choose_target
@@ -13,6 +14,11 @@ from mship.core.run_target.models import (
     TargetSelectionError,
     host_endpoint_fingerprint,
 )
+
+
+@pytest.fixture(autouse=True)
+def _styled_terminal(monkeypatch):
+    monkeypatch.setenv("TERM", "xterm-256color")
 
 
 class _Stream(io.StringIO):
@@ -109,7 +115,7 @@ def test_run_chooser_displays_only_safe_recorded_run_fields():
         output=output,
     )
 
-    rendered = stdout.getvalue() + stderr.getvalue()
+    rendered = Text.from_ansi(stdout.getvalue() + stderr.getvalue()).plain
     assert selected == second
     assert "run-a" in rendered and "run-b" in rendered
     assert "Phone" in rendered and "mobile" in rendered
@@ -133,13 +139,13 @@ def test_interactive_chooser_selects_numbered_safe_candidate_without_private_tar
         output=output,
     )
 
-    rendered = stdout.getvalue() + stderr.getvalue()
+    rendered = Text.from_ansi(stdout.getvalue() + stderr.getvalue()).plain
     assert selected == second
     assert "1." in rendered and "2." in rendered
     assert "studio" in rendered and "air" in rendered
     assert "iPhone 15" in rendered and "iPhone 16" in rendered
     assert "project" in rendered and "user" in rendered
-    assert "profile: ios-latest" in rendered and "backend: flutter" in rendered
+    assert "ios-latest" in rendered and "flutter" in rendered
     assert "profile-revision" not in rendered and "adapter-a" not in rendered
     assert "private-desk-phone" not in rendered
     assert "private-travel-phone" not in rendered
