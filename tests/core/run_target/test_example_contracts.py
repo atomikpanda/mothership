@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import io
@@ -8,9 +7,10 @@ import json
 import sys
 import tarfile
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
+
+from mship.backends import common
 
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.remote_exec import RemoteExecDeps, run_observe_capture_stream
@@ -168,19 +168,9 @@ def test_generic_capture_uses_live_parent_context_and_rejects_caller_retarget(tm
         list(parent)
 
 
-def _example_common():
-    path = Path(__file__).parents[3] / "examples/run-targets/common.py"
-    spec = importlib.util.spec_from_file_location("run_target_example_common", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_example_private_bindings_reject_duplicate_fields_and_oversized_objects(
     tmp_path, monkeypatch
 ):
-    common = _example_common()
     path = tmp_path / "bindings.json"
     path.write_text('{"paths":{},"aliases":{},"aliases":{}}')
     path.chmod(0o600)
@@ -200,21 +190,14 @@ def test_example_private_bindings_reject_fifo_without_waiting_for_a_writer(tmp_p
     fifo = tmp_path / "bindings.fifo"
     os.mkfifo(fifo, 0o600)
     script = (
-        "import sys\n"
-        "sys.path.insert(0, sys.argv[1])\n"
-        "from common import ExampleError, load_bindings\n"
+        "from mship.backends.common import ExampleError, load_bindings\n"
         "try:\n"
         "    load_bindings()\n"
         "except ExampleError:\n"
         "    raise SystemExit(23)\n"
     )
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            script,
-            str(Path(__file__).parents[3] / "examples/run-targets"),
-        ],
+        [sys.executable, "-I", "-c", script],
         env={**os.environ, "MSHIP_TARGET_BINDINGS_FILE": str(fifo)},
         capture_output=True,
         timeout=5,

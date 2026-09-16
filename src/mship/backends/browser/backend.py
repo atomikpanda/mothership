@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configured Playwright engine and managed-instance backend example.
+"""Configured Playwright engine and managed-instance backend.
 
 The browser control endpoint stays only in a per-run private receipt. Discovery reads
 engine fingerprints and configured instance records; it never launches an
@@ -25,14 +25,13 @@ import sys
 import time
 from typing import Mapping, Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import (
+from mship.backends.common import (
     ExampleError,
     emit_inventory,
     load_bindings,
     load_context,
     load_request,
-)  # noqa: E402
+)
 from mship.core.session_channel import OwnerContext
 from mship.core.session_inputs import SessionError
 

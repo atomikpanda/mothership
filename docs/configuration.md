@@ -62,8 +62,9 @@ Rules:
   first automatically, so you do NOT need to hand-add `depends_on: [parent]`.
   (Declaring `parent depends_on child` is the opposite order and is rejected as a
   dependency cycle.)
-- The subdirectory must exist and contain a go-task file (`Taskfile.yml`,
-  `Taskfile.yaml`, or another resolution-set spelling).
+- The subdirectory must exist. It must contain a go-task file (`Taskfile.yml`,
+  `Taskfile.yaml`, or another resolution-set spelling) unless it uses only
+  installed backends and declares no project tasks.
 - Subdirectory services still have their own `depends_on`, `tags`, `tasks`, and `start_mode`.
 
 ## Service start modes (`start_mode`)
@@ -146,7 +147,175 @@ repos:
 
 ## Taskfile contract
 
-Each repo needs a `Taskfile.yml` with standard task names. Mothership calls `task <name>` in each repo. Override names per repo in the `tasks` mapping. Default tasks: `test`, `run`, `lint`, `logs`, `setup`. Missing tasks are skipped gracefully.
+Repos that use mship's ordinary task execution need a `Taskfile.yml` with standard task names. Mship calls `task <name>` in each repo. Override names per repo in the `tasks` mapping. Default tasks: `test`, `run`, `lint`, `logs`, `setup`. Missing tasks are skipped gracefully. A repo using only a packaged `run_backends` builtin does not need a Taskfile for discovery or inherited backend operations.
+
+## Run backends
+
+`run_backends` is a per-repo map of project backend names to target adapters.
+The name is part of the project's configuration contract: profiles and host-local
+bindings refer to that name, rather than to an SDK serial number, browser path,
+or device identifier.
+
+Mship bundles five adapters: [`android`](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/android/backend.py),
+[`flutter`](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/flutter/backend.py),
+[`ios`](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/ios/backend.py),
+[`browser`](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/browser/backend.py),
+and [`platformio`](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/platformio/backend.py).
+They are installed with mship; selecting one does **not** copy adapter code into
+your repository.
+
+### Builtin only
+
+A builtin needs only configuration. It does not need a project `Taskfile.yml`,
+a discovery task, or an operation wrapper:
+
+```yaml
+repos:
+  mobile:
+    path: apps/mobile
+    type: service
+    run_backends:
+      android-local:
+        builtin: android
+      flutter-local:
+        builtin: flutter
+
+  web:
+    path: apps/web
+    type: service
+    run_backends:
+      checked-browser:
+        builtin: browser
+
+  firmware:
+    path: firmware
+    type: service
+    run_backends:
+      prepared-board:
+        builtin: platformio
+```
+
+The adapter runs from the same installed Python runtime as the mship session.
+Do not make a second virtual environment, call an arbitrary `python`, or vendor
+the adapter into the project just to select a builtin.
+
+Native session ownership is fixed by the builtin catalog: `android` and
+`flutter` use the native session owner; `ios`, `browser`, and `platformio` do
+not. A configuration cannot replace that owner. This protects the existing
+process/device-session authority and is especially important for Flutter,
+which must preserve the Android framework owner instead of creating a parallel
+one.
+
+### Extending a builtin with tasks
+
+Use `discover_task` and/or `operations` only for actions that the project needs
+to replace. The configured values are ordinary keys in that repo's `tasks:`
+map; omitted actions inherit the selected builtin's implementation.
+
+```yaml
+repos:
+  mobile:
+    path: apps/mobile
+    type: service
+    tasks:
+      discover-signed-flutter: discover-signed-flutter
+      capture-signed-flutter: capture-signed-flutter
+    run_backends:
+      signed-flutter:
+        builtin: flutter
+        discover_task: discover-signed-flutter
+        operations:
+          capture: capture-signed-flutter
+```
+
+The corresponding task can add project policy and then delegate back to the
+installed implementation:
+
+```yaml
+# Taskfile.yml
+version: '3'
+
+tasks:
+  discover-signed-flutter:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends flutter discover'
+  capture-signed-flutter:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends flutter'
+```
+
+`discover` is explicit only for discovery. Operation requests are sealed by
+mship, so a delegated operation receives its requested action from the private
+request/context files rather than from caller-provided shell arguments. An
+override must consume the supplied sealed files and must preserve the builtin's
+framework/session ownership; it must not synthesize target context, choose a
+different device, or start its own framework owner.
+
+### Custom task routing and fully custom backends
+
+The existing custom form remains available: omit `builtin`, supply a discovery
+task and operation tasks, and keep the routing in the project. The following is
+a runnable custom-routing configuration: its tasks deliberately use the
+installed browser protocol implementation, but the configuration has no
+`builtin` field and mship dispatches through the project's normal Taskfile
+keys.
+
+```yaml
+repos:
+  web:
+    path: apps/web
+    type: service
+    tasks:
+      discover-project-browser: discover-project-browser
+      run-project-browser: run-project-browser
+    run_backends:
+      project-browser:
+        discover_task: discover-project-browser
+        operations:
+          run: run-project-browser
+```
+
+```yaml
+# Taskfile.yml
+version: '3'
+
+tasks:
+  discover-project-browser:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends browser discover'
+  run-project-browser:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends browser'
+```
+
+For a backend that is entirely project-owned, keep the same configuration shape
+but point those task keys at the project's real protocol implementation. That
+implementation must consume the sealed request/context/bindings files and
+return the existing discovery and operation protocol; mship does not generate,
+ship, or infer it. Omit `session_owner` unless that implementation is a
+compatible Android or Flutter native owner; then explicitly set
+`session_owner: android` or `session_owner: flutter`. Native physical iOS
+operations remain unsupported until a concrete owner is designed.
+
+### Bindings, prerequisites, and safety
+
+Host-private target bindings stay keyed by the **project backend name** (for
+example `signed-flutter` or `lab-rig`), not by a builtin name. They are carried
+through `MSHIP_TARGET_BINDINGS_FILE`; keep the file, target IDs, SDK paths, and
+credentials out of committed YAML and normal command output. Mship also
+provides `MSHIP_TARGET_REQUEST_FILE` and `MSHIP_TARGET_CONTEXT_FILE`. Treat all
+three as private, sealed inputs; do not reconstruct their contents from CLI
+arguments or ambient environment.
+
+Builtins do not install external tooling. Prepare the required SDK/toolchain on
+the selected host before use: Android SDK/adb for Android, Flutter plus its
+prepared platform toolchain for Flutter, Xcode/simctl on macOS for iOS, an
+installed/configured browser driver and engine for browser targets, and
+PlatformIO plus the selected board/serial permissions for PlatformIO. Discovery
+is read-only: it must not boot hardware, install dependencies, launch a browser,
+flash a board, or upload firmware. Operations may require the corresponding
+prepared external tool, and unsupported capability/driver combinations report
+an actionable error rather than silently falling back to another target.
 
 ## Evidence storage (`evidence_storage`)
 
@@ -246,7 +415,7 @@ lifecycle_hooks:
 
 ## Per-repo fields
 
-Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends_on`, `env_runner`, `tasks`, `git_root`, `start_mode`, and `healthcheck`, covered above):
+Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends_on`, `env_runner`, `tasks`, `run_backends`, `git_root`, `start_mode`, and `healthcheck`, covered above):
 
 | Field | Meaning |
 |-------|---------|
@@ -264,7 +433,7 @@ Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends
 | `setup_inputs` | Manifests/lockfiles whose content decides whether a **remote** run re-runs `task setup` on the run host (glob patterns, matched inside the materialized worktree). Undeclared means setup runs on first materialization only — declaring them is what enables re-run-on-change. See [`remote-run.md`](remote-run.md). |
 | `host_tools` | Optional strict selected-host mise declaration. Its manifest (and optional native lock) is validated only in the server-materialized worktree; it enables `doctor --remote` readiness inspection and explicit `bootstrap --host-tools`, never implicit provisioning. |
 | `run_profiles` | Named, opt-in profile definitions for `mship run`. A profile names a configured `backend`, non-empty eligible host `roles` (each declared in workspace `run_hosts`), optional host `tags`, and JSON-compatible backend `options`. When a selected repo declares profiles, bare `mship run` uses `default_run_profile` or, in an interactive TTY, asks you to choose. |
-| `run_backends` | Backend definitions: a `discover_task`, an `operations` map from operation to logical task key, and optional native `session_owner` (`android` or `flutter`). Every referenced key must exist in this repo's `tasks:` mapping; the host resolves the key rather than accepting arbitrary argv. |
+| `run_backends` | Project backend-name map. A value with `builtin: android\|flutter\|ios\|browser\|platformio` selects a packaged adapter; optional `discover_task` and `operations` override only named inherited actions. Without `builtin`, retain the custom `discover_task`/`operations`/`session_owner` task form. See [Run backends](#run-backends). |
 | `default_run_profile` | Optional configured profile name, which must name an entry in `run_profiles`. It is the default for that repo's bare, task-bound `mship run`; without a default, a TTY chooser is used or a non-interactive run reports that `--profile` is required. |
 
 ```yaml
@@ -309,28 +478,24 @@ sidecar bytes are admitted. The directory itself is not recursively trusted.
 ### Profile and backend configuration
 
 `run_profiles` is an executable, opt-in configuration surface: it selects a
-reviewed backend, eligible run-host roles, and backend options. `run_backends`
-maps its discovery and operation names through the repository's `tasks:` map.
-The profile path requires a resolved task. A run can select more than one
-repository: every selected profiled repository is discovered and preflighted
-before any app launches, dependency readiness boundaries are retained, and each
-launched repository receives its own recorded run ID. Repositories with no
-profiles retain the ordinary `mship run` behavior.
+reviewed backend, eligible run-host roles, and backend options. It requires a
+resolved task. A run can select more than one repository: every selected
+profiled repository is discovered and preflighted before any app launches,
+dependency readiness boundaries are retained, and each launched repository
+receives its own recorded run ID. Repositories with no profiles retain the
+ordinary `mship run` behavior.
 
 Profiles and backends are strict configuration objects: unknown nested fields,
-an unknown backend, an empty host-role list, a role outside `run_hosts`, or a
-task key absent from `tasks:` rejects configuration. `session_owner` is present
-only for the concrete `android` and `flutter` owners; generic backends omit it.
+an unknown backend, an empty host-role list, a role outside `run_hosts`, or an
+override task key absent from `tasks:` rejects configuration. A pure builtin
+does not require `tasks:`; a builtin override names only its replacement actions
+and inherits the rest.
 
-The portable [five-backend run-target example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
-contains the complete schema for Android CLI, Flutter, iOS simulator, browser,
-and PlatformIO profiles. Its [root Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/Taskfile.yml)
-and per-backend wrappers are executable examples, not implicit Mship setup:
-[Android CLI](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/android-cli/),
-[Flutter](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/flutter/),
-[iOS](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/ios/),
-[browser](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/browser/), and
-[PlatformIO](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/platformio/).
+The [run-target configuration example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
+shows builtin-only, builtin-plus-override, and custom task-routing modes.
+Its [Flutter extension Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/flutter-extension/Taskfile.yml)
+and [custom-routing Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/custom-routing/Taskfile.yml)
+delegate to the installed runtime rather than copying adapter source.
 
 Keep tool paths, target aliases, device identities, credentials, app templates,
 and other machine-specific values in the owner-private
@@ -338,9 +503,9 @@ and other machine-specific values in the owner-private
 `~/.config/mothership/run-target-bindings.yaml`), never in `mothership.yaml`.
 Discovery is read-only and never installs an SDK, creates an emulator, pairs a
 device, provisions a target, or falls back to an ambient target. SDKs, tools,
-and the app or simulator state required by a profile must be prepared on the
-selected host first. `host_tools` can diagnose or explicitly install its
-declared mise tools; it does not provision platform SDK components or targets.
+and app/simulator state required by a profile must be prepared on the selected
+host first. `host_tools` can diagnose or explicitly install its declared mise
+tools; it does not provision platform SDK components or targets.
 
 ### Immutable declared task outputs
 

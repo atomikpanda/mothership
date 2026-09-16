@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from mship.core.capture import Artifact
 from mship.core.run_host.config import HostRegistration
+from mship.core.run_target.builtins import BUILTIN_BACKENDS, BUILTIN_TASK_PREFIX
 
 JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
@@ -107,9 +108,65 @@ class RunProfile(_StrictModel):
 
 
 class BackendConfig(_StrictModel):
+    builtin: Literal["android", "flutter", "ios", "browser", "platformio"] | None = None
     discover_task: str
     operations: dict[str, str]
     session_owner: Literal["android", "flutter"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def inherit_builtin(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("builtin") is None:
+            return value
+        name = value["builtin"]
+        if not isinstance(name, str) or name not in BUILTIN_BACKENDS:
+            raise ValueError("unknown integrated backend")
+        builtin = BUILTIN_BACKENDS[name]
+        if value.get("session_owner", builtin.session_owner) != builtin.session_owner:
+            raise ValueError("integrated backend session ownership cannot be changed")
+        overrides = value.get("operations", {})
+        if not isinstance(overrides, dict):
+            raise ValueError("backend operations must be a mapping")
+        return {
+            **value,
+            "session_owner": builtin.session_owner,
+            "discover_task": value.get("discover_task", builtin.task_key("discover")),
+            "operations": {
+                **{
+                    operation: builtin.task_key(operation)
+                    for operation in builtin.operations
+                },
+                **overrides,
+            },
+        }
+
+    @model_validator(mode="after")
+    def validate_builtin_tasks(self) -> "BackendConfig":
+        builtin = (
+            BUILTIN_BACKENDS.get(self.builtin) if self.builtin is not None else None
+        )
+        for operation, task in ((None, self.discover_task), *self.operations.items()):
+            if task.startswith(BUILTIN_TASK_PREFIX) and (
+                builtin is None
+                or (operation is not None and operation not in builtin.operations)
+                or task != builtin.task_key(operation or "discover")
+            ):
+                raise ValueError(
+                    "integrated task key does not match its backend operation"
+                )
+        return self
+
+    def builtin_operation(self, task_key: str) -> str | None:
+        """Resolve only inherited actions, never a project task override."""
+        if self.builtin is None:
+            return None
+        builtin = BUILTIN_BACKENDS[self.builtin]
+        if task_key == self.discover_task == builtin.task_key("discover"):
+            return "discover"
+        for operation in builtin.operations:
+            if task_key == self.operations[operation] == builtin.task_key(operation):
+                return operation
+        return None
 
     @field_validator("discover_task")
     @classmethod

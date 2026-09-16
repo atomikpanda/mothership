@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 from hashlib import sha256
 import json
 import os
@@ -15,9 +14,8 @@ import time
 from pathlib import Path
 from typing import Mapping
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from common import (
+from mship.backends.android import backend as android_backend
+from mship.backends.common import (
     ExampleError,
     emit_inventory,
     load_bindings,
@@ -291,7 +289,9 @@ def _ios_target(
         {
             "probe_argv": [
                 str(Path(sys.executable).absolute()),
-                str(Path(__file__).resolve()),
+                "-I",
+                "-m",
+                "mship.backends.flutter.backend",
                 "--ios-probe",
                 xcrun,
                 device_id,
@@ -311,20 +311,12 @@ def _android_inventory_devices(
     configured = template.get("android")
     if not isinstance(configured, dict) or set(configured) != _ANDROID_FIELDS:
         return []
-    path = Path(__file__).resolve().parents[1] / "android-cli" / "backend.py"
-    spec = importlib.util.spec_from_file_location(
-        "mship_flutter_android_inventory", path
-    )
-    if spec is None or spec.loader is None:
-        raise SessionError("unavailable", "Android read-only inventory is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     result: list[dict[str, object]] = []
-    for serial, (state, line) in module._devices().items():
-        transport = module._transport(serial, line)
+    for serial, (state, line) in android_backend._devices().items():
+        transport = android_backend._transport(serial, line)
         if state != "device" or transport is None:
             continue
-        identity = module._dynamic_identity(serial, line)
+        identity = android_backend._dynamic_identity(serial, line)
         result.append(
             {
                 "id": serial,

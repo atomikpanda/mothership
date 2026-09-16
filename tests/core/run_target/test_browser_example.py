@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
-import importlib.util
 import json
 import os
 import socket
@@ -16,18 +15,13 @@ from types import ModuleType
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[3]
-_EXAMPLE = _ROOT / "examples" / "run-targets" / "browser" / "backend.py"
+from mship.backends.browser import backend as browser_backend
+
 _FIXTURES = Path(__file__).with_name("fixtures") / "browser"
 
 
-def _backend() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("browser_example_backend", _EXAMPLE)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+def _backend():
+    return browser_backend
 
 
 def _request(operation: str = "run") -> dict[str, object]:

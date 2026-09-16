@@ -2809,12 +2809,14 @@ def test_setup_runs_only_after_materialization_creates_the_worktree(tmp_path):
     ]
 
 
-def _tool_app(tmp_path, monkeypatch):
+def _tool_app(tmp_path, monkeypatch, *, repo_config=None):
     class RealToolShell(_FakeShellRunner):
         def spawn_argv(self, args, cwd, env):
             return shell_module.ShellRunner().spawn_argv(args, cwd, env)
 
     config = _config(tmp_path)
+    if repo_config is not None:
+        config.repos["api"] = repo_config
     worktree = tmp_path / ".worktrees" / "t1" / "api"
     worktree.mkdir(parents=True)
     sentinel = tmp_path / "setup-ran"
@@ -2891,6 +2893,88 @@ def test_tool_discovery_authenticates_and_never_runs_setup(tmp_path, monkeypatch
         "cwd": str(worktree),
     }
     assert not any(event.kind in {"stdout", "stderr"} for event in events)
+    assert not sentinel.exists()
+
+
+def test_integrated_discovery_ignores_checkout_code_and_requires_sealed_authority(
+    tmp_path, monkeypatch
+):
+    from mship.core.run_target.models import profile_revision
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "isolated-config"))
+    repo = RepoConfig.model_validate(
+        {
+            "path": "api",
+            "type": "service",
+            "run_backends": {"configured": {"builtin": "browser"}},
+            "run_profiles": {
+                "web": {
+                    "backend": "configured",
+                    "hosts": {"roles": ["browser-lab"]},
+                    "options": {},
+                }
+            },
+        }
+    )
+    client, sentinel, worktree = _tool_app(tmp_path, monkeypatch, repo_config=repo)
+    (worktree / "Taskfile.yml").unlink()
+    (worktree / "mship").mkdir()
+    (worktree / "mship" / "__init__.py").write_text(
+        "raise RuntimeError('untrusted checkout package executed')\n"
+    )
+    backend = repo.run_backends["configured"]
+    profile = repo.run_profiles["web"]
+    request = ToolRequest(
+        task="t1",
+        repo="api",
+        argv=(),
+        task_key=backend.discover_task,
+        preparation="discover",
+        source_revision="a" * 40,
+        timeout_seconds=10,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=1024,
+        input_files={
+            "MSHIP_TARGET_REQUEST_FILE": json.dumps(
+                {
+                    "protocol_version": 1,
+                    "task": "t1",
+                    "repo": "api",
+                    "backend": "configured",
+                    "profile": "web",
+                    "operation": "run",
+                    "options": {},
+                    "target_alias": None,
+                    "backend_revision": "a" * 40,
+                    "profile_revision": profile_revision(
+                        profile, backend, prepared_source_revision="a" * 40
+                    ),
+                }
+            )
+        },
+    )
+    for changes in (
+        {},
+        {"task_key": "mship-builtin-flutter-discover"},
+        {"input_files": {}},
+    ):
+        response = client.post(
+            "/exec/tool",
+            json={**request.to_dict(), **changes},
+            headers={"Authorization": "Bearer tool-test-token"},
+        )
+        assert response.status_code == 200
+        events = list(
+            iter_tool_events([response.content], response.headers["X-Mship-Exec-Nonce"])
+        )
+        result = events[-1].result
+        if changes:
+            assert result.status == "invalid"
+        else:
+            assert result.status == "completed" and result.exit_code == 0
+            inventory = json.loads(result.stdout)
+            assert inventory["candidates"] == []
+            assert inventory["errors"][0]["code"] == "browser_unavailable"
     assert not sentinel.exists()
 
 

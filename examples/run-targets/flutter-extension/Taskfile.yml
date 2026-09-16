@@ -1,0 +1,12 @@
+version: '3'
+
+tasks:
+  # This is an override hook: no caller-selected target or operation is added
+  # to the command line. Mship supplies sealed request/context/bindings files.
+  discover-signed-flutter:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends flutter discover'
+
+  capture-signed-flutter:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends flutter'

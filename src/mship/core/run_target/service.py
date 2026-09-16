@@ -344,7 +344,6 @@ class RemoteBackendExecutor:
             execution.task != self.task_obj.slug
             or execution.repo not in self.task_obj.worktrees
             or repo_config is None
-            or execution.logical_task not in repo_config.tasks
         ):
             return self._result(error_code="invalid")
         profile = repo_config.run_profiles.get(execution.profile)
@@ -364,6 +363,11 @@ class RemoteBackendExecutor:
             else backend.operations.get(execution.operation)
         )
         if execution.logical_task != expected_task:
+            return self._result(error_code="invalid")
+        if (
+            execution.logical_task not in repo_config.tasks
+            and backend.builtin_operation(execution.logical_task) is None
+        ):
             return self._result(error_code="invalid")
 
         input_files: dict[str, str] = {}

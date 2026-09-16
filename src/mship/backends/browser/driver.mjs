@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Host-private Playwright bridge for the browser run-target example.
+// Host-private Playwright bridge for the browser run-target backend.
 // It deliberately emits no endpoint, module path, or application URL diagnostics.
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';

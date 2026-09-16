@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[3]
-_BACKEND = _ROOT / "examples" / "run-targets" / "platformio" / "backend.py"
+from mship.backends.platformio import backend as platformio_backend
+
 _FIXTURES = Path(__file__).with_name("fixtures") / "platformio"
 
 
-def _backend() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "platformio_example_backend", _BACKEND
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _backend():
+    return platformio_backend
 
 
 def _request(

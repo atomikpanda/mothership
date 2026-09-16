@@ -2,27 +2,17 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[3]
+from mship.backends.android import backend as android_backend
+from mship.backends.flutter import backend as flutter_backend
+
 _FIXTURES = Path(__file__).with_name("fixtures")
-_ANDROID = _ROOT / "examples" / "run-targets" / "android-cli" / "backend.py"
-_FLUTTER = _ROOT / "examples" / "run-targets" / "flutter" / "backend.py"
-
-
-def _module(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _android_template() -> dict[str, object]:
@@ -58,7 +48,7 @@ def _request() -> dict[str, object]:
 def test_android_fixture_distinguishes_usb_emulator_and_unauthorized_without_adb_child(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    backend = _module("android_mobile_example", _ANDROID)
+    backend = android_backend
     fixture = json.loads(
         (_FIXTURES / "mobile-android-devices-redacted.json").read_text()
     )
@@ -82,7 +72,7 @@ def test_android_discovery_accepts_modern_and_legacy_avd_identity(
     capsys: pytest.CaptureFixture[str],
     avd_property: str,
 ):
-    backend = _module("android_mobile_receipt", _ANDROID)
+    backend = android_backend
     fixture = json.loads(
         (_FIXTURES / "mobile-android-devices-redacted.json").read_text()
     )
@@ -124,7 +114,7 @@ def test_android_discovery_accepts_modern_and_legacy_avd_identity(
 
 
 def test_flutter_fixture_classifies_android_and_preserves_platform_in_private_descriptor():
-    backend = _module("flutter_mobile_example", _FLUTTER)
+    backend = flutter_backend
     devices = json.loads(
         (_FIXTURES / "mobile-flutter-devices-redacted.json").read_text()
     )
@@ -160,7 +150,7 @@ def test_flutter_fixture_classifies_android_and_preserves_platform_in_private_de
 def test_flutter_ios_simulator_runs_without_capture_attestation(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    backend = _module("flutter_mobile_ios", _FLUTTER)
+    backend = flutter_backend
     fixture = json.loads(
         (_FIXTURES / "mobile-flutter-devices-redacted.json").read_text()
     )
@@ -191,7 +181,7 @@ def test_flutter_ios_simulator_runs_without_capture_attestation(
 def test_flutter_owner_materialization_refuses_context_without_platform(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    backend = _module("flutter_mobile_context", _FLUTTER)
+    backend = flutter_backend
     monkeypatch.setattr(backend, "load_request", _request)
     monkeypatch.setattr(
         backend, "load_context", lambda: {"private_binding": {"target_key": "lost"}}
@@ -204,7 +194,7 @@ def test_flutter_owner_materialization_refuses_context_without_platform(
 def test_flutter_discovery_reports_unavailable_binding_without_crashing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    backend = _module("flutter_mobile_discovery", _FLUTTER)
+    backend = flutter_backend
     monkeypatch.setattr(backend, "load_request", _request)
     monkeypatch.setattr(backend, "load_bindings", lambda: {"paths": {}})
 
@@ -217,7 +207,7 @@ def test_flutter_discovery_reports_unavailable_binding_without_crashing(
 def test_flutter_ios_discovery_and_probe_work_with_large_sdk_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    backend = _module("flutter_large_ios_catalog", _FLUTTER)
+    backend = flutter_backend
     device_id = "AAAAAAAA-1111-2222-3333-AAAAAAAAAAAA"
     data_path = tmp_path / "simulator"
     data_path.mkdir()

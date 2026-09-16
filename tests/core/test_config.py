@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.config import WorkspaceConfig, ConfigLoader, Dependency, Healthcheck, RepoConfig
+from mship.core.config import (
+    WorkspaceConfig,
+    ConfigLoader,
+    Dependency,
+    Healthcheck,
+    RepoConfig,
+)
 
 
 def test_load_minimal_config(workspace: Path):
@@ -22,6 +28,37 @@ def test_repos_defaults_to_empty_map(tmp_path: Path):
     config = ConfigLoader.load(cfg)
     assert config.workspace == "minimalws"
     assert config.repos == {}
+
+
+@pytest.mark.parametrize("subdirectory", [False, True])
+def test_taskfile_is_required_only_after_adding_project_tasks(tmp_path, subdirectory):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    repo = parent / "app" if subdirectory else tmp_path / "app"
+    repo.mkdir()
+    parent_entry = ""
+    git_root = ""
+    if subdirectory:
+        (parent / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+        parent_entry = "  parent: {path: parent, type: library}\n"
+        git_root = "    git_root: parent\n"
+    path = tmp_path / "mothership.yaml"
+    original = (
+        "workspace: integrated\nrepos:\n"
+        + parent_entry
+        + "  app:\n    path: app\n    type: service\n"
+        + git_root
+        + "    run_backends:\n      browser:\n        builtin: browser\n"
+    )
+    path.write_text(original)
+    ConfigLoader.load(path)
+    path.write_text(
+        original
+        + "        operations: {logs: project-logs}\n"
+        + "    tasks: {project-logs: logs}\n"
+    )
+    with pytest.raises(ValueError, match="no go-task file"):
+        ConfigLoader.load(path)
 
 
 def test_paths_resolved_relative_to_workspace(workspace: Path):
@@ -449,17 +486,22 @@ def test_repo_config_accepts_drift_fields(tmp_path):
 
     _write_repo(tmp_path, "cli")
     cfg_path = tmp_path / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "ws",
-        "repos": {
-            "cli": {
-                "path": "./cli", "type": "service",
-                "expected_branch": "main",
-                "allow_dirty": True,
-                "allow_extra_worktrees": True,
-            },
-        },
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "workspace": "ws",
+                "repos": {
+                    "cli": {
+                        "path": "./cli",
+                        "type": "service",
+                        "expected_branch": "main",
+                        "allow_dirty": True,
+                        "allow_extra_worktrees": True,
+                    },
+                },
+            }
+        )
+    )
     cfg = ConfigLoader.load(cfg_path)
     r = cfg.repos["cli"]
     assert r.expected_branch == "main"
@@ -473,10 +515,14 @@ def test_repo_config_drift_defaults(tmp_path):
 
     _write_repo(tmp_path, "cli")
     cfg_path = tmp_path / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "ws",
-        "repos": {"cli": {"path": "./cli", "type": "service"}},
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "workspace": "ws",
+                "repos": {"cli": {"path": "./cli", "type": "service"}},
+            }
+        )
+    )
     cfg = ConfigLoader.load(cfg_path)
     r = cfg.repos["cli"]
     assert r.expected_branch is None
@@ -490,10 +536,14 @@ def test_audit_policy_defaults_to_blocking(tmp_path):
 
     _write_repo(tmp_path, "cli")
     cfg_path = tmp_path / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "ws",
-        "repos": {"cli": {"path": "./cli", "type": "service"}},
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "workspace": "ws",
+                "repos": {"cli": {"path": "./cli", "type": "service"}},
+            }
+        )
+    )
     cfg = ConfigLoader.load(cfg_path)
     assert cfg.audit.block_spawn is True
     assert cfg.audit.block_finish is True
@@ -505,11 +555,15 @@ def test_audit_policy_opt_out(tmp_path):
 
     _write_repo(tmp_path, "cli")
     cfg_path = tmp_path / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "ws",
-        "audit": {"block_spawn": False, "block_finish": False},
-        "repos": {"cli": {"path": "./cli", "type": "service"}},
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "workspace": "ws",
+                "audit": {"block_spawn": False, "block_finish": False},
+                "repos": {"cli": {"path": "./cli", "type": "service"}},
+            }
+        )
+    )
     cfg = ConfigLoader.load(cfg_path)
     assert cfg.audit.block_spawn is False
     assert cfg.audit.block_finish is False
@@ -524,16 +578,28 @@ def test_expected_branch_conflict_rejected(tmp_path):
     _write_repo(tmp_path, "mono/pkg-a")
     _write_repo(tmp_path, "mono/pkg-b")
     cfg_path = tmp_path / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "ws",
-        "repos": {
-            "mono": {"path": "./mono", "type": "service"},
-            "pkg_a": {"path": "pkg-a", "type": "library", "git_root": "mono",
-                       "expected_branch": "main"},
-            "pkg_b": {"path": "pkg-b", "type": "library", "git_root": "mono",
-                       "expected_branch": "develop"},
-        },
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "workspace": "ws",
+                "repos": {
+                    "mono": {"path": "./mono", "type": "service"},
+                    "pkg_a": {
+                        "path": "pkg-a",
+                        "type": "library",
+                        "git_root": "mono",
+                        "expected_branch": "main",
+                    },
+                    "pkg_b": {
+                        "path": "pkg-b",
+                        "type": "library",
+                        "git_root": "mono",
+                        "expected_branch": "develop",
+                    },
+                },
+            }
+        )
+    )
     with pytest.raises(ValueError, match="expected_branch"):
         ConfigLoader.load(cfg_path)
 
@@ -550,19 +616,24 @@ def test_repo_config_accepts_base_branch(tmp_path):
     (api_dir / "Taskfile.yml").write_text("version: '3'")
 
     cfg_path = tmp_path / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "ws",
-        "repos": {
-            "cli": {"path": "./cli", "type": "service", "base_branch": "main"},
-            "api": {"path": "./api", "type": "service"},
-        },
-    }))
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "workspace": "ws",
+                "repos": {
+                    "cli": {"path": "./cli", "type": "service", "base_branch": "main"},
+                    "api": {"path": "./api", "type": "service"},
+                },
+            }
+        )
+    )
     cfg = ConfigLoader.load(cfg_path)
     assert cfg.repos["cli"].base_branch == "main"
     assert cfg.repos["api"].base_branch is None
 
 
 # --- bind_files validation (issue #39) ---
+
 
 def test_bind_files_accepts_relative_paths(tmp_path):
     repo_dir = tmp_path / "repo"
@@ -637,11 +708,7 @@ def test_bind_files_empty_list_is_default(tmp_path):
 
     cfg_path = tmp_path / "mothership.yaml"
     cfg_path.write_text(
-        "workspace: t\n"
-        "repos:\n"
-        "  r:\n"
-        "    path: ./repo\n"
-        "    type: service\n"
+        "workspace: t\nrepos:\n  r:\n    path: ./repo\n    type: service\n"
     )
     cfg = ConfigLoader.load(cfg_path)
     assert cfg.repos["r"].bind_files == []
@@ -649,10 +716,12 @@ def test_bind_files_empty_list_is_default(tmp_path):
 
 def test_discover_env_var_valid(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
+
     root = tmp_path / "ws"
     root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    other = tmp_path / "other"; other.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
     monkeypatch.setenv("MSHIP_WORKSPACE", str(root))
     path = ConfigLoader.discover(other)
     assert path == root / "mothership.yaml"
@@ -661,6 +730,7 @@ def test_discover_env_var_valid(tmp_path, monkeypatch):
 def test_discover_env_var_invalid_raises(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
     import pytest
+
     monkeypatch.setenv("MSHIP_WORKSPACE", str(tmp_path / "does-not-exist"))
     with pytest.raises(FileNotFoundError) as exc:
         ConfigLoader.discover(tmp_path)
@@ -672,14 +742,18 @@ def test_discover_marker_precedes_walk_up(tmp_path, monkeypatch):
     Marker wins."""
     from mship.core.config import ConfigLoader
     from mship.core.workspace_marker import write_marker
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
 
-    root_a = tmp_path / "a-ws"; root_a.mkdir()
+    root_a = tmp_path / "a-ws"
+    root_a.mkdir()
     (root_a / "mothership.yaml").write_text("workspace: a\nrepos: {}\n")
 
-    root_b = tmp_path / "b-ws"; root_b.mkdir()
+    root_b = tmp_path / "b-ws"
+    root_b.mkdir()
     (root_b / "mothership.yaml").write_text("workspace: b\nrepos: {}\n")
-    worktree = root_b / "wt"; worktree.mkdir()
+    worktree = root_b / "wt"
+    worktree.mkdir()
     write_marker(worktree, root_a)
 
     path = ConfigLoader.discover(worktree)
@@ -689,11 +763,14 @@ def test_discover_marker_precedes_walk_up(tmp_path, monkeypatch):
 def test_discover_stale_marker_falls_through_to_walk_up(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
     from mship.core.workspace_marker import MARKER_NAME
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
 
-    root = tmp_path / "ws"; root.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    worktree = root / "sub"; worktree.mkdir()
+    worktree = root / "sub"
+    worktree.mkdir()
     (worktree / MARKER_NAME).write_text(str(tmp_path / "nope"))
 
     path = ConfigLoader.discover(worktree)
@@ -703,10 +780,13 @@ def test_discover_stale_marker_falls_through_to_walk_up(tmp_path, monkeypatch):
 def test_discover_walk_up_unchanged_when_no_env_no_marker(tmp_path, monkeypatch):
     """Regression: existing behavior works when env var and marker both absent."""
     from mship.core.config import ConfigLoader
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
-    root = tmp_path / "ws"; root.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    nested = root / "a" / "b"; nested.mkdir(parents=True)
+    nested = root / "a" / "b"
+    nested.mkdir(parents=True)
     assert ConfigLoader.discover(nested) == root / "mothership.yaml"
 
 
@@ -788,6 +868,7 @@ def test_load_strict_still_raises_on_missing_path(tmp_path):
 
 def test_repo_capture_config_parses(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -805,14 +886,9 @@ def test_repo_capture_config_parses(tmp_path):
 
 def test_repo_without_capture_defaults_none(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
-    cfg.write_text(
-        "workspace: t\n"
-        "repos:\n"
-        "  app:\n"
-        "    path: ./app\n"
-        "    type: service\n"
-    )
+    cfg.write_text("workspace: t\nrepos:\n  app:\n    path: ./app\n    type: service\n")
     config = ConfigLoader.load(cfg, require_paths=False)
     assert config.repos["app"].capture is None
 
@@ -822,6 +898,7 @@ def test_redact_null_patterns_coerces_to_empty_list(tmp_path):
     not an omitted key — must coerce to `[]` rather than fail pydantic list
     validation and error the whole config load (MOS-102 Greptile fix)."""
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -855,6 +932,7 @@ def test_hooks_default_timeout_defaults_to_30(workspace: Path):
 
 def test_hooks_default_timeout_overridable(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -870,6 +948,7 @@ def test_hooks_default_timeout_overridable(tmp_path):
 
 def test_hooks_parses_full_entry(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -881,7 +960,7 @@ def test_hooks_parses_full_entry(tmp_path):
         "  - on: pr.merged\n"
         "    run: notify-pr-merged\n"
         "    repo: app\n"
-        "    name: \"Notify on PR merge\"\n"
+        '    name: "Notify on PR merge"\n'
         "    timeout: 45\n"
         "    required: false\n"
     )
@@ -898,6 +977,7 @@ def test_hooks_parses_full_entry(tmp_path):
 
 def test_hooks_entry_defaults(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -917,14 +997,28 @@ def test_hooks_entry_defaults(tmp_path):
     assert hook.required is False
 
 
-@pytest.mark.parametrize("event", [
-    "task.finished", "task.closed", "pr.merged", "pr.closed",
-    "phase.entered.plan", "phase.entered.dev", "phase.entered.review", "phase.entered.run",
-    "workitem.phase.inbox", "workitem.phase.shaping", "workitem.phase.ready",
-    "workitem.phase.in_flight", "workitem.phase.review", "workitem.phase.done",
-])
+@pytest.mark.parametrize(
+    "event",
+    [
+        "task.finished",
+        "task.closed",
+        "pr.merged",
+        "pr.closed",
+        "phase.entered.plan",
+        "phase.entered.dev",
+        "phase.entered.review",
+        "phase.entered.run",
+        "workitem.phase.inbox",
+        "workitem.phase.shaping",
+        "workitem.phase.ready",
+        "workitem.phase.in_flight",
+        "workitem.phase.review",
+        "workitem.phase.done",
+    ],
+)
 def test_hooks_v1_event_catalog_accepted(tmp_path, event):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -942,6 +1036,7 @@ def test_hooks_v1_event_catalog_accepted(tmp_path, event):
 
 def test_hooks_unknown_event_rejected(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -959,6 +1054,7 @@ def test_hooks_unknown_event_rejected(tmp_path):
 
 def test_hooks_empty_run_rejected(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -968,13 +1064,15 @@ def test_hooks_empty_run_rejected(tmp_path):
         "    type: service\n"
         "lifecycle_hooks:\n"
         "  - on: task.finished\n"
-        "    run: \"\"\n"
+        '    run: ""\n'
     )
     with pytest.raises(ValueError):
         ConfigLoader.load(cfg, require_paths=False)
 
 
-@pytest.mark.parametrize("event", ["task.finished", "task.closed", "pr.merged", "pr.closed"])
+@pytest.mark.parametrize(
+    "event", ["task.finished", "task.closed", "pr.merged", "pr.closed"]
+)
 def test_hooks_required_true_rejected_on_post_hoc_events(tmp_path, event):
     """`required: true` can't block anything on task.finished/task.closed/
     pr.merged/pr.closed — each of these fires only AFTER its own irreversible
@@ -985,6 +1083,7 @@ def test_hooks_required_true_rejected_on_post_hoc_events(tmp_path, event):
     state advanced or PRs already created while the local transition is
     blocked)."""
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -1001,17 +1100,28 @@ def test_hooks_required_true_rejected_on_post_hoc_events(tmp_path, event):
         ConfigLoader.load(cfg, require_paths=False)
 
 
-@pytest.mark.parametrize("event", [
-    "phase.entered.plan", "phase.entered.dev", "phase.entered.review", "phase.entered.run",
-    "workitem.phase.inbox", "workitem.phase.shaping", "workitem.phase.ready",
-    "workitem.phase.in_flight", "workitem.phase.review", "workitem.phase.done",
-])
+@pytest.mark.parametrize(
+    "event",
+    [
+        "phase.entered.plan",
+        "phase.entered.dev",
+        "phase.entered.review",
+        "phase.entered.run",
+        "workitem.phase.inbox",
+        "workitem.phase.shaping",
+        "workitem.phase.ready",
+        "workitem.phase.in_flight",
+        "workitem.phase.review",
+        "workitem.phase.done",
+    ],
+)
 def test_hooks_required_true_accepted_on_pre_mutation_events(tmp_path, event):
     """`required: true` IS meaningful on phase.entered.*/workitem.phase.* — both
     fire before their state mutation commits, so a required failure can
     genuinely abort the transition. These are the only event families where
     `required: true` is accepted."""
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -1030,6 +1140,7 @@ def test_hooks_required_true_accepted_on_pre_mutation_events(tmp_path, event):
 
 def test_hooks_unknown_repo_ref_rejected(tmp_path):
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -1052,6 +1163,7 @@ def test_old_hooks_key_raises_clear_rename_error(tmp_path):
     never fire), so a config still using `hooks:` must fail loud with a rename
     hint pointing at the new key. See the reject_renamed_hook_keys guard."""
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -1071,6 +1183,7 @@ def test_old_hooks_default_timeout_key_raises_clear_rename_error(tmp_path):
     """`hooks_default_timeout:` -> `lifecycle_hooks_default_timeout:` must also
     fail loud rather than silently dropping the old key."""
     from mship.core.config import ConfigLoader
+
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
         "workspace: t\n"
@@ -1086,9 +1199,12 @@ def test_old_hooks_default_timeout_key_raises_clear_rename_error(tmp_path):
 
 def test_discover_with_source_env(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
-    root = tmp_path / "ws"; root.mkdir()
+
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    other = tmp_path / "other"; other.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
     monkeypatch.setenv("MSHIP_WORKSPACE", str(root))
     res = ConfigLoader.discover_with_source(other)
     assert res.path == root / "mothership.yaml"
@@ -1098,10 +1214,13 @@ def test_discover_with_source_env(tmp_path, monkeypatch):
 def test_discover_with_source_marker(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
     from mship.core.workspace_marker import write_marker
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
-    root = tmp_path / "ws"; root.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    wt = tmp_path / "wt"; wt.mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
     write_marker(wt, root)
     res = ConfigLoader.discover_with_source(wt)
     assert res.path == root / "mothership.yaml"
@@ -1110,10 +1229,13 @@ def test_discover_with_source_marker(tmp_path, monkeypatch):
 
 def test_discover_with_source_walk_up(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
-    root = tmp_path / "ws"; root.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    nested = root / "a" / "b"; nested.mkdir(parents=True)
+    nested = root / "a" / "b"
+    nested.mkdir(parents=True)
     res = ConfigLoader.discover_with_source(nested)
     assert res.path == root / "mothership.yaml"
     assert res.source == "walk-up"
@@ -1121,32 +1243,41 @@ def test_discover_with_source_walk_up(tmp_path, monkeypatch):
 
 def test_discover_delegates_to_discover_with_source(tmp_path, monkeypatch):
     from mship.core.config import ConfigLoader
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
-    root = tmp_path / "ws"; root.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
-    nested = root / "a"; nested.mkdir()
+    nested = root / "a"
+    nested.mkdir()
     assert ConfigLoader.discover(nested) == root / "mothership.yaml"
 
 
-def test_discover_with_source_hub_worktree_prefers_marker_over_own_yaml(tmp_path, monkeypatch):
+def test_discover_with_source_hub_worktree_prefers_marker_over_own_yaml(
+    tmp_path, monkeypatch
+):
     """ac6: from a hub-repo worktree that contains its OWN tracked mothership.yaml,
     discover must resolve to the WORKSPACE-root config via the marker, source=marker."""
     from mship.core.config import ConfigLoader
     from mship.core.workspace_marker import write_marker
+
     monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
 
-    root = tmp_path / "ws"; root.mkdir()
+    root = tmp_path / "ws"
+    root.mkdir()
     (root / "mothership.yaml").write_text("workspace: root\nrepos: {}\n")
 
     # Hub container gets a marker (write_marker at worktree.py:698); the hub-repo
     # worktree lands under it and carries its OWN tracked mothership.yaml copy.
-    container_dir = root / ".worktrees" / "t"; container_dir.mkdir(parents=True)
+    container_dir = root / ".worktrees" / "t"
+    container_dir.mkdir(parents=True)
     write_marker(container_dir, root)
-    hub_wt = container_dir / "hub"; hub_wt.mkdir()
+    hub_wt = container_dir / "hub"
+    hub_wt.mkdir()
     (hub_wt / "mothership.yaml").write_text("workspace: SHADOW\nrepos: {}\n")
 
     res = ConfigLoader.discover_with_source(hub_wt)
-    assert res.path == root / "mothership.yaml"     # NOT the worktree's own copy
+    assert res.path == root / "mothership.yaml"  # NOT the worktree's own copy
     assert res.source == "marker"
 
 
@@ -1154,6 +1285,7 @@ def test_git_root_child_absolute_path_rejected():
     """#366 #2: an absolute git_root child path silently resolves to the SOURCE
     checkout (pathlib drops the left operand on `/`); reject at construction."""
     from mship.core.config import RepoConfig
+
     with pytest.raises(ValueError) as exc:
         RepoConfig(path=Path("/abs/child"), type="library", git_root="mono")
     msg = str(exc.value)
@@ -1165,6 +1297,7 @@ def test_git_root_child_absolute_path_rejected():
 def test_git_root_child_parent_escape_rejected():
     """ac8: a `..`-bearing git_root child path escapes the parent worktree."""
     from mship.core.config import RepoConfig
+
     with pytest.raises(ValueError) as exc:
         RepoConfig(path=Path("../sibling"), type="library", git_root="mono")
     assert ".." in str(exc.value)
@@ -1175,6 +1308,7 @@ def test_git_root_child_relative_path_ok_and_nests(tmp_path: Path):
     """ac9: a relative git_root child still constructs and resolves nested under
     the parent worktree — no regression for valid monorepo configs."""
     from mship.core.config import RepoConfig
+
     child = RepoConfig(path=Path("web"), type="service", git_root="root")
     assert str(child.path) == "web"
     parent_path = tmp_path / "monorepo"
@@ -1187,16 +1321,27 @@ def test_top_level_absolute_path_still_allowed(tmp_path: Path):
     """Non-goal guard: TOP-LEVEL (no git_root) repos may still use absolute paths
     (what `init --detect` emits). The validator must only constrain git_root children."""
     from mship.core.config import RepoConfig
+
     r = RepoConfig(path=(tmp_path / "svc"), type="service")
     assert r.path.is_absolute()
 
 
-@pytest.mark.parametrize("fname", [
-    "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml",
-    "Taskfile.dist.yml", "Taskfile.dist.yaml", "taskfile.dist.yml", "taskfile.dist.yaml",
-])
+@pytest.mark.parametrize(
+    "fname",
+    [
+        "Taskfile.yml",
+        "Taskfile.yaml",
+        "taskfile.yml",
+        "taskfile.yaml",
+        "Taskfile.dist.yml",
+        "Taskfile.dist.yaml",
+        "taskfile.dist.yml",
+        "taskfile.dist.yaml",
+    ],
+)
 def test_resolve_go_task_files_matches_full_set(tmp_path: Path, fname: str):
     from mship.core.config import resolve_go_task_files
+
     (tmp_path / fname).write_text("version: '3'\n")
     found = resolve_go_task_files(tmp_path)
     assert [p.name for p in found] == [fname]
@@ -1216,9 +1361,11 @@ def test_load_accepts_taskfile_yaml_spelling(tmp_path: Path):
 
 def test_load_git_root_child_accepts_yaml_spelling(tmp_path: Path):
     """ac4 second pass: the git_root subdir check also accepts `.yaml`."""
-    root = tmp_path / "mono"; root.mkdir()
+    root = tmp_path / "mono"
+    root.mkdir()
     (root / "Taskfile.yml").write_text("version: '3'\n")
-    web = root / "web"; web.mkdir()
+    web = root / "web"
+    web.mkdir()
     (web / "Taskfile.yaml").write_text("version: '3'\n")
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
@@ -1233,9 +1380,11 @@ def test_load_git_root_child_accepts_yaml_spelling(tmp_path: Path):
 def test_git_root_opposite_direction_depends_on_rejected_as_cycle(tmp_path: Path):
     """ac13: a parent that `depends_on` its own git_root child forms a cycle once
     the implicit git_root ordering edge is folded in — rejected at load."""
-    root = tmp_path / "mono"; root.mkdir()
+    root = tmp_path / "mono"
+    root.mkdir()
     (root / "Taskfile.yml").write_text("version: '3'")
-    web = root / "web"; web.mkdir()
+    web = root / "web"
+    web.mkdir()
     (web / "Taskfile.yml").write_text("version: '3'")
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
@@ -1249,9 +1398,11 @@ def test_git_root_opposite_direction_depends_on_rejected_as_cycle(tmp_path: Path
 
 def test_git_root_child_depends_on_parent_still_loads(tmp_path: Path):
     """Same-direction (child depends_on parent) is NOT a cycle — no regression."""
-    root = tmp_path / "mono"; root.mkdir()
+    root = tmp_path / "mono"
+    root.mkdir()
     (root / "Taskfile.yml").write_text("version: '3'")
-    web = root / "web"; web.mkdir()
+    web = root / "web"
+    web.mkdir()
     (web / "Taskfile.yml").write_text("version: '3'")
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
@@ -1271,7 +1422,8 @@ def test_setup_inputs_defaults_to_nothing_declared():
 
 def test_setup_inputs_accepts_manifests_and_globs():
     repo = RepoConfig(
-        path=Path("./api"), type="service",
+        path=Path("./api"),
+        type="service",
         setup_inputs=["package.json", "uv.lock", "**/build.gradle"],
     )
     assert repo.setup_inputs == ["package.json", "uv.lock", "**/build.gradle"]
@@ -1280,7 +1432,9 @@ def test_setup_inputs_accepts_manifests_and_globs():
 def test_setup_inputs_parses_from_yaml(tmp_path):
     config_path = tmp_path / "mothership.yaml"
     (tmp_path / "api").mkdir()
-    (tmp_path / "api" / "Taskfile.yml").write_text("version: '3'\ntasks:\n  run:\n    cmds: [echo]\n")
+    (tmp_path / "api" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  run:\n    cmds: [echo]\n"
+    )
     config_path.write_text(
         "workspace: t\n"
         "repos:\n"
@@ -1327,11 +1481,42 @@ def test_run_profile_config_validates_backend_tasks_roles_and_default():
 @pytest.mark.parametrize(
     "repo",
     [
-        {"run_backends": {}, "run_profiles": {"ios": {"backend": "none", "hosts": {"roles": ["mobile"]}, "options": {}}}},
-        {"run_backends": {"flutter": {"discover_task": "missing", "operations": {}}}, "run_profiles": {}},
-        {"run_backends": {"flutter": {"discover_task": "discover", "operations": {"run": "missing"}}}, "run_profiles": {}},
+        {
+            "run_backends": {},
+            "run_profiles": {
+                "ios": {
+                    "backend": "none",
+                    "hosts": {"roles": ["mobile"]},
+                    "options": {},
+                }
+            },
+        },
+        {
+            "run_backends": {"flutter": {"discover_task": "missing", "operations": {}}},
+            "run_profiles": {},
+        },
+        {
+            "run_backends": {
+                "flutter": {
+                    "discover_task": "discover",
+                    "operations": {"run": "missing"},
+                }
+            },
+            "run_profiles": {},
+        },
         {"run_backends": {}, "run_profiles": {}, "default_run_profile": "missing"},
-        {"run_backends": {"flutter": {"discover_task": "discover", "operations": {}}}, "run_profiles": {"ios": {"backend": "flutter", "hosts": {"roles": ["unapproved"]}, "options": {}}}},
+        {
+            "run_backends": {
+                "flutter": {"discover_task": "discover", "operations": {}}
+            },
+            "run_profiles": {
+                "ios": {
+                    "backend": "flutter",
+                    "hosts": {"roles": ["unapproved"]},
+                    "options": {},
+                }
+            },
+        },
     ],
 )
 def test_run_profile_config_rejects_invalid_cross_references(repo):
@@ -1356,23 +1541,48 @@ def test_run_profile_config_rejects_invalid_cross_references(repo):
     "run_profiles,run_backends,default",
     [
         (
-            {"bad\nprofile": {"backend": "flutter", "hosts": {"roles": ["mobile"]}, "options": {}}},
+            {
+                "bad\nprofile": {
+                    "backend": "flutter",
+                    "hosts": {"roles": ["mobile"]},
+                    "options": {},
+                }
+            },
             {"flutter": {"discover_task": "discover", "operations": {"run": "launch"}}},
             None,
         ),
         (
-            {"ios": {"backend": "bad\tbackend", "hosts": {"roles": ["mobile"]}, "options": {}}},
-            {"bad\tbackend": {"discover_task": "discover", "operations": {"run": "launch"}}},
+            {
+                "ios": {
+                    "backend": "bad\tbackend",
+                    "hosts": {"roles": ["mobile"]},
+                    "options": {},
+                }
+            },
+            {
+                "bad\tbackend": {
+                    "discover_task": "discover",
+                    "operations": {"run": "launch"},
+                }
+            },
             None,
         ),
         (
-            {"ios": {"backend": "flutter", "hosts": {"roles": ["mobile"]}, "options": {}}},
+            {
+                "ios": {
+                    "backend": "flutter",
+                    "hosts": {"roles": ["mobile"]},
+                    "options": {},
+                }
+            },
             {"flutter": {"discover_task": "discover", "operations": {"run": "launch"}}},
             "ios\n",
         ),
     ],
 )
-def test_run_target_config_identifiers_reject_empty_or_control_characters(run_profiles, run_backends, default):
+def test_run_target_config_identifiers_reject_empty_or_control_characters(
+    run_profiles, run_backends, default
+):
     with pytest.raises(ValueError):
         RepoConfig(
             path=Path("."),
@@ -1382,6 +1592,69 @@ def test_run_target_config_identifiers_reject_empty_or_control_characters(run_pr
             run_backends=run_backends,
             default_run_profile=default,
         )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"run_backends": {"configured": {"builtin": "unknown"}}},
+        {
+            "run_backends": {
+                "configured": {"builtin": "flutter", "session_owner": "android"}
+            }
+        },
+        {"tasks": {"mship-builtin-browser-discover": "project-impostor"}},
+        {
+            "run_backends": {
+                "configured": {
+                    "builtin": "browser",
+                    "operations": {"run": "mship-builtin-flutter-run"},
+                }
+            }
+        },
+        {
+            "run_backends": {
+                "configured": {
+                    "builtin": "browser",
+                    "operations": {"discover": "mship-builtin-browser-discover"},
+                }
+            }
+        },
+        {
+            "run_backends": {
+                "configured": {
+                    "builtin": "browser",
+                    "operations": {"logs": "missing-project-task"},
+                }
+            }
+        },
+        {
+            "run_backends": {
+                "configured": {
+                    "discover_task": "mship-builtin-browser-discover",
+                    "operations": {"run": "launch"},
+                }
+            }
+        },
+    ],
+)
+def test_integrated_backends_reject_unbound_execution_authority(changes):
+    data = {
+        "path": "app",
+        "type": "service",
+        "tasks": {"launch": "launch"},
+        "run_backends": {"configured": {"builtin": "browser"}},
+        "run_profiles": {
+            "web": {
+                "backend": "configured",
+                "hosts": {"roles": ["browser-lab"]},
+                "options": {},
+            }
+        },
+    }
+    RepoConfig.model_validate(data)
+    with pytest.raises(ValueError):
+        RepoConfig.model_validate({**data, **changes})
 
 
 def test_host_tools_declaration_is_strict_and_optional():

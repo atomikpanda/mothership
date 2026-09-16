@@ -8,9 +8,11 @@ from pydantic import BaseModel, field_validator, model_validator
 from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
 from mship.core.host_tools import HostToolsConfig
+from mship.core.run_target.builtins import BUILTIN_TASK_PREFIX
 
 from mship.core.run_target.models import BackendConfig, RunProfile, safe_identifier
 from mship.core.task_results import TaskOutputDeclaration
+
 
 @dataclass(frozen=True)
 class ConfigResolution:
@@ -20,6 +22,7 @@ class ConfigResolution:
     produced it: "env" (MSHIP_WORKSPACE), "marker" (.mship-workspace walk-up),
     or "walk-up" (plain mothership.yaml walk-up).
     """
+
     path: Path
     source: str
 
@@ -46,7 +49,9 @@ def resolve_go_task_files(directory: Path) -> list[Path]:
 
     Empty list == no go-task file. More than one == an ambiguous directory where
     the file `task` actually runs depends on go-task's precedence (doctor warns)."""
-    return [directory / name for name in GO_TASK_FILENAMES if (directory / name).is_file()]
+    return [
+        directory / name for name in GO_TASK_FILENAMES if (directory / name).is_file()
+    ]
 
 
 class Dependency(BaseModel):
@@ -121,6 +126,7 @@ class HookConfig(BaseModel):
     """One `lifecycle_hooks:` entry: run a go-task target or shell command when
     `on` fires. See mship.core.lifecycle_hooks for the runtime dispatcher — NOT
     mship.core.hooks, which is the unrelated git pre-commit/pre-push installer."""
+
     on: str
     run: str
     repo: str | None = None
@@ -229,8 +235,18 @@ class RepoConfig(BaseModel):
     # Strict only inside TaskOutputDeclaration; the containing workspace config
     # retains its established compatibility with unrelated extension keys.
     task_outputs: dict[str, TaskOutputDeclaration] = {}
+
+    @property
+    def requires_taskfile(self) -> bool:
+        """Only repositories delegating every task to installed backends may omit it."""
+        return bool(self.tasks) or not self.run_backends
+
     @model_validator(mode="after")
     def validate_run_target_refs(self) -> "RepoConfig":
+        if any(task.startswith(BUILTIN_TASK_PREFIX) for task in self.tasks):
+            raise ValueError(
+                "project tasks cannot use the reserved integrated-backend namespace"
+            )
         if self.default_run_profile is not None:
             safe_identifier(self.default_run_profile, field="default_run_profile")
             if self.default_run_profile not in self.run_profiles:
@@ -246,7 +262,11 @@ class RepoConfig(BaseModel):
         for backend_name, backend in self.run_backends.items():
             safe_identifier(backend_name, field="run backend name")
             requested = [backend.discover_task, *backend.operations.values()]
-            unknown = [task for task in requested if task not in self.tasks]
+            unknown = [
+                task
+                for task in requested
+                if task not in self.tasks and backend.builtin_operation(task) is None
+            ]
             if unknown:
                 raise ValueError(
                     f"run backend {backend_name!r} references unknown logical task(s): {sorted(set(unknown))}"
@@ -350,6 +370,7 @@ class RedactPatternEntry(BaseModel):
     `{name: ..., pattern: ...}` lets an operator label the pattern so its
     `<REDACTED:kind>` marker is more legible than the generic "custom".
     """
+
     name: str | None = None
     pattern: str
 
@@ -357,6 +378,7 @@ class RedactPatternEntry(BaseModel):
 class RedactConfig(BaseModel):
     """`mothership.yaml#redact.patterns` — extra regexes unioned with the
     built-in `mship export --redacted` pattern set. See core/export.py."""
+
     patterns: list[RedactPatternEntry] = []
 
     @model_validator(mode="before")
@@ -373,7 +395,9 @@ class RedactConfig(BaseModel):
             else:
                 normalized = []
                 for entry in data["patterns"]:
-                    normalized.append({"pattern": entry} if isinstance(entry, str) else entry)
+                    normalized.append(
+                        {"pattern": entry} if isinstance(entry, str) else entry
+                    )
                 data["patterns"] = normalized
         return data
 
@@ -667,7 +691,7 @@ class ConfigLoader:
             if require_paths:
                 if not resolved.is_dir():
                     raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
-                if not resolve_go_task_files(resolved):
+                if repo.requires_taskfile and not resolve_go_task_files(resolved):
                     raise ValueError(
                         f"Repo '{name}' at {resolved} has no go-task file "
                         f"(looked for one of: {', '.join(GO_TASK_FILENAMES)})"
@@ -684,7 +708,7 @@ class ConfigLoader:
                     raise ValueError(
                         f"Repo '{name}' subdirectory does not exist: {effective}"
                     )
-                if not resolve_go_task_files(effective):
+                if repo.requires_taskfile and not resolve_go_task_files(effective):
                     raise ValueError(
                         f"Repo '{name}' at {effective} has no go-task file "
                         f"(looked for one of: {', '.join(GO_TASK_FILENAMES)})"

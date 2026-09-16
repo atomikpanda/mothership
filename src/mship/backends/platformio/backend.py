@@ -21,16 +21,15 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import BinaryIO, NoReturn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import (
+from mship.backends.common import (
     ExampleError,
     emit_inventory,
     load_bindings,
     load_context,
     load_request,
-)  # noqa: E402
-from mship.core.session_channel import OwnerContext  # noqa: E402
-from mship.core.session_inputs import SessionError  # noqa: E402
+)
+from mship.core.session_channel import OwnerContext
+from mship.core.session_inputs import SessionError
 
 _LIMIT = 256 * 1024
 _ENVIRONMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")

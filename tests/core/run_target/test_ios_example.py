@@ -2,28 +2,22 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from copy import deepcopy
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[3]
-_EXAMPLE = _ROOT / "examples" / "run-targets" / "ios" / "backend.py"
+from mship.backends.ios import backend as ios_backend
+
 _FIXTURES = Path(__file__).with_name("fixtures") / "ios"
 _UUID = "AAAAAAAA-1111-2222-3333-AAAAAAAAAAAA"
 _RUNTIME = "com.apple.CoreSimulator.SimRuntime.iOS-18-2"
 _DEVICE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
 
 
-def _backend() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("ios_example_backend", _EXAMPLE)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _backend():
+    return ios_backend
 
 
 def _inventory() -> dict[str, object]:
@@ -169,12 +163,13 @@ def test_lifetime_refuses_preexisting_foreign_app_before_launch(
 
 def test_launch_acknowledges_exact_bundle_and_pid(monkeypatch: pytest.MonkeyPatch):
     backend = _backend()
-    monkeypatch.setattr(
-        backend, "_run", lambda *_args: b"com.example.product: 731\n"
+    monkeypatch.setattr(backend, "_run", lambda *_args: b"com.example.product: 731\n")
+    assert (
+        backend._launch_pid(
+            "/opt/xcrun", {"uuid": _UUID, "bundle_id": "com.example.product"}
+        )
+        == 731
     )
-    assert backend._launch_pid(
-        "/opt/xcrun", {"uuid": _UUID, "bundle_id": "com.example.product"}
-    ) == 731
 
 
 @pytest.mark.parametrize(

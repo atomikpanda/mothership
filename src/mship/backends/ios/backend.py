@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only-discovery, target-pinned native iOS simulator backend example."""
+"""Read-only-discovery, target-pinned native iOS simulator backend."""
 
 from __future__ import annotations
 
@@ -15,8 +15,12 @@ import time
 from pathlib import Path
 from typing import Mapping, Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import emit_inventory, load_bindings, load_context, load_request  # noqa: E402
+from mship.backends.common import (
+    emit_inventory,
+    load_bindings,
+    load_context,
+    load_request,
+)
 from mship.core.session_channel import OwnerContext, acquire_app_lease
 from mship.core.session_inputs import SessionError
 

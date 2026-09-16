@@ -35,6 +35,32 @@ This does not disable timeouts imposed by a proxy or relay on the route.
 
 Without `--remote`, legacy unprofiled `mship run`, `capture`, and `build` behavior is unchanged. A task-bound `run` that selects a repository declaring `run_profiles` deliberately enters the profile-aware path even without an explicit `--profile`; see [Profile-aware runs and observations](#profile-aware-runs-and-observations).
 
+## Packaged backends on a run host
+
+A configured `repos.<repo>.run_backends.<project-name>.builtin` is available on
+a run host without copying an adapter, creating a project wrapper, or
+bootstrapping a second Python environment. The host must run the same mship
+installation that serves the request; delegated tasks use its
+`"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends <builtin> [discover]`
+entry point.
+
+The host still needs the external platform prerequisites for the selected
+target: Android SDK/adb, Flutter and its prepared toolchain, macOS/Xcode for
+iOS, a configured browser engine/driver, or PlatformIO with board and serial
+permissions. Installing or preparing those dependencies is a host-operator
+step, not discovery. Discovery remains read-only and must not launch a browser,
+boot hardware, reset a board, or upload firmware.
+
+Bindings, browser paths, serial identities, SDK paths, and credentials remain
+private to the host. They are keyed by the configured project backend name and
+are passed only through mship's sealed request/context/bindings files; do not
+place them in committed `mothership.yaml` or forward them as operation
+arguments. A task override inherits every builtin action it does not name. An
+override that delegates to a native builtin must preserve the builtin's session
+owner and use the supplied sealed context rather than selecting or creating a
+different device session. See [Run backends](configuration.md#run-backends) for
+the three supported configuration modes.
+
 ## Declaring roles (`mothership.yaml`)
 
 `mothership.yaml` is public (this repo), so it only ever names **logical roles** — never a URL or token:
@@ -226,37 +252,40 @@ capture/logging for that observation.
 
 ### Profile configuration, host bindings, and examples
 
-`run_profiles` names a backend, eligible host roles, and reviewed options;
-`run_backends` maps discovery and operation names through the repository's
-`tasks:` mapping. The portable
-[five-backend configuration example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
-is the complete opt-in schema. Its
-[root Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/Taskfile.yml) composes executable thin
-wrappers for [Android CLI](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/android-cli/),
-[Flutter](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/flutter/), [iOS simulator](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/ios/),
-[browser](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/browser/), and
-[PlatformIO](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/platformio/). Use these linked examples
-instead of copying unreviewed command lines into public configuration.
+`run_profiles` names a backend, eligible host roles, and reviewed options.
+`run_backends` may select a packaged `builtin` directly, or route selected
+discovery/operation actions through ordinary repository task keys. A builtin
+without overrides has no Taskfile requirement; an override inherits every
+unnamed action.
+
+The [run-target configuration example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
+shows builtin-only, builtin-plus-override, and custom task-routing modes. Its
+[Flutter extension Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/flutter-extension/Taskfile.yml)
+and [custom-routing Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/custom-routing/Taskfile.yml)
+delegate to installed adapters rather than copying adapter code. The packaged
+sources are [Android](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/android/backend.py),
+[Flutter](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/flutter/backend.py),
+[iOS](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/ios/backend.py),
+[browser](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/browser/backend.py),
+and [PlatformIO](https://github.com/atomikpanda/mothership/blob/main/src/mship/backends/platformio/backend.py).
 
 Keep executable paths, target aliases, SDK/app templates, device identities,
 credentials, and state directories in the owner-private
 `$XDG_CONFIG_HOME/mothership/run-target-bindings.yaml` (or
-`~/.config/mothership/run-target-bindings.yaml`). Discovery is read-only:
-normal launch and observation do not install SDK components, create emulators,
-pair or provision devices, start a daemon, or adopt an ambient target. The
-selected host must already have the required SDK/toolchain and a prepared
-application or simulator state. `host_tools` provides explicit mise tool
-installation and readiness inspection only; it does not provision platform
-components or targets.
+`~/.config/mothership/run-target-bindings.yaml`), never in `mothership.yaml`.
+The binding key is the project's configured backend name, not a builtin name.
+Discovery is read-only: normal launch and observation do not install SDK
+components, create emulators, pair or provision devices, start a daemon, or
+adopt an ambient target. The selected host must already have the required
+SDK/toolchain and prepared application or simulator state. `host_tools` provides
+explicit mise tool installation and readiness inspection only; it does not
+provision platform components or targets.
 
-The Android and Flutter backends retain their concrete native owners and binary
-provenance rules. Generic project-script backends use the existing
-`OwnerContext.from_environ()` lifecycle: call `begin()` before the first owner
-mutation, acknowledge ready only after admission, and call
-`finish(cleanup_known=...)` after cleanup has proved its result. The iOS
-example supports configured simulators; physical iOS stays unavailable until a
-concrete native USB owner exists. The browser example manages configured
-Playwright instances, not an attached native Safari session.
+Android and Flutter retain their concrete native owners and binary provenance
+rules; a task override must preserve that framework ownership. Fully
+project-owned backends retain the established protocol and may opt into only a
+compatible `android` or `flutter` session owner. Physical iOS remains
+unavailable until a concrete native USB owner exists.
 
 The browser launch owner retains one Playwright connection and the actual page
 for the whole run. Logs and capture use its authenticated, owner-private Unix

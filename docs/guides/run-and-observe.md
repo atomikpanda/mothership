@@ -62,35 +62,31 @@ platform, device, or session.
 
 Profiles are opt-in, configured wrappers. They do not adopt an app started
 outside mship, install tools or SDK components, create emulators, pair devices,
-or provision targets. The portable
-[five-backend example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml) shows the
-Android-native, Flutter, iOS-simctl, browser, and PlatformIO configuration
-shapes; it is not evidence that a host, relay, toolchain, or device is ready.
-For the full configuration schema, see [Configuration](../configuration.md);
-for selected-host and remote-session behavior, see
+or provision targets. A repo may select a packaged `run_backends` builtin
+without a project Taskfile; configuration chooses `android`, `flutter`, `ios`,
+`browser`, or `platformio`, while the selected host supplies the external SDK,
+browser driver, or board tooling.
+
+Projects can override only policy-specific discovery or operation tasks.
+Every omitted action continues to use the builtin. Such a task delegates with
+`"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends <builtin> [discover]`; for
+regular operations it supplies no caller-selected action or target arguments.
+Mship provides sealed request, selected-context, and host-binding files, and
+the helper must consume them instead of synthesizing a new context.
+
+Android and Flutter retain their native session ownership. An override may add
+project policy, but it must not replace the framework owner, retarget an
+existing session, or create a parallel process/device session. Browser,
+PlatformIO, and iOS prerequisites remain external and target-specific: an
+unavailable engine/driver, board, serial permission, or Apple tooling is an
+actionable readiness failure, never a silent fallback. Native physical iOS
+operations remain unsupported pending a concrete owner.
+
+The [run-target configuration example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
+shows builtin-only, builtin-plus-override, and custom task-routing modes. For
+the full configuration schema, see [Configuration](../configuration.md); for
+selected-host and remote-session behavior, see
 [Profile-aware runs and observations](../remote-run.md#profile-aware-runs-and-observations).
-
-The native iOS example launches an already-installed bundle on an already-booted
-simulator. It verifies the exact bundle/PID acknowledgement from `simctl launch`
-before reporting readiness and refuses a pre-existing app process. Closing its
-run terminates that owned app, not the simulator. Launching a Flutter-built bundle
-this way is still a native iOS session: it does not establish a Flutter framework
-owner or enable hot reload. Transferred source alone does not prove which source
-built the installed binary; binary provenance remains unknown without verified
-build evidence.
-
-The Flutter example uses its own framework owner. Its simulator inventory is
-device-only and advertises operations only for booted targets; discovery never
-boots a simulator. Keep the configured Python environment available for the
-lifetime of the run: exact-target probes use that same environment. The Flutter
-project and reviewed `lib/...` entrypoint must exist at the selected worktree
-root with dependencies prepared before launch.
-
-The browser example still has an acceptance blocker: a separate Playwright
-connection cannot see the launch connection's page, so its recorded-run logs
-and capture do not yet work. Discovery and launch readiness are not proof of
-browser observation support. Do not use its advertised observation capabilities
-as a release-readiness signal until that owner/control path is corrected.
 
 ## Build artifacts
 

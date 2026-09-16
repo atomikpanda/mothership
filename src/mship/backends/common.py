@@ -1,4 +1,4 @@
-"""Shared wire boundary for the opt-in project-script backend examples."""
+"""Shared wire boundary for built-in run-target backends."""
 
 from __future__ import annotations
 

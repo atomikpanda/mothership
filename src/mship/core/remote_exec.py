@@ -1242,12 +1242,27 @@ def _resolve_tool_request(
         )
         if request.task_key is None:
             return replace(request, input_files=input_files)
-        actual = repo_config.tasks.get(request.task_key)
-        if actual is None:
-            return None
+        builtin_operation = None
+        backend = None
+        if TARGET_REQUEST_FILE in input_files:
+            profile_request = DiscoveryRequest.model_validate(
+                _decode_profile_json(input_files[TARGET_REQUEST_FILE])
+            )
+            backend = repo_config.run_backends[profile_request.backend]
+            builtin_operation = backend.builtin_operation(request.task_key)
+        if builtin_operation is not None and backend is not None:
+            assert backend.builtin is not None
+            argv = (sys.executable, "-I", "-m", "mship.backends", backend.builtin)
+            if builtin_operation == "discover":
+                argv += ("discover",)
+        else:
+            actual = repo_config.tasks.get(request.task_key)
+            if actual is None:
+                return None
+            argv = ("task", actual)
         return replace(
             request,
-            argv=("task", actual),
+            argv=argv,
             task_key=None,
             input_files=input_files,
             install_from_result=None,
