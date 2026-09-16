@@ -229,13 +229,13 @@ capture/logging for that observation.
 `run_profiles` names a backend, eligible host roles, and reviewed options;
 `run_backends` maps discovery and operation names through the repository's
 `tasks:` mapping. The portable
-[five-backend configuration example](../examples/run-targets/mothership.yaml)
+[five-backend configuration example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
 is the complete opt-in schema. Its
-[root Taskfile](../examples/run-targets/Taskfile.yml) composes executable thin
-wrappers for [Android CLI](../examples/run-targets/android-cli/),
-[Flutter](../examples/run-targets/flutter/), [iOS simulator](../examples/run-targets/ios/),
-[browser](../examples/run-targets/browser/), and
-[PlatformIO](../examples/run-targets/platformio/). Use these linked examples
+[root Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/Taskfile.yml) composes executable thin
+wrappers for [Android CLI](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/android-cli/),
+[Flutter](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/flutter/), [iOS simulator](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/ios/),
+[browser](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/browser/), and
+[PlatformIO](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/platformio/). Use these linked examples
 instead of copying unreviewed command lines into public configuration.
 
 Keep executable paths, target aliases, SDK/app templates, device identities,

@@ -63,7 +63,7 @@ platform, device, or session.
 Profiles are opt-in, configured wrappers. They do not adopt an app started
 outside mship, install tools or SDK components, create emulators, pair devices,
 or provision targets. The portable
-[five-backend example](../../examples/run-targets/mothership.yaml) shows the
+[five-backend example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml) shows the
 Android-native, Flutter, iOS-simctl, browser, and PlatformIO configuration
 shapes; it is not evidence that a host, relay, toolchain, or device is ready.
 For the full configuration schema, see [Configuration](../configuration.md);

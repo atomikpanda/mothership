@@ -322,15 +322,15 @@ an unknown backend, an empty host-role list, a role outside `run_hosts`, or a
 task key absent from `tasks:` rejects configuration. `session_owner` is present
 only for the concrete `android` and `flutter` owners; generic backends omit it.
 
-The portable [five-backend run-target example](../examples/run-targets/mothership.yaml)
+The portable [five-backend run-target example](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/mothership.yaml)
 contains the complete schema for Android CLI, Flutter, iOS simulator, browser,
-and PlatformIO profiles. Its [root Taskfile](../examples/run-targets/Taskfile.yml)
+and PlatformIO profiles. Its [root Taskfile](https://github.com/atomikpanda/mothership/blob/main/examples/run-targets/Taskfile.yml)
 and per-backend wrappers are executable examples, not implicit Mship setup:
-[Android CLI](../examples/run-targets/android-cli/),
-[Flutter](../examples/run-targets/flutter/),
-[iOS](../examples/run-targets/ios/),
-[browser](../examples/run-targets/browser/), and
-[PlatformIO](../examples/run-targets/platformio/).
+[Android CLI](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/android-cli/),
+[Flutter](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/flutter/),
+[iOS](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/ios/),
+[browser](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/browser/), and
+[PlatformIO](https://github.com/atomikpanda/mothership/tree/main/examples/run-targets/platformio/).
 
 Keep tool paths, target aliases, device identities, credentials, app templates,
 and other machine-specific values in the owner-private
