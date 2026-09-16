@@ -300,6 +300,12 @@ one task-bound repository, a recorded active run with `reload`, and no
 that exact owner; it cannot select or recreate a session. Dependency, native
 build, Taskfile, or host-tool changes require setup or a fresh launch.
 
+Source reservation drains existing observations before mutation. Each handoff
+phase uses a 120-second HTTP read timeout so source checks and Flutter control
+are not interrupted by the ordinary five-second transport default. An unknown
+outcome is not automatically retried; establish a fresh run rather than replaying
+an uncertain transaction.
+
 ### Session verification boundary
 
 Real authenticated direct-TCP Android acceptance has passed on Studio with
@@ -329,6 +335,16 @@ Additional real-driver checks cover stale capabilities, partial-artifact cleanup
 long receipt paths, preserved application window state, and navigation identity
 loss. This is Chromium acceptance, not Firefox, WebKit, native Safari, or
 public-relay proof.
+
+Authenticated direct-TCP Flutter source-update acceptance has passed on Studio
+with prepared QuicklyGuide and an iOS 26.5 simulator. A certified Dart source
+change drained an existing logs observer, applied to the recorded owner, and
+hot-reloaded a visible light-to-dark theme change. The owner reference,
+generation, and app process remained unchanged; the durable receipt reached
+`reloaded` and the remote worktree was clean at the new certified revision.
+Normal task close then stopped the app while leaving the simulator booted.
+This does not attest the prepared binary, Flutter on Android, physical iOS,
+or public-relay execution.
 
 ## Pinned host tools
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 import sys
 import threading
 import time
@@ -11,17 +13,20 @@ import pytest
 from mship.core.remote_tool import ToolContext, ToolRequest
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.remote_exec import RemoteExecDeps
+from mship.core.remote_client import source_update_remote
+from mship.core.run_host import RunHostResolver
 from mship.core.run_target.models import DiscoveryRequest
 from mship.core.session_channel import OwnerContext, _write_receipt, read_private_json
 from mship.core.session_inputs import OwnerRequest, SessionError
 from mship.core.session_source import (
     SourceUpdateError,
     SourceUpdateRequest,
+    SourceUpdateReply,
     SessionSourceUpdateService,
 )
 from mship.core.tool_process import ToolOperationRegistry
 from mship.util.shell import ShellRunner
-from tests.core.test_remote_source_snapshot import _git, _repo
+from tests.core.test_remote_source_snapshot import _git, _host, _repo
 
 
 def _request() -> SourceUpdateRequest:
@@ -55,6 +60,52 @@ def _request() -> SourceUpdateRequest:
         new_source_revision="b" * 40,
         new_profile_revision="d" * 64,
     )
+
+
+def test_source_update_waits_for_a_slow_phase_without_replaying() -> None:
+    request = _request()
+    reply = SourceUpdateReply(
+        update_id=request.update_id,
+        run_id=request.run_id,
+        stage="prepared",
+        source_revision=request.new_source_revision,
+        profile_revision=request.new_profile_revision,
+    )
+    received: list[object] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            received.append(
+                json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            )
+            payload = json.dumps(reply.to_dict()).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            # A real socket wait exercises HTTPX's default five-second read limit.
+            time.sleep(5.2)
+            try:
+                self.wfile.write(payload)
+            except BrokenPipeError, ConnectionResetError:
+                pass
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            result = source_update_remote(
+                host=_host(f"http://127.0.0.1:{server.server_port}"),
+                resolver=RunHostResolver(),
+                request=request,
+            )
+        finally:
+            server.shutdown()
+            worker.join(timeout=10)
+    assert result == reply
+    assert received == [request.to_dict()]
 
 
 def test_source_update_wire_rejects_caller_environment_authority() -> None:

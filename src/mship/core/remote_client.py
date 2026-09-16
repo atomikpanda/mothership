@@ -642,6 +642,8 @@ def source_update_remote(
                     url,
                     headers={"Authorization": f"Bearer {active.token}"},
                     json=body,
+                    # Source phases drain observers and await Flutter before replying.
+                    timeout=httpx.Timeout(5, read=120),
                 ) as response:
                     if response.status_code in {401, 403} and attempt == 0:
                         continue
