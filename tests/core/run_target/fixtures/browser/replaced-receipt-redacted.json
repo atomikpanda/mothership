@@ -1,10 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "run_id": "run-redacted",
   "instance_token": "browser_chromium_qa_0001",
   "record_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
   "engine": "chromium",
-  "endpoint": "ws://127.0.0.1/redacted-endpoint",
+  "control_path": "/private/browser-instances/runs/mship-browser-redacted/control.sock",
+  "control_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "page_url": "https://example.invalid/app",
   "page_marker": "redacted-page-marker"
 }

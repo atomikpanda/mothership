@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Configured Playwright engine and managed-instance backend example.
 
-The browser endpoint stays only in a per-run private receipt.  Discovery reads
+The browser control endpoint stays only in a per-run private receipt. Discovery reads
 engine fingerprints and configured instance records; it never launches an
 engine or creates a page.
 """
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -43,6 +44,7 @@ _TOKEN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _ALIAS = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_CONTROL_TOKEN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 
 class BackendError(RuntimeError):
@@ -106,6 +108,44 @@ def _private_directory(path: Path) -> None:
         or info.st_mode & 0o077
     ):
         raise _fail("configured browser instance directory is not private")
+
+
+def _private_control_socket(value: object) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise _fail("selected browser receipt is invalid")
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts or len(os.fsencode(path)) > 103:
+        raise _fail("selected browser receipt is invalid")
+    try:
+        parent = path.parent.lstat()
+        info = path.lstat()
+    except OSError as error:
+        raise _fail("selected browser receipt is invalid") from error
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.geteuid()
+        or stat.S_IMODE(parent.st_mode) != 0o700
+        or not stat.S_ISSOCK(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise _fail("selected browser receipt is invalid")
+    return str(path)
+
+
+def _private_control_token(value: object) -> str:
+    if not isinstance(value, str) or _CONTROL_TOKEN.fullmatch(value) is None:
+        raise _fail("selected browser receipt is invalid")
+    try:
+        decoded = base64.urlsafe_b64decode(f"{value}=")
+    except ValueError as error:
+        raise _fail("selected browser receipt is invalid") from error
+    if (
+        len(decoded) != 32
+        or base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != value
+    ):
+        raise _fail("selected browser receipt is invalid")
+    return value
 
 
 def _absolute_file(value: object, *, executable: bool = False) -> str:
@@ -249,6 +289,29 @@ def _environment() -> dict[str, str]:
     }
 
 
+def _stop_bounded_driver(process: subprocess.Popen[bytes]) -> None:
+    """Reap a finite driver helper without affecting the caller's process group."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _bounded_driver(
     argv: Sequence[str], payload: Mapping[str, object]
 ) -> dict[str, object]:
@@ -293,21 +356,16 @@ def _bounded_driver(
         if process.wait(timeout=1) != 0:
             raise _fail("configured browser automation operation failed")
     except (OSError, TimeoutError, ValueError, subprocess.TimeoutExpired) as error:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=1)
+        _stop_bounded_driver(process)
         if isinstance(error, BackendError):
             raise
         raise _fail("configured browser automation operation is unavailable") from error
+    except BaseException:
+        _stop_bounded_driver(process)
+        raise
     finally:
         selector.close()
-        if process.poll() is None:
-            process.terminate()
-            process.wait(timeout=1)
+        _stop_bounded_driver(process)
     try:
         value = json.loads(bytes(stdout).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -331,28 +389,61 @@ def _driver(
 def _foreground(action: str, config: Mapping[str, str], **payload: object) -> None:
     if action not in {"launch", "logs"}:
         raise _fail("browser automation operation is invalid")
+    process: subprocess.Popen[bytes] | None = None
+    handlers: dict[int, object] = {}
+    cancelled = False
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        nonlocal cancelled
+        cancelled = True
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+
     try:
-        result = subprocess.run(
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handlers[signum] = signal.signal(signum, request_stop)
+        process = subprocess.Popen(
             (config["node"], str(Path(__file__).with_name("driver.mjs")), action),
-            input=_canonical(
-                {"playwright_module": config["playwright_module"], **payload}
-            ).encode("utf-8"),
-            check=False,
-            start_new_session=False,
+            stdin=subprocess.PIPE,
+            start_new_session=True,
             env=_environment(),
         )
+        assert process.stdin is not None
+        process.stdin.write(
+            _canonical(
+                {"playwright_module": config["playwright_module"], **payload}
+            ).encode("utf-8")
+        )
+        process.stdin.close()
+        while True:
+            try:
+                result = process.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if cancelled:
+                    _stop_owned_driver(process)
+        if cancelled:
+            raise _fail("configured browser automation operation stopped")
+        if result:
+            raise _fail("configured browser automation operation failed")
     except OSError as error:
         raise _fail("configured browser automation operation is unavailable") from error
-    if result.returncode:
-        raise _fail("configured browser automation operation failed")
+    finally:
+        if process is not None:
+            _stop_owned_driver(process)
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
 
 
 def _stop_owned_driver(process: subprocess.Popen[bytes]) -> None:
-    """Reap only the launch driver's private process session and its browser."""
+    """Reap a driver in its own process group, escalating only when necessary."""
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        process.terminate()
     except ProcessLookupError:
         return
     try:
@@ -361,10 +452,22 @@ def _stop_owned_driver(process: subprocess.Popen[bytes]) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
-    process.wait(timeout=1)
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _cleanup_control(process: subprocess.Popen[bytes]) -> bool:
@@ -395,7 +498,7 @@ def _launch_foreground(
         cancelled = True
         if process is not None and process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                process.terminate()
             except ProcessLookupError:
                 pass
 
@@ -431,7 +534,13 @@ def _launch_foreground(
             cleanup_known = control == {"cleanup": True}
             raise ValueError
         owner.ready()
-        result = process.wait()
+        while True:
+            try:
+                result = process.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if cancelled:
+                    _stop_owned_driver(process)
         cleanup_known = _cleanup_control(process)
         if result != 0 or cancelled:
             raise _fail("configured browser automation operation stopped")
@@ -625,14 +734,15 @@ def _read_receipt(config: Mapping[str, str], run_id: str) -> dict[str, object]:
         "instance_token",
         "record_fingerprint",
         "engine",
-        "endpoint",
+        "control_path",
+        "control_token",
         "page_url",
         "page_marker",
     }
     if (
         not isinstance(value, dict)
         or set(value) != required
-        or value.get("version") != 1
+        or value.get("version") != 2
     ):
         raise _fail("selected browser receipt is invalid")
     if (
@@ -647,16 +757,19 @@ def _read_receipt(config: Mapping[str, str], run_id: str) -> dict[str, object]:
         or _DIGEST.fullmatch(value["record_fingerprint"]) is None
     ):
         raise _fail("selected browser receipt is invalid")
-    if (
-        not isinstance(value.get("endpoint"), str)
-        or not value["endpoint"].startswith("ws")
-        or len(value["endpoint"]) > 4096
-    ):
-        raise _fail("selected browser receipt is invalid")
+    _private_control_socket(value.get("control_path"))
+    _private_control_token(value.get("control_token"))
     if (
         not isinstance(value.get("page_url"), str)
+        or len(value["page_url"]) > 2048
+        or not (
+            value["page_url"].startswith("https://")
+            or value["page_url"].startswith("http://")
+        )
+        or any(character.isspace() for character in value["page_url"])
         or not isinstance(value.get("page_marker"), str)
         or not value["page_marker"]
+        or len(value["page_marker"]) > 512
     ):
         raise _fail("selected browser receipt is invalid")
     return value

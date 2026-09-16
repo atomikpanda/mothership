@@ -258,6 +258,21 @@ example supports configured simulators; physical iOS stays unavailable until a
 concrete native USB owner exists. The browser example manages configured
 Playwright instances, not an attached native Safari session.
 
+The browser launch owner retains one Playwright connection and the actual page
+for the whole run. Logs and capture use its authenticated, owner-private Unix
+control socket, not a second Playwright connection or a search for a matching
+page. Version-2 run receipts bind that socket and capability to the exact run,
+managed instance, and page generation; legacy receipts are rejected rather than
+adopted. Playwright and its browser binaries remain explicit host prerequisites.
+
+Console and page-error listeners attach before navigation. Late log subscribers
+receive a bounded backlog, then live events; cancelling a subscriber does not
+close the browser. The configured page URL remains an identity constraint:
+navigation elsewhere disconnects logs and rejects observation/capture without
+selecting another page. The backend leaves the application's `window.name`
+untouched. Failed captures remove only artifacts they created, and normal owner
+shutdown removes its private control resources.
+
 PlatformIO intentionally maps its durable `run` operation to board monitoring.
 Its `upload` mapping is a separate typed, finite operation, not a new generic
 CLI command or a lifetime-owning session.
@@ -304,6 +319,16 @@ UIAutomator's status trailer from its validated XML document.
 This is single-host emulator acceptance, not physical Android USB, cross-host
 replacement/outage, firmware upload, or public-relay acceptance. Separate
 native iOS simulator and Flutter owner evidence does not establish those gates.
+
+Real browser acceptance has also passed on Linux using Playwright 1.63.0 and
+Chrome for Testing 150.0.7871.24: authenticated direct-TCP discovery and launch,
+startup/live console and page-error logs, log cancellation with the parent still
+active, recorded-run screenshot/DOM capture, replaced-instance rejection, and
+normal close. An independently opened browser remained usable after close.
+Additional real-driver checks cover stale capabilities, partial-artifact cleanup,
+long receipt paths, preserved application window state, and navigation identity
+loss. This is Chromium acceptance, not Firefox, WebKit, native Safari, or
+public-relay proof.
 
 ## Pinned host tools
 
