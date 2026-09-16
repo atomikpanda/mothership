@@ -222,15 +222,18 @@ def test_driver_shutdown_allows_graceful_cleanup_before_escalation():
             (
                 "import signal, subprocess, sys, time\n"
                 "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "stopping = False\n"
                 "def stop(*_):\n"
-                " try: child.wait(timeout=0.1); survived = False\n"
-                " except subprocess.TimeoutExpired: survived = True\n"
-                " child.terminate(); child.wait(timeout=1)\n"
-                " print('cleanup' if survived else 'lost-child', flush=True)\n"
-                " raise SystemExit(0 if survived else 1)\n"
+                " global stopping\n"
+                " stopping = True\n"
                 "signal.signal(signal.SIGTERM, stop)\n"
                 "print('ready', flush=True)\n"
-                "while True: time.sleep(1)\n"
+                "while not stopping: time.sleep(0.01)\n"
+                "try: child.wait(timeout=0.1); survived = False\n"
+                "except subprocess.TimeoutExpired: survived = True\n"
+                "child.terminate(); child.wait(timeout=1)\n"
+                "print('cleanup' if survived else 'lost-child', flush=True)\n"
+                "raise SystemExit(0 if survived else 1)\n"
             ),
         ),
         stdout=subprocess.PIPE,
