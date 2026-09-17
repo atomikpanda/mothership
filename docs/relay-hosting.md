@@ -165,6 +165,31 @@ machine-local override to copy to a new relay.
 Use the [upgrade procedure](#upgrading) below to deploy the fixed build from
 the original checkout while preserving the relay's identity and state.
 
+### SSH tunnel liveness
+
+Keep SSH peer checks enabled with an explicit, finite budget:
+
+```yaml
+- --ping-client=true
+- --ping-client-interval=30s
+- --ping-client-timeout=60s
+```
+
+sish sets an absolute SSH TCP deadline to the ping interval plus its timeout;
+successful ping cycles re-arm it. These settings give a 90-second deadline,
+rather than the upstream 5-second interval plus 5-second timeout. They tolerate
+brief network or scheduling stalls while still closing unresponsive peers.
+The tradeoff is a longer dead-peer detection window.
+
+This timer is independent of the forwarded HTTP idle timeout below. Neither
+application output nor the client's `ServerAliveInterval=30` /
+`ServerAliveCountMax=3` overrides the server's deadline. Do not disable either
+liveness checking or idle-connection reaping.
+
+Deploying these flags recreates sish and disconnects active tunnels. Schedule
+that interruption explicitly; daemons reconnect, but accepted application
+operations are not automatically replayed.
+
 ### Idle-connection reaping
 
 sish's `--idle-connection` (default `true`) is the only switch that wraps a proxied
@@ -185,8 +210,8 @@ So leave the reaper on and tune the timeout instead:
 ```
 
 **The timeout must stay above proxied HTTP application-data cadence.** SSH
-`ServerAliveInterval` traffic keeps the tunnel itself alive, but does not write
-an individual proxied HTTP response body. Quiet remote execution streams emit
+control keepalives do not write an individual proxied HTTP response body.
+Quiet remote execution streams emit
 a nonce-framed typed keepalive every 30 seconds, so the default 120-second reaper
 is safely above that cadence. Drop the timeout near or below the application
 keepalive cadence and you will start disconnecting healthy quiet streams. A
@@ -507,6 +532,12 @@ container recreation.
 **A subdomain stops receiving after a reconnect, or the relay slows down over weeks of uptime** — a dead tunnel was never reaped, so its route is still registered and a new tunnel for the same subdomain collides with it. Check that sish is running with idle-connection reaping on (`docker compose -f docker/relay/docker-compose.yml exec sish ps` or inspect the container's command line); see [Idle-connection reaping](#idle-connection-reaping). A relay left with `--idle-connection=false` leaks a goroutine per inbound request to every dead tunnel.
 
 **Certificate errors** — verify the wildcard DNS record resolves to the relay IP, and that ports 80 and 443 are open. Caddy writes ACME state to `docker/relay/caddy-data/`; check `docker compose logs caddy` for ACME errors.
+
+**SSH keepalive EOF followed by a TCP read timeout** — this is the SSH transport
+deadline, not the HTTP idle reaper. Inspect the running sish command for all
+three `--ping-client*` settings above. If it still happens with the explicit
+budget, capture bounded SSH ping/reply and packet timing to distinguish packet
+loss from a blocked peer; do not mask it by replaying accepted app operations.
 
 **sish container exits immediately** — run `docker compose -f docker/relay/docker-compose.yml logs sish` to inspect startup errors. Common causes: port already in use, or missing `RELAY_DOMAIN` environment variable.
 
