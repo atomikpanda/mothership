@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 import httpx
 
-from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
+from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER, KEEPALIVE_MARKER
 from mship.core.run_host import (
     HostRegistration,
     ResolvedRunHostConnection,
@@ -364,50 +364,87 @@ def _drive(
     captures_dir_for: Optional[Path],
     print_fn: Callable[[str], None],
 ) -> int:
-    # A control record must begin a logical line. `_ChunkReader` may split a
-    # long ordinary line into bounded fragments, so a later fragment must never
-    # gain control-record meaning just because it begins a fragment.
-    artifact_prefix = f"{ARTIFACT_MARKER}:{nonce} "
-    exit_prefix = f"{EXIT_MARKER}:{nonce} "
-    at_line_start = True
+    # A control record normally begins a logical line. A keepalive, artifact, or
+    # terminal record may directly follow a child's unterminated final fragment.
+    # Retain that fragment across control records so line-rendering callbacks
+    # never turn each keepalive into a visible synthetic newline.
+    artifact_prefix = f"{ARTIFACT_MARKER}:{nonce} ".encode("utf-8")
+    keepalive_line = f"{KEEPALIVE_MARKER}:{nonce}\n".encode("utf-8")
+    exit_prefix = f"{EXIT_MARKER}:{nonce} ".encode("utf-8")
+
+    def render(data: bytes) -> None:
+        if data:
+            print_fn(data.decode("utf-8", errors="replace").rstrip("\n"))
+
+    def append_output(data: bytes) -> None:
+        pending.extend(data)
+        # Match `_ChunkReader`'s existing bounded long-line behavior: a child
+        # cannot turn keepalive retention into unbounded client memory.
+        while len(pending) >= MAX_LEGACY_LINE_BYTES:
+            render(bytes(pending[:MAX_LEGACY_LINE_BYTES]))
+            del pending[:MAX_LEGACY_LINE_BYTES]
+
+    def extract_artifact(header: bytes) -> None:
+        text = header.decode("utf-8", errors="replace").rstrip("\n")
+        n = _control_count(text)
+        if n < 0:
+            raise RemoteExecError(
+                f"remote advertised negative artifact byte count {n}; "
+                f"refusing to read"
+            )
+        if n > MAX_ARTIFACT_BYTES:
+            raise RemoteExecError(
+                f"remote advertised {n} artifact bytes, exceeding the "
+                f"{MAX_ARTIFACT_BYTES}-byte cap; refusing to read"
+            )
+        tar_bytes = reader.read_exact(n)
+        if captures_dir_for is not None:
+            captures_dir_for.mkdir(parents=True, exist_ok=True)
+            try:
+                with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tar:
+                    tar.extractall(captures_dir_for, filter="data")
+            except tarfile.TarError as exc:
+                raise RemoteExecError(
+                    f"remote artifact block is not a valid uncompressed tar: {exc}"
+                ) from exc
+
+    pending = bytearray()
+
     while True:
         line = reader.readline()
         if line is None:
+            render(bytes(pending))
             raise RemoteExecError(
                 "remote stream ended without a __MSHIP_EXIT__ sentinel"
             )
-        text = line.decode("utf-8", errors="replace").rstrip("\n")
 
-        if at_line_start and text.startswith(artifact_prefix):
-            n = _control_count(text)
-            if n < 0:
-                raise RemoteExecError(
-                    f"remote advertised negative artifact byte count {n}; "
-                    f"refusing to read"
-                )
-            if n > MAX_ARTIFACT_BYTES:
-                raise RemoteExecError(
-                    f"remote advertised {n} artifact bytes, exceeding the "
-                    f"{MAX_ARTIFACT_BYTES}-byte cap; refusing to read"
-                )
-            tar_bytes = reader.read_exact(n)
-            if captures_dir_for is not None:
-                captures_dir_for.mkdir(parents=True, exist_ok=True)
-                try:
-                    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tar:
-                        tar.extractall(captures_dir_for, filter="data")
-                except tarfile.TarError as exc:
-                    raise RemoteExecError(
-                        f"remote artifact block is not a valid uncompressed tar: {exc}"
-                    ) from exc
-            at_line_start = True
+        # A control frame either starts this logical line or is an authenticated
+        # suffix after an unterminated child fragment. `find` covers only the
+        # latter; the first branch prevents arbitrary first-line output from
+        # being treated as control.
+        artifact_at = (
+            0 if line.startswith(artifact_prefix) else line.find(artifact_prefix)
+        )
+        if artifact_at >= 0:
+            append_output(line[:artifact_at])
+            extract_artifact(line[artifact_at:])
             continue
 
-        if at_line_start and text.startswith(exit_prefix):
+        if line == keepalive_line or line.endswith(keepalive_line):
+            append_output(line[: -len(keepalive_line)])
+            continue
+
+        exit_at = 0 if line.startswith(exit_prefix) else line.find(exit_prefix)
+        if exit_at >= 0:
+            text = line[exit_at:].decode("utf-8", errors="replace").rstrip("\n")
+            append_output(line[:exit_at])
+            render(bytes(pending))
             return _control_count(text)
 
-        print_fn(text)
-        at_line_start = line.endswith(b"\n")
+        append_output(line)
+        if line.endswith(b"\n"):
+            render(bytes(pending))
+            pending.clear()
 
 
 def _operation_url(
@@ -607,6 +644,65 @@ def stop_session(
     )
 
 
+
+
+def cleanup_task_worktrees(
+    *,
+    task: str,
+    repos: list[str],
+    expected_revisions: dict[str, str],
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """Ask one pinned host to remove only its certified task worktrees once."""
+    if (
+        not isinstance(task, str)
+        or not task
+        or not repos
+        or len(set(repos)) != len(repos)
+        or any(not isinstance(repo, str) or not repo for repo in repos)
+        or set(expected_revisions) != set(repos)
+        or any(
+            not isinstance(sha, str)
+            or re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", sha) is None
+            for sha in expected_revisions.values()
+        )
+    ):
+        raise ValueError("invalid remote task-worktree cleanup request")
+    active = resolver.resolve(host)
+    url = _operation_url(host, active, "/exec/task-worktrees-cleanup")
+    try:
+        with httpx.Client(transport=transport, follow_redirects=False) as client:
+            with client.stream(
+                "POST",
+                url,
+                headers={"Authorization": f"Bearer {active.token}"},
+                json={
+                    "task": task,
+                    "repos": repos,
+                    "expected_revisions": expected_revisions,
+                },
+                timeout=httpx.Timeout(5, read=30),
+            ) as response:
+                if response.status_code >= 400:
+                    raise RemoteExecError(
+                        f"remote task-worktree cleanup was refused (HTTP {response.status_code})"
+                    )
+                value = _bounded_response_json(response)
+    except httpx.HTTPError:
+        raise RemoteExecError(
+            "remote host is unreachable; check relay pairing and host availability"
+        ) from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"status"}
+        or value["status"] not in {"removed", "busy", "unknown", "invalid"}
+    ):
+        raise RemoteExecError("remote task-worktree cleanup response is invalid")
+    return value["status"]
+
+
 def _bounded_response_json(response: httpx.Response) -> object:
     payload = bytearray()
     for chunk in _raw_chunks(response):
@@ -765,6 +861,14 @@ def _exec_tool_once(
                             and event.kind in {"stdout", "stderr"}
                         ):
                             return ToolResult(status="protocol_error")
+                        if event.kind == "keepalive":
+                            # A nonce-framed keepalive is protocol metadata, not
+                            # task output. It may only follow accepted ownership
+                            # and is deliberately withheld from application sinks.
+                            if accepted is None:
+                                return ToolResult(status="protocol_error")
+                            continue
+
                         result = event.result
                         if result is not None:
                             if (

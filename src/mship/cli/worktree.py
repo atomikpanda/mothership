@@ -1279,6 +1279,27 @@ def register(app: typer.Typer, get_container):
                     f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}"
                 )
 
+        # A remote task may have materialized dirty, platform-specific
+        # worktrees that local teardown cannot see.  Only durable, exact-host
+        # receipts may address the authenticated removal route; any ambiguity
+        # retains those receipts and keeps their scratch-ref leases actionable.
+        cleared_remote_worktree_hosts: set[tuple[str, str, str]] = set()
+        try:
+            from mship.core.run_host import RunHostStore
+            from mship.core.run_transfer import cleanup_remote_task_worktrees
+
+            cleared_remote_worktree_hosts = cleanup_remote_task_worktrees(
+                task,
+                config=config,
+                store=RunHostStore(container.state_dir()),
+                warn=output.warning,
+            )
+        except Exception:
+            output.warning(
+                "could not prove remote task worktree cleanup; exact cleanup "
+                "receipts are retained"
+            )
+
         # Scratch refs left on run hosts by `--remote` (spec remote-exact-copy).
         # Fail-open like the spec/WorkItem advances above: a run host that is
         # off, unreachable, or was never mapped must not stop a close. The refs
@@ -1294,6 +1315,7 @@ def register(app: typer.Typer, get_container):
                 store=RunHostStore(container.state_dir()),
                 shell=container.shell(),
                 warn=output.warning,
+                cleared_worktree_hosts=cleared_remote_worktree_hosts,
             )
         except Exception:
             pass

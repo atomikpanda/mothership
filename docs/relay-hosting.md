@@ -184,13 +184,14 @@ So leave the reaper on and tune the timeout instead:
 - --idle-connection-timeout=120s
 ```
 
-**The timeout must stay above the client's keepalive budget.** `mship` opens its tunnel
-with `ServerAliveInterval=30` and `ServerAliveCountMax=3` (see
-`src/mship/core/relay/tunnel.py`), so a live-but-quiet tunnel produces traffic every 30s
-and refreshes the deadline long before 120s elapses. Drop the timeout near or below 30s
-and you will start disconnecting healthy idle tunnels; raise the client's interval
-without raising this timeout and you get the same. A third-party client that sends no
-keepalives at all needs either its own keepalive or a longer timeout here.
+**The timeout must stay above proxied HTTP application-data cadence.** SSH
+`ServerAliveInterval` traffic keeps the tunnel itself alive, but does not write
+an individual proxied HTTP response body. Quiet remote execution streams emit
+a nonce-framed typed keepalive every 30 seconds, so the default 120-second reaper
+is safely above that cadence. Drop the timeout near or below the application
+keepalive cadence and you will start disconnecting healthy quiet streams. A
+third-party client that keeps an execution stream quiet needs a valid
+application-level keepalive of its own or a longer timeout here.
 
 The `Caddyfile` (`docker/relay/Caddyfile`) wires:
 

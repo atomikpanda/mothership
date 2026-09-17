@@ -662,6 +662,8 @@ def test_exec_http_disconnect_cancels_blocked_materialization(
     real_popen = shell_module.subprocess.Popen
 
     def blocking_popen(_command, **kwargs):
+        if _command[0] != "git":
+            return real_popen(_command, **kwargs)
         proc = real_popen(
             [sys.executable, "-c", "import signal; signal.pause()"],
             cwd=kwargs.get("cwd"),
@@ -3019,3 +3021,222 @@ def test_tool_request_bounds_duplicates_and_private_validation_errors(
     assert rejected.status_code == 400
     assert "private-environment-sentinel" not in rejected.text
     assert not sentinel.exists()
+
+
+class _CleanupShell:
+    def __init__(
+        self,
+        target: Path,
+        *,
+        branch: str = "feat/task-1",
+        head: str = "a" * 40,
+        dirty: str = "",
+    ) -> None:
+        self.target = target
+        self.branch = branch
+        self.head = head
+        self.dirty = dirty
+        self.calls: list[tuple[str, ...]] = []
+
+    def run_argv(self, args, cwd, env=None, *, cancel_event=None):
+        _ = cwd, env, cancel_event
+        command = tuple(args)
+        self.calls.append(command)
+        if command[:4] == ("git", "worktree", "list", "--porcelain"):
+            return ShellResult(
+                returncode=0,
+                stdout=(
+                    f"worktree {self.target}\n"
+                    f"branch refs/heads/{self.branch}\n\n"
+                ),
+                stderr="",
+            )
+        if command[:3] == ("git", "rev-parse", "HEAD"):
+            return ShellResult(returncode=0, stdout=self.head, stderr="")
+        if command[:3] == ("git", "status", "--porcelain"):
+            return ShellResult(returncode=0, stdout=self.dirty, stderr="")
+        if command[:4] == ("git", "worktree", "remove", "--force"):
+            shutil.rmtree(self.target)
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+
+class _CleanupAdmission:
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def admission_status(self, task: str, *, repo=None):
+        _ = task, repo
+        return self.status
+
+
+def test_remote_task_worktree_cleanup_removes_only_the_selected_registered_task(
+    tmp_path,
+):
+    config = _config(tmp_path)
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.mkdir(parents=True)
+    shell = _CleanupShell(target)
+    deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=shell,
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=deps
+        )
+        == "removed"
+    )
+    assert not target.exists()
+    assert shell.calls == [
+        ("git", "worktree", "list", "--porcelain"),
+        ("git", "rev-parse", "HEAD"),
+        ("git", "status", "--porcelain", "--untracked-files=normal"),
+        ("git", "worktree", "remove", "--force", str(target)),
+    ]
+
+
+def test_remote_task_worktree_cleanup_preserves_foreign_or_active_state(tmp_path):
+    config = _config(tmp_path)
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.mkdir(parents=True)
+    foreign = _CleanupShell(target, branch="feat/another-task")
+    foreign_deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=foreign,
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=foreign_deps
+        )
+        == "unknown"
+    )
+    assert target.exists()
+    assert foreign.calls == [("git", "worktree", "list", "--porcelain")]
+
+    active = _CleanupShell(target)
+    active_deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=active,
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("busy"),
+    )
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=active_deps
+        )
+        == "busy"
+    )
+    assert active.calls == []
+    assert target.exists()
+
+
+@pytest.mark.parametrize(
+    ("head", "dirty"),
+    [("b" * 40, ""), ("a" * 40, " M user-edit.txt\n")],
+)
+def test_remote_task_worktree_cleanup_retains_newer_or_dirty_user_state(
+    tmp_path, head, dirty
+):
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.mkdir(parents=True)
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_CleanupShell(target, head=head, dirty=dirty),
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=deps
+        )
+        == "unknown"
+    )
+    assert target.exists()
+
+
+def test_remote_task_worktree_cleanup_rejects_symlinked_target(tmp_path):
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target.symlink_to(outside, target_is_directory=True)
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_CleanupShell(target),
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=deps
+        )
+        == "invalid"
+    )
+    assert outside.exists()
+
+
+def test_authenticated_task_cleanup_preserves_changed_state_and_removes_owned_worktree(
+    tmp_path,
+):
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    target = tmp_path / ".worktrees" / "t1" / "api"
+    other = tmp_path / ".worktrees" / "other" / "api"
+    target.parent.mkdir(parents=True)
+    other.parent.mkdir(parents=True)
+    _real_git("worktree", "add", "--detach", str(target), scratch, cwd=repo)
+    _real_git("worktree", "add", "--detach", str(other), tip, cwd=repo)
+    config = WorkspaceConfig(
+        workspace="cleanup",
+        repos={"api": RepoConfig(path=repo, type="service")},
+    )
+    body = {
+        "task": "t1",
+        "repos": ["api"],
+        "expected_revisions": {"api": scratch},
+    }
+    headers = {"Authorization": "Bearer cleanup-test-token"}
+    with TestClient(_app(tmp_path, auth_token="cleanup-test-token", config=config)) as client:
+        denied = client.post("/exec/task-worktrees-cleanup", json=body)
+        assert denied.status_code == 401
+        assert target.is_dir()
+
+        stale = client.post(
+            "/exec/task-worktrees-cleanup",
+            json={**body, "expected_revisions": {"api": tip}},
+            headers=headers,
+        )
+        assert stale.json() == {"status": "unknown"}
+        assert _real_git("rev-parse", "HEAD", cwd=target) == scratch
+
+        user_file = target / "unsaved.txt"
+        user_file.write_text("retain untracked user work\n")
+        dirty = client.post(
+            "/exec/task-worktrees-cleanup", json=body, headers=headers
+        )
+        assert dirty.json() == {"status": "unknown"}
+        assert user_file.read_text() == "retain untracked user work\n"
+        user_file.unlink()
+
+        common_dir = Path(_real_git("rev-parse", "--git-common-dir", cwd=target))
+        with (common_dir / "info" / "exclude").open("a") as excluded:
+            excluded.write("\n/build/\n")
+        build = target / "build"
+        build.mkdir()
+        (build / "output.bin").write_bytes(b"generated build output")
+        removed = client.post(
+            "/exec/task-worktrees-cleanup", json=body, headers=headers
+        )
+        assert removed.status_code == 200
+        assert removed.json() == {"status": "removed"}
+
+    assert not target.exists()
+    assert _real_git("rev-parse", "HEAD", cwd=other) == tip
+    assert _real_git("rev-parse", "refs/mship/run/t1/api", cwd=repo) == scratch

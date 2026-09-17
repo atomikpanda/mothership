@@ -111,6 +111,7 @@ def _run_remote(
     (remote unreachable) surfaces as `output.error(...)` + `typer.Exit(1)` —
     never a bare traceback.
     """
+    from mship.core import run_transfer
     from mship.core.remote_client import RemoteExecError, exec_remote
     from mship.core.remote_dispatch import RemoteDispatchError, prepare_remote_source
     from mship.core.run_host import (
@@ -139,6 +140,16 @@ def _run_remote(
         raise typer.Exit(code=1)
     resolver = RunHostResolver()
 
+    def record_transfer(git_repo: str, ref: str, sha: str) -> None:
+        run_transfer.record_run_ref_receipt(
+            container.state_dir(),
+            task=task_obj,
+            host=host,
+            repo=git_repo,
+            ref=ref,
+            sha=sha,
+        )
+
     try:
         prepared = prepare_remote_source(
             task_obj=task_obj,
@@ -149,9 +160,32 @@ def _run_remote(
             resolver=resolver,
             output=output,
             on_prepared=on_prepared,
+            on_transfer=record_transfer,
         )
     except RemoteDispatchError as e:
         output.error(str(e))
+        raise typer.Exit(code=1)
+    try:
+        recorded_repos: set[str] = set()
+        for repo_name in target_repos:
+            git_repo = config.repos[repo_name].git_root or repo_name
+            source_revision = prepared.source_revisions.get(repo_name)
+            if not isinstance(source_revision, str):
+                raise run_transfer.RunTransferError(
+                    "could not record an uncertified remote worktree revision"
+                )
+            if git_repo in recorded_repos:
+                continue
+            recorded_repos.add(git_repo)
+            run_transfer.record_remote_worktree_receipt(
+                container.state_dir(),
+                task=task_obj,
+                host=host,
+                repo=git_repo,
+                sha=source_revision,
+            )
+    except run_transfer.RunTransferError:
+        output.error("could not record exact remote task-worktree cleanup")
         raise typer.Exit(code=1)
     try:
         return exec_remote(
@@ -366,6 +400,7 @@ def _update_profile_run(
     output: Output,
 ) -> int:
     """Transfer one new snapshot to the exact recorded Flutter owner, then reload."""
+    from mship.core import run_transfer
     from mship.core.remote_client import RemoteExecError, source_update_remote
     from mship.core.remote_dispatch import (
         RemoteDispatchError,
@@ -409,6 +444,24 @@ def _update_profile_run(
             config=config,
             shell=container.shell(),
         )
+
+        def record_transfer(git_repo: str, ref: str, sha: str) -> None:
+            run_transfer.record_run_ref_receipt(
+                container.state_dir(),
+                task=task_obj,
+                host=selected.host,
+                repo=git_repo,
+                ref=ref,
+                sha=sha,
+            )
+            run_transfer.record_remote_worktree_receipt(
+                container.state_dir(),
+                task=task_obj,
+                host=selected.host,
+                repo=git_repo,
+                sha=sha,
+            )
+
         resolver = RunHostResolver()
         prepared = prepare_remote_source(
             task_obj=task_obj,
@@ -419,6 +472,7 @@ def _update_profile_run(
             resolver=resolver,
             output=output,
             snapshot=snapshot,
+            on_transfer=record_transfer,
             run_ref_only=True,
         )
         revision = prepared.source_revisions.get(selected.run.repo)

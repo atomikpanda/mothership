@@ -55,7 +55,9 @@ _STATUS_VALUES = frozenset(
     }
 )
 _PREPARATIONS = frozenset({"discover", "launch", "observe"})
-_EVENT_KINDS = frozenset({"started", "ready", "stdout", "stderr", "result"})
+_EVENT_KINDS = frozenset(
+    {"started", "ready", "keepalive", "stdout", "stderr", "result"}
+)
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HEX_REVISION = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
@@ -517,7 +519,7 @@ class ToolResult:
 
 @dataclass(frozen=True)
 class ToolEvent:
-    kind: Literal["started", "ready", "stdout", "stderr", "result"]
+    kind: Literal["started", "ready", "keepalive", "stdout", "stderr", "result"]
     data: bytes = field(default=b"", repr=False)
     result: ToolResult | None = None
 
@@ -536,6 +538,9 @@ class ToolEvent:
         elif self.kind in {"stdout", "stderr"}:
             if self.result is not None:
                 _reject("invalid output event")
+        elif self.kind == "keepalive":
+            if self.data or self.result is not None:
+                _reject("invalid keepalive event")
         elif self.data or not isinstance(self.result, ToolResult):
             _reject("invalid result event")
 

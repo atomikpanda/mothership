@@ -33,6 +33,13 @@ writes, and pool acquisition retain five-second timeouts. There is no overall
 client run deadline; interrupt the command when you want to stop waiting.
 This does not disable timeouts imposed by a proxy or relay on the route.
 
+Accepted execution streams send protocol keepalives every 30 seconds, including
+quiet profile owners, log observers, and legacy remote builds. Clients discard
+these frames: they are not application logs and do not replay an operation.
+Update both client and run host for the typed keepalive event. The proxy's idle
+timeout must remain longer than this cadence; request authentication and
+pre-acceptance deadlines are unchanged.
+
 Without `--remote`, legacy unprofiled `mship run`, `capture`, and `build` behavior is unchanged. A task-bound `run` that selects a repository declaring `run_profiles` deliberately enters the profile-aware path even without an explicit `--profile`; see [Profile-aware runs and observations](#profile-aware-runs-and-observations).
 
 ## Packaged backends on a run host
@@ -631,10 +638,13 @@ validated (including a restarted process that found a nonterminal record); and
 validated. Only `available` admits a new launch. Never treat `unknown` or
 `evidence_error` as an invitation to replace or signal an operation.
 
-`ToolEvent.kind` is `started`, `stdout`, `stderr`, or `result`; output is binary
-`data`, and lifecycle events carry `result`. The callback must consume output
-incrementally rather than retain an unbounded event list. Setup output can
-precede the backend's `started` event.
+`ToolEvent.kind` is `started`, `ready`, `keepalive`, `stdout`, `stderr`, or
+`result`; output is binary `data`, and lifecycle events carry `result`.
+`keepalive` is a nonce-authenticated empty protocol frame, emitted only after
+ownership is accepted so a quiet long-lived session keeps the relay stream
+alive; it is not task output and is not delivered to application callbacks.
+The callback must consume output incrementally rather than retain an unbounded
+event list. Setup output can precede the backend's `started` event.
 
 ### Source, backend, and cleanup entry points
 
@@ -674,16 +684,25 @@ duplicate object members and excessive nesting before spawning any task.
 
 `record_run_ref_receipt(state_dir, *, task, host, repo, ref, sha)` records a
 successful scratch-ref transfer against the exact registered host name, scope,
-and endpoint fingerprint—never its bearer token. Existing task-close cleanup
-uses these receipts through `cleanup_run_refs`; callers may also invoke
-`cleanup_recorded_run_refs(task, *, config, store, shell, warn)` explicitly.
-Recorded refs are deleted only on the matching host with an expected-SHA lease.
-Missing/replaced hosts, changed refs, and failed cleanup retain their receipts
-and warn; recorded repositories never fall through to role-derived destinations.
-Unrecorded legacy repositories retain their existing cleanup behavior.
-If receipt persistence fails after a push, preparation attempts leased rollback
-and reports unresolved cleanup if rollback fails. This source-ref cleanup does
-not implement Task 7's device-session or selected-context teardown.
+and endpoint fingerprint—never its bearer token. Source-update transfers advance
+the receipt to the new SHA; cleanup still uses an expected-SHA lease, not an
+unconditional force-delete. `cleanup_recorded_run_refs` exposes this source-ref
+cleanup independently of task teardown.
+
+`record_remote_worktree_receipt(state_dir, *, task, host, repo, sha)` also records
+clean profile and ordinary remote-command materialization. Task close first
+reconciles the exact session owners, then requests authenticated remote worktree
+cleanup, and only releases scratch-ref leases for hosts whose teardown succeeded.
+The host takes the task lock and verifies the registered worktree, expected
+branch or detached ref, recorded HEAD, and absence of non-ignored changes.
+Ignored generated build output may be removed; newer source, user changes,
+symlinked targets, busy owners, and uncertain outcomes retain cleanup receipts.
+
+Configured roles alone never authorize ref or worktree deletion: no recorded
+delivery means no remote cleanup. Changed or unavailable host identities retain
+their receipts rather than falling back to another host. If receipt persistence
+fails after a push, preparation attempts leased rollback and reports unresolved
+cleanup if rollback fails.
 
 `mship.core.remote_client.exec_tool(*, request, host, resolver, event_sink=None,
 transport=None)` resolves a credential at the operation boundary and sends the
@@ -779,7 +798,9 @@ blindly clearing its admission record.
 The wire uses the response's `X-Mship-Exec-Nonce` and bounded length-prefixed
 JSON events, with strict base64 for bytes. Request bodies are capped at 128 KiB,
 event frames at 2 MiB, and output events at 16 KiB. Child bytes cannot become
-control records. Legacy exit/artifact framing remains supported.
+control records. Legacy exit/artifact framing also has an authenticated empty
+keepalive control record for quiet `run`, `build`, and session-capture streams;
+clients consume it without rendering task output.
 
 ### Verification boundary
 

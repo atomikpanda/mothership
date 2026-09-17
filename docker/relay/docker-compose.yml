@@ -35,9 +35,9 @@ services:
       # wraps a proxied stream in IdleTimeoutConn, so disabling it means a tunnel
       # peer that vanishes without a clean close (cell handoff, NAT eviction,
       # suspend) is never reaped — its route stays registered and its goroutines
-      # leak. 120s sits above the client's keepalive budget
-      # (ServerAliveInterval=30 x ServerAliveCountMax=3, see relay/tunnel.py), so a
-      # live-but-quiet tunnel refreshes the deadline long before it expires.
+      # leak. SSH control keepalives do not write each proxied HTTP response body.
+      # Quiet remote execution streams emit nonce-framed typed keepalives every
+      # 30s, so the 120s reaper remains well above their application-data cadence.
       - --idle-connection-timeout=120s
 
   caddy:

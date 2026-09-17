@@ -58,6 +58,12 @@ _OPERATION_DIR = "remote-tool-operations"
 _GENERIC_READY_TIMEOUT_SECONDS = 60.0
 _GENERIC_CLEANUP_TIMEOUT_SECONDS = 5.0
 
+# Relay-side idle reaping applies to the proxied HTTP response body, not just
+# the SSH control channel. A typed frame every 30 seconds keeps an accepted
+# quiet owner stream below the relay's 120-second idle limit without inventing
+# child output or weakening terminal framing.
+_STREAM_KEEPALIVE_SECONDS = 30.0
+
 _TERMINAL = frozenset(
     {
         "completed",
@@ -1368,15 +1374,23 @@ class ToolOperationRegistry:
                 self._operations.pop((operation.owner_ref, operation.generation), None)
 
     def _consume(self, operation: _Operation) -> Generator[ToolEvent, None, None]:
+        next_keepalive = time.monotonic() + _STREAM_KEEPALIVE_SECONDS
         try:
             while True:
+                wait = min(0.05, max(0.0, next_keepalive - time.monotonic()))
                 try:
-                    event = operation.delivery.get(timeout=0.05)
+                    event = operation.delivery.get(timeout=wait)
                 except queue.Empty:
                     if operation.completed.is_set():
                         yield _result_event(operation.result)
                         return
+                    if time.monotonic() >= next_keepalive:
+                        yield ToolEvent("keepalive")
+                        next_keepalive = (
+                            time.monotonic() + _STREAM_KEEPALIVE_SECONDS
+                        )
                     continue
+                next_keepalive = time.monotonic() + _STREAM_KEEPALIVE_SECONDS
                 yield event
         finally:
             if not operation.completed.is_set():

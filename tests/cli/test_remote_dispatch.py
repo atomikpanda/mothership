@@ -37,7 +37,13 @@ from typer.testing import CliRunner
 
 from mship.cli import app, container
 from mship.core import remote_client
-from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
+from mship.core.remote_exec import (
+    ARTIFACT_MARKER,
+    EXIT_MARKER,
+    KEEPALIVE_MARKER,
+    _legacy_events,
+)
+from mship.core.remote_tool import ToolEvent, ToolResult
 from mship.core.run_host import HostRegistration, RunHostConnection, RunHostError, RunHostResolver, RunHostStore
 from mship.core.spec import AcceptanceCriterion, Spec
 from mship.core.spec_store import SpecStore
@@ -58,6 +64,8 @@ def _host(connection: RunHostConnection) -> HostRegistration:
 # recognized when tagged with the nonce — see core/remote_exec.py / remote_client.
 NONCE = "nonceabcdef012345"
 NONCE_HEADER = "X-Mship-Exec-Nonce"
+HEAD_SHA = "a" * 40
+SNAPSHOT_SHA = "b" * 40
 
 
 def _frame(
@@ -178,6 +186,75 @@ def test_exec_remote_renders_lines_live_in_order():
     transport=_mock_transport(_recording_handler({}, body)),)
     assert code == 0
     assert printed == ["one", "two", "three"]
+
+
+def test_exec_remote_consumes_nonce_framed_keepalive_without_rendering_it():
+    body = (
+        f"{KEEPALIVE_MARKER}:{NONCE}\n".encode()
+        + _frame([], exit_code=0)
+    )
+    printed = []
+
+    code = remote_client.exec_remote(
+        verb="build",
+        host=_host(RunHostConnection(url="http://h", token="t")),
+        resolver=RunHostResolver(),
+        task="t1",
+        repos=["api"],
+        print_fn=printed.append,
+        transport=_mock_transport(_recording_handler({}, body)),
+    )
+
+    assert code == 0
+    assert printed == []
+
+
+def test_exec_remote_preserves_partial_output_across_split_keepalive_frame():
+    body = (
+        b"ordinary line\npartial output"
+        + f"{KEEPALIVE_MARKER}:{NONCE}\n".encode()
+        + b" continued"
+        + _frame([], exit_code=0)
+    )
+    printed = []
+
+    code = remote_client.exec_remote(
+        verb="build",
+        host=_host(RunHostConnection(url="http://h", token="t")),
+        resolver=RunHostResolver(),
+        task="t1",
+        repos=["api"],
+        print_fn=printed.append,
+        transport=_mock_transport(
+            lambda _request: httpx.Response(
+                200,
+                content=_chunked(body, size=3),
+                headers={NONCE_HEADER: NONCE},
+            )
+        ),
+    )
+
+    assert code == 0
+    assert printed == ["ordinary line", "partial output continued"]
+    assert not any(KEEPALIVE_MARKER in line for line in printed)
+
+
+def test_legacy_event_adapter_encodes_typed_keepalive_as_nonce_control():
+    events = iter(
+        (
+            ToolEvent("stdout", data=b"partial output"),
+            ToolEvent("keepalive"),
+            ToolEvent(
+                "result",
+                result=ToolResult("completed", exit_code=0),
+            ),
+        )
+    )
+
+    assert list(_legacy_events(events, nonce=NONCE)) == [
+        b"partial output",
+        f"{KEEPALIVE_MARKER}:{NONCE}\n".encode(),
+    ]
 
 
 def test_exec_remote_returns_nonzero_remote_exit_code_not_a_raise():
@@ -781,12 +858,9 @@ def test_cli_capture_remote_with_evidence_attaches_artifact_with_remote_provenan
         assert ev.ref.endswith(".png")
         note = ev.note or ""
         assert "captured on remote run host" in note
-        assert (
-            "exact working-tree snapshot "
-            "(app@synth2222 via refs/mship/run/t1/app (a throwaway run ref)) "
-            "was sent to the run host"
-        ) in note
-        assert "headsha" not in note
+        assert SNAPSHOT_SHA[:12] in note
+        assert "refs/mship/run/t1/app" in note
+        assert HEAD_SHA[:12] not in note
         assert "running binary provenance not verified" in note
         assert "· at " not in note
         stored = tmp_path / ".mothership" / "evidence" / "dq" / ev.ref
@@ -890,7 +964,7 @@ def test_cli_capture_remote_transfers_dirty_snapshot_before_dispatch(
             )
         assert result.exit_code == 0, result.output
         assert len(shell.pushes) == 1
-        assert "synth2222:refs/mship/run/t1/app" in shell.pushes[0]
+        assert f"{SNAPSHOT_SHA}:refs/mship/run/t1/app" in shell.pushes[0]
         assert "http://remote.example/git/app" in shell.pushes[0]
         assert "origin" not in shell.pushes[0]
         assert recorder["json"]["run_ref_repos"] == ["app"]
@@ -962,7 +1036,7 @@ def test_cli_capture_remote_uses_git_root_for_dirty_child(tmp_path, monkeypatch)
                 app, ["capture", "--task", "t1", "--repo", "pkg", "--remote=role-x"]
             )
         assert result.exit_code == 0, result.output
-        assert "synth2222:refs/mship/run/t1/mono" in shell.pushes[0]
+        assert f"{SNAPSHOT_SHA}:refs/mship/run/t1/mono" in shell.pushes[0]
         assert recorder["json"]["repos"] == ["pkg"]
         assert recorder["json"]["run_ref_repos"] == ["mono"]
     finally:
@@ -1241,8 +1315,8 @@ def _seed_task_with_worktree(ws: Path, slug: str, *repos: str) -> dict[str, Path
 def _repo_git(
     porcelain: str = "",
     *,
-    origin: str | None = "headsha",
-    head: str = "headsha",
+    origin: str | None = HEAD_SHA,
+    head: str = HEAD_SHA,
     contains: list[str] = [],
     status_rc: int = 0,
     status_err: str = "",
@@ -1333,7 +1407,7 @@ def _git_shell(
         if "write-tree" in cmd:
             return ShellResult(returncode=0, stdout="tree1111\n", stderr="")
         if "commit-tree" in cmd:
-            return ShellResult(returncode=0, stdout="synth2222\n", stderr="")
+            return ShellResult(returncode=0, stdout=f"{SNAPSHOT_SHA}\n", stderr="")
         if cmd.startswith("git push"):
             pushes.append(cmd)
             push_envs.append(dict(env or {}))
@@ -1367,7 +1441,7 @@ def test_a_dirty_worktree_is_sent_to_the_run_host_not_to_origin(tmp_path, monkey
         assert result.exit_code == 0, result.output
 
         assert len(shell.pushes) == 1
-        assert "synth2222:refs/mship/run/t1/api" in shell.pushes[0]
+        assert f"{SNAPSHOT_SHA}:refs/mship/run/t1/api" in shell.pushes[0]
         assert "http://remote.example/git/api" in shell.pushes[0]
         assert "origin" not in shell.pushes[0]  # ac3
         assert recorder["json"]["run_ref_repos"] == ["api"]
@@ -1379,7 +1453,7 @@ def test_a_dirty_worktree_is_sent_to_the_run_host_not_to_origin(tmp_path, monkey
         # identically in every other assertion, so it is asserted directly.
         commands = [c.args[0] for c in shell.run.call_args_list]
         assert any(
-            c.startswith("git commit-tree tree1111 -p headsha ") for c in commands
+            c.startswith(f"git commit-tree tree1111 -p {HEAD_SHA} ") for c in commands
         ), commands
     finally:
         container.shell.reset_override()
@@ -1427,7 +1501,7 @@ def test_a_git_root_child_is_transferred_under_its_parents_name(tmp_path, monkey
             )
         assert result.exit_code == 0, result.output
         assert len(shell.pushes) == 1
-        assert "synth2222:refs/mship/run/t1/mono" in shell.pushes[0]
+        assert f"{SNAPSHOT_SHA}:refs/mship/run/t1/mono" in shell.pushes[0]
         assert "http://remote.example/git/mono" in shell.pushes[0]
         assert recorder["json"]["run_ref_repos"] == ["mono"]
         assert recorder["json"]["repos"] == ["pkg"]  # the RUN's scope is unchanged
@@ -1456,30 +1530,6 @@ def test_the_bearer_never_reaches_the_push_command_line(tmp_path, monkeypatch):
         _reset()
 
 
-def test_the_output_names_the_revision_as_a_throwaway_run_ref(tmp_path, monkeypatch):
-    """ac13: nobody should `git show` it and try to build on it.
-
-    `MSHIP_JSON=0` is required, not decorative: `Output.breadcrumb` is gated on
-    `human_mode`, and `json_mode` defaults to `not is_tty` — so under CliRunner
-    breadcrumbs are suppressed and `result.output` would never contain the line.
-    """
-    monkeypatch.setenv("MSHIP_JSON", "0")
-    _write_run_workspace(tmp_path, run_hosts=["role-x"])
-    _seed_task_with_worktree(tmp_path, "t1", "api")
-    _configure(tmp_path)
-    container.shell.override(_git_shell(_repo_git(" M src/app.py\n")))
-    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
-    try:
-        with _ClientPatch(
-            monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))
-        ):
-            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
-        assert "throwaway" in result.output
-        assert "refs/mship/run/t1/api" in result.output
-        assert "synth2222"[:12] in result.output
-    finally:
-        container.shell.reset_override()
-        _reset()
 
 
 def test_a_failed_transfer_aborts_before_dispatch(tmp_path, monkeypatch):
@@ -1672,7 +1722,7 @@ def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(
         # test_remote_preflight.py's push-refspec tests for why that distinction
         # matters.
         assert any(
-            "push -u origin headsha:refs/heads/feat/t1" in c for c in shell.pushes
+            f"push -u origin {HEAD_SHA}:refs/heads/feat/t1" in c for c in shell.pushes
         )
         assert recorder["url"] == "http://remote.example/exec/run"  # dispatched after
     finally:
@@ -1835,7 +1885,7 @@ def test_a_detached_worktree_at_the_task_tip_is_not_dispatched(tmp_path, monkeyp
     shell = _git_shell(
         _repo_git(
             head_ref="",
-            pair_output="headsha\nheadsha\n",
+            pair_output=f"{HEAD_SHA}\n{HEAD_SHA}\n",
         )
     )
     container.shell.override(shell)

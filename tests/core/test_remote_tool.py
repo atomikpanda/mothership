@@ -75,6 +75,71 @@ def test_tool_codec_rejects_truncation_wrong_nonce_and_oversized_frame_without_p
         assert "argv" not in str(failure).lower()
 
 
+def test_exec_tool_accepts_typed_keepalive_after_started_without_callback():
+    identity = {
+        "owner_ref": "owner-abcdef",
+        "generation": "generation-abcdef",
+        "source_revision": "abcdef1",
+    }
+    events = [
+        ToolEvent("started", result=ToolResult("running", **identity)),
+        ToolEvent("keepalive"),
+        ToolEvent(
+            "result",
+            result=ToolResult("completed", exit_code=0, **identity),
+        ),
+    ]
+    delivered: list[ToolEvent] = []
+
+    result = exec_tool(
+        request=_request(),
+        host=_host(
+            RunHostConnection(url="http://remote.example", token="secret-token")
+        ),
+        resolver=RunHostResolver(),
+        event_sink=delivered.append,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                content=iter(_frame(event) for event in events),
+                headers={"X-Mship-Exec-Nonce": NONCE},
+            )
+        ),
+    )
+
+    assert result.status == "completed"
+    assert [event.kind for event in delivered] == ["started", "result"]
+
+
+def test_exec_tool_rejects_keepalive_before_owner_acceptance():
+    result = exec_tool(
+        request=_request(),
+        host=_host(
+            RunHostConnection(url="http://remote.example", token="secret-token")
+        ),
+        resolver=RunHostResolver(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                content=iter(
+                    (
+                        _frame(ToolEvent("keepalive")),
+                        _frame(
+                            ToolEvent(
+                                "result",
+                                result=ToolResult("completed", exit_code=0),
+                            )
+                        ),
+                    )
+                ),
+                headers={"X-Mship-Exec-Nonce": NONCE},
+            )
+        ),
+    )
+
+    assert result.status == "protocol_error"
+
+
 def test_tool_request_rejects_unrepresentable_timeout_as_protocol_error():
     with pytest.raises(ToolProtocolError, match="invalid timeout"):
         ToolRequest(

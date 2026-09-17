@@ -474,6 +474,68 @@ finally:
         list(stream)
 
 
+def test_accepted_quiet_owner_stream_emits_typed_keepalives(tmp_path, monkeypatch):
+    registry = ToolOperationRegistry(tmp_path)
+    context = _context(tmp_path)
+    monkeypatch.setattr(
+        "mship.core.tool_process._STREAM_KEEPALIVE_SECONDS", 0.1
+    )
+    script = """
+import signal
+import time
+from mship.core.session_channel import OwnerContext
+
+owner = OwnerContext.from_environ()
+owner.begin()
+owner.ready()
+signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit))
+try:
+    time.sleep(60)
+finally:
+    owner.finish(cleanup_known=True)
+"""
+    stream = registry.run(
+        _launch((sys.executable, "-c", script), timeout=10),
+        context,
+        session=SessionPreparation(
+            operation="run",
+            owner_kind=None,
+            sealed_context="{}",
+        ),
+    )
+    started = next(stream)
+    ready = next(stream)
+    assert started.kind == "started"
+    assert ready.kind == "ready"
+    assert ready.result is not None
+    try:
+        keepalive = next(stream)
+        assert keepalive.kind == "keepalive"
+        assert keepalive.data == b""
+        assert keepalive.result is None
+        assert (
+            registry.status(
+                task="demo",
+                repo="app",
+                owner_ref=ready.result.owner_ref,
+                generation=ready.result.generation,
+            ).status
+            == "running"
+        )
+    finally:
+        assert (
+            registry.stop_owner(
+                task="demo",
+                repo="app",
+                owner_ref=ready.result.owner_ref,
+                generation=ready.result.generation,
+                source_revision=_REVISION,
+            )
+            == "stopped"
+        )
+        list(stream)
+
+
 def test_generic_session_without_cleanup_acknowledgement_is_unknown(
     tmp_path, monkeypatch
 ):

@@ -41,7 +41,11 @@ Wire contract (Task 5's client parses this):
       recognized artifact is turned into an ERROR (an error line + a
       non-zero exit code), matching local `capture.run_capture`. `run`/
       `build` never emit an artifact block.
-    - The LAST line always matches `__MSHIP_EXIT__:<nonce> <code>\\n` where
+    - A quiet legacy operation emits the nonce-tagged control line
+      `__MSHIP_KEEPALIVE__:<nonce>\n` every 30 seconds. It is never child
+      output and the client consumes it without rendering it; this keeps the
+      proxied response alive without changing task-result framing.
+    - The LAST line always matches `__MSHIP_EXIT__:<nonce> <code>\n` where
       <code> is a base-10 int (0 == success). This conveys the remote
       task's exit code as DATA, never as an HTTP error status — a non-zero
       task exit does not raise; the client must parse this trailing line
@@ -134,6 +138,10 @@ EXIT_MARKER = "__MSHIP_EXIT__"
 # exactly that many raw (uncompressed) tar bytes. Nonce-tagged for the same
 # anti-spoof reason as EXIT_MARKER. See module docstring for the full framing.
 ARTIFACT_MARKER = "__MSHIP_ARTIFACTS__"
+
+# Empty nonce-tagged control line used only to keep an accepted quiet legacy
+# response body alive. It is neither child output nor a terminal record.
+KEEPALIVE_MARKER = "__MSHIP_KEEPALIVE__"
 
 
 class UnknownVerbError(ValueError):
@@ -230,6 +238,120 @@ def _acquire_task_execution_lock(
         locks.close()
         raise
     return locks
+
+
+def cleanup_task_worktrees(
+    task: str,
+    repos: Sequence[str],
+    expected_revisions: Mapping[str, str],
+    *,
+    deps: RemoteExecDeps,
+) -> str:
+    """Remove only selected, clean worktrees at their recorded revisions."""
+    try:
+        if canonical_run_ref_segment(task) != task:
+            return "invalid"
+    except RunRefNameError:
+        return "invalid"
+    if (
+        not repos
+        or len(set(repos)) != len(repos)
+        or set(repos) != set(expected_revisions)
+        or any(
+            not isinstance(repo, str)
+            or not isinstance(expected_revisions.get(repo), str)
+            or re.fullmatch(
+                r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", expected_revisions[repo]
+            ) is None
+            for repo in repos
+        )
+    ):
+        return "invalid"
+    workspace = deps.workspace_root.resolve()
+    hub = _hub_dir(workspace, task)
+    if (
+        hub.parent != workspace / ".worktrees"
+        or hub.parent.is_symlink()
+        or hub.is_symlink()
+    ):
+        return "invalid"
+    targets: dict[str, tuple[Path, Path, str, str]] = {}
+    for name in repos:
+        config = deps.config.repos.get(name)
+        if config is None:
+            return "invalid"
+        root_name = config.git_root or name
+        root_config = deps.config.repos.get(root_name)
+        if root_config is None:
+            return "invalid"
+        repo_path = Path(root_config.path)
+        if repo_path.is_symlink() or not repo_path.resolve().is_relative_to(workspace):
+            return "invalid"
+        target = hub / root_name
+        if target.parent != hub or target.is_symlink():
+            return "invalid"
+        targets[root_name] = (
+            repo_path,
+            target,
+            deps.config.branch_pattern.replace("{slug}", task),
+            expected_revisions[name],
+        )
+    if _operations(deps).admission_status(task) != "available":
+        return _operations(deps).admission_status(task)
+    try:
+        lock_file = _acquire_task_execution_lock(deps.workspace_root, task)
+    except BlockingIOError:
+        return "busy"
+    except OSError:
+        return "unknown"
+    try:
+        if _operations(deps).admission_status(task) != "available":
+            return _operations(deps).admission_status(task)
+        for root_name, (repo_path, target, branch, expected) in targets.items():
+            if not os.path.lexists(target):
+                continue
+            listing = _run_shell(
+                deps.shell, ("git", "worktree", "list", "--porcelain"), repo_path,
+                cancel_event=deps.cancel_event,
+            )
+            if listing.returncode != 0:
+                return "unknown"
+            records = [record.splitlines() for record in listing.stdout.split("\n\n")]
+            lines = next(
+                (record for record in records if record and record[0] == f"worktree {target}"),
+                None,
+            )
+            if lines is None or (
+                "detached" not in lines and f"branch refs/heads/{branch}" not in lines
+            ):
+                return "unknown"
+            head = _git_rev(deps.shell, target, "HEAD", cancel_event=deps.cancel_event)
+            if head != expected:
+                return "unknown"
+            if "detached" in lines and _git_rev(
+                deps.shell, repo_path, build_run_ref(task, root_name),
+                cancel_event=deps.cancel_event,
+            ) != expected:
+                return "unknown"
+            dirty = _run_shell(
+                deps.shell,
+                ("git", "status", "--porcelain", "--untracked-files=normal"),
+                target,
+                cancel_event=deps.cancel_event,
+            )
+            if dirty.returncode != 0 or dirty.stdout:
+                return "unknown"
+            removal = _run_shell(
+                deps.shell, ("git", "worktree", "remove", "--force", str(target)),
+                repo_path, cancel_event=deps.cancel_event,
+            )
+            if removal.returncode != 0 or os.path.lexists(target):
+                return "unknown"
+        return "removed"
+    except (OSError, RunRefNameError):
+        return "unknown"
+    finally:
+        lock_file.close()
 
 
 def _run_shell(
@@ -779,25 +901,23 @@ def _setup_events(
         stream.close()
 
 
-def _legacy_events(events: Iterator[ToolEvent]) -> Generator[bytes, None, ToolResult]:
-    """Adapt bounded binary events; never assemble a complete output line."""
-    last_byte: bytes = b"\n"
+def _legacy_events(
+    events: Iterator[ToolEvent], *, nonce: str
+) -> Generator[bytes, None, ToolResult]:
+    """Adapt typed events without altering a child's unterminated output."""
     result = ToolResult("protocol_error")
     try:
         for event in events:
             if event.kind in {"stdout", "stderr"} and event.data:
-                last_byte = event.data[-1:]
                 yield event.data
+            elif event.kind == "keepalive":
+                yield f"{KEEPALIVE_MARKER}:{nonce}\n".encode()
             elif event.kind == "result" and event.result is not None:
                 result = event.result
     finally:
         close = getattr(events, "close", None)
         if close is not None:
             close()
-    # Keep a newline-free final output fragment from swallowing the next
-    # legacy control record. Structured tool frames do not need this separator.
-    if last_byte != b"\n":
-        yield b"\n"
     return result
 
 
@@ -827,7 +947,9 @@ def _run_verb_stream_unlocked(
         for name in prepared.repos:
             yield from prepared.prepare(name)
             context = prepared.context(name)
-            setup = yield from _legacy_events(_setup_events(prepared, name, context))
+            setup = yield from _legacy_events(
+                _setup_events(prepared, name, context), nonce=nonce
+            )
             if setup.status == "cancelled":
                 return
             if setup.status != "completed" or setup.exit_code != 0:
@@ -858,7 +980,8 @@ def _run_verb_stream_unlocked(
                         context,
                         cancel_event=deps.cancel_event,
                         spawn=deps.shell.spawn_argv,
-                    )
+                    ),
+                    nonce=nonce,
                 )
                 if result.status == "cancelled":
                     return
@@ -1759,7 +1882,9 @@ def run_observe_capture_stream(
         )
         try:
             for event in events:
-                if event.kind == "result":
+                if event.kind == "keepalive":
+                    yield f"{KEEPALIVE_MARKER}:{nonce}\n".encode()
+                elif event.kind == "result":
                     result = event.result
         finally:
             events.close()

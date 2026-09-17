@@ -2368,6 +2368,45 @@ def create_app(
         )
         return JSONResponse({"status": status})
 
+    @app.post("/exec/task-worktrees-cleanup")
+    async def post_task_worktrees_cleanup(request: Request):
+        if config is None:
+            raise HTTPException(
+                status_code=503, detail="remote workspace not bootstrapped"
+            )
+        value = await _session_request_body(request)
+        try:
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"task", "repos", "expected_revisions"}
+                or not isinstance(value["task"], str)
+                or not isinstance(value["repos"], list)
+                or not value["repos"]
+                or any(not isinstance(repo, str) for repo in value["repos"])
+                or len(set(value["repos"])) != len(value["repos"])
+                or not isinstance(value["expected_revisions"], dict)
+                or set(value["expected_revisions"]) != set(value["repos"])
+                or any(
+                    not isinstance(revision, str)
+                    or len(revision) not in (40, 64)
+                    or re.fullmatch(r"[0-9a-fA-F]+", revision) is None
+                    for revision in value["expected_revisions"].values()
+                )
+            ):
+                raise ValueError
+        except ValueError, TypeError, RecursionError:
+            raise HTTPException(
+                status_code=400, detail="invalid task worktree cleanup request"
+            ) from None
+        status = await asyncio.to_thread(
+            remote_exec.cleanup_task_worktrees,
+            value["task"],
+            value["repos"],
+            value["expected_revisions"],
+            deps=_tool_execution_dependencies(threading.Event()),
+        )
+        return JSONResponse({"status": status})
+
     @app.post("/exec/session-capture")
     async def post_session_capture(request: Request):
         cancel_event = threading.Event()

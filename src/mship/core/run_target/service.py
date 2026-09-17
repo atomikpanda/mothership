@@ -336,6 +336,7 @@ class RemoteBackendExecutor:
         cancel_event: Event | None = None,
     ) -> BackendResult:
         """Map one owner-side execution policy to the typed remote tool route."""
+        from mship.core import run_transfer
         from mship.core.remote_client import exec_tool
         from mship.core.remote_tool import ToolRequest
 
@@ -438,6 +439,18 @@ class RemoteBackendExecutor:
             )
         except TypeError, ValueError, UnicodeError:
             return self._result(error_code="invalid")
+        if execution.preparation != "observe":
+            try:
+                run_transfer.record_remote_worktree_receipt(
+                    self.store.state_dir,
+                    task=self.task_obj,
+                    host=host,
+                    repo=repo_config.git_root or execution.repo,
+                    sha=source_revision,
+                )
+            except run_transfer.RunTransferError:
+                return self._result(error_code="cleanup_receipt_error")
+
 
         session_source_revision: Callable[[str, str], str | None] | None = None
         if execution.preparation == "launch" and execution.run_id is not None:
