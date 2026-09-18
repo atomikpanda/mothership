@@ -322,6 +322,11 @@ unreferenced private binding. A failed, unknown, unreachable, changed, or
 unmatched host/owner leaves its recovery metadata and private binding intact
 and blocks close; it is never redirected to a role-derived replacement host.
 
+An attached profile `run` exits successfully when it receives the exact owner's
+authenticated cancellation receipt, even if hot reload advanced the source
+revision and close already deleted the controller record. A missing record or
+disconnected stream alone is not proof of termination.
+
 Source provenance and binary provenance are distinct. A source snapshot
 certifies the worktree revision delivered to a host; it does not attest an APK,
 app bundle, or running binary. The internal
@@ -626,8 +631,14 @@ Other statuses are `invalid`, `busy`, `unsupported`, `materialization_error`,
 `evidence_error`, `unknown`, `auth_error`, and `protocol_error`. `running` is
 valid in a `started` event and as the final answer to a status-only observation,
 not as a final answer to an executing request. Pre-admission failures may lack
-an owner; accepted results must preserve the full owner/generation/source
-identity. Missing or changed success identity is a protocol error.
+an owner; accepted results must include owner/generation/source identity.
+Owner and generation must remain unchanged. Readiness, completion, and
+observation results must match the expected source revision. A terminal
+`cancelled` result on an accepted launch stream instead proves that exact
+owner stopped: it may carry a newer source revision after hot reload, even
+when close has already deleted the controller record. It is not proof of
+successful execution or source content. Missing identity remains a protocol
+error.
 
 Admission is typed rather than boolean:
 `ToolOperationRegistry.admission_status(task)` returns `available`, `busy`,

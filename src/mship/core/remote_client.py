@@ -903,9 +903,22 @@ def _exec_tool_once(
                                 or result.generation != accepted.generation
                             ):
                                 return ToolResult(status="protocol_error")
-                            expected_source = request.source_revision
+                            # The exact accepted owner/generation was checked
+                            # above. Its cancellation proves termination, not
+                            # source content: close may already have deleted the
+                            # controller row containing a hot-reloaded revision.
+                            owner_cancelled = (
+                                request.preparation == "launch"
+                                and accepted is not None
+                                and event.kind == "result"
+                                and result.status == "cancelled"
+                            )
+                            expected_source = (
+                                None if owner_cancelled else request.source_revision
+                            )
                             if (
-                                session_source_revision is not None
+                                not owner_cancelled
+                                and session_source_revision is not None
                                 and accepted is not None
                                 and result.owner_ref is not None
                                 and result.generation is not None

@@ -551,7 +551,69 @@ def test_exec_tool_discards_hostile_error_body_without_reading_it():
     assert result.status == "protocol_error"
 
 
-def test_exec_tool_rejects_mismatched_pinned_source_revision():
+@pytest.mark.parametrize(
+    ("terminal_changes", "expected_status"),
+    [
+        ({}, "cancelled"),
+        ({"owner_ref": "foreign-owner"}, "protocol_error"),
+        ({"generation": "foreign-generation"}, "protocol_error"),
+        ({"source_revision": None}, "protocol_error"),
+        ({"status": "completed", "exit_code": 0}, "protocol_error"),
+    ],
+)
+def test_launch_stop_receipt_after_source_update_and_controller_close(
+    terminal_changes, expected_status
+):
+    request = ToolRequest(
+        task="task-1",
+        repo="app",
+        argv=("tool",),
+        preparation="launch",
+        source_revision="abcdef1",
+    )
+    identity = {
+        "owner_ref": "owner-abcdef",
+        "generation": "generation-abcdef",
+        "source_revision": "abcdef1",
+    }
+    terminal = {
+        **identity,
+        "status": "cancelled",
+        "source_revision": "1234567",
+        **terminal_changes,
+    }
+    events = [
+        ToolEvent("started", result=ToolResult("running", **identity)),
+        ToolEvent("ready", result=ToolResult("running", **identity)),
+        ToolEvent("result", result=ToolResult(**terminal)),
+    ]
+    delivered = []
+    result = exec_tool(
+        request=request,
+        host=_host(
+            RunHostConnection(url="http://remote.example", token="secret-token")
+        ),
+        resolver=RunHostResolver(),
+        # Close has already removed the row containing the updated source SHA.
+        session_source_revision=lambda owner, generation: None,
+        event_sink=delivered.append,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                content=iter(_frame(event) for event in events),
+                headers={"X-Mship-Exec-Nonce": NONCE},
+            )
+        ),
+    )
+
+    assert result.status == expected_status
+    assert any(event.kind == "result" for event in delivered) == (
+        expected_status == "cancelled"
+    )
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled"])
+def test_exec_tool_rejects_mismatched_pinned_source_revision(status):
     request = ToolRequest(
         task="task-1",
         repo="app",
@@ -564,8 +626,8 @@ def test_exec_tool_rejects_mismatched_pinned_source_revision():
     event = ToolEvent(
         "result",
         result=ToolResult(
-            "completed",
-            exit_code=0,
+            status,
+            exit_code=0 if status == "completed" else None,
             owner_ref="owner-abcdef",
             generation="generation-abcdef",
             source_revision="1234567",
