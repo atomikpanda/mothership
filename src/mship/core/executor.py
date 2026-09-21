@@ -1,5 +1,4 @@
 import os
-import signal
 import time as _time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
-from subprocess import Popen, TimeoutExpired
+from subprocess import Popen
 from threading import Event, Lock, Thread
 from typing import TypeVar, cast
 
@@ -15,7 +14,12 @@ from mship.core.config import WorkspaceConfig, Dependency
 from mship.core.graph import DependencyGraph
 from mship.core.healthcheck import HealthcheckResult
 from mship.core.state import StateManager, TestResult
-from mship.util.shell import ShellRunner, ShellResult
+from mship.util.shell import (
+    ShellRunner,
+    ShellResult,
+    _terminate_owned_process_group,
+    ensure_cancellable_shell_supported,
+)
 from mship.util.stream_printer import StreamPrinter, drain_to_printer
 
 
@@ -63,6 +67,24 @@ class LocalRun:
     status: str = "active"
     cancelled: bool = False
     stop_lock: Lock = field(default_factory=Lock, repr=False)
+
+    def poll(self) -> int | None:
+        """Observe exit without releasing the PID that owns the process group."""
+        with self.stop_lock:
+            if self.process is None:
+                return 0
+            if self.process.returncode is not None:
+                return self.process.returncode
+            result = os.waitid(
+                os.P_PID, self.process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+            )
+            if result is None:
+                return None
+            return (
+                result.si_status
+                if result.si_code == os.CLD_EXITED
+                else -result.si_status
+            )
 
 
 @dataclass
@@ -308,11 +330,14 @@ class RepoExecutor:
             started_at=started_at,
         )
 
-    def _finish_local_run(self, local_run: LocalRun) -> LocalRun:
-        """Wait for a foreground local run and record its terminal outcome."""
+    def _finish_local_run(
+        self, local_run: LocalRun, *, returncode: int | None = None
+    ) -> LocalRun:
+        """Record completion, optionally retaining an observed mixed-run leader."""
         if local_run.process is None:
             return local_run
-        returncode = local_run.process.wait()
+        if returncode is None:
+            returncode = local_run.process.wait()
         for thread in local_run.drain_threads:
             thread.join(timeout=1.0)
         local_run.result.shell_result = ShellResult(
@@ -327,22 +352,6 @@ class RepoExecutor:
             )
         return local_run
 
-    @staticmethod
-    def _signal_process(process: Popen, sig: int) -> None:
-        """Signal an owned local process group, falling back to its leader."""
-        try:
-            if os.name == "nt":
-                process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                os.killpg(process.pid, sig)
-        except ProcessLookupError, OSError:
-            try:
-                process.send_signal(sig)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
     def cancel_local_run(self, local_run: LocalRun) -> None:
         """Stop an ordinary process owned by a mixed launch without hanging."""
         with local_run.stop_lock:
@@ -351,14 +360,7 @@ class RepoExecutor:
             local_run.cancelled = True
             process = local_run.process
             if process is not None and process.returncode is None:
-                self._signal_process(process, signal.SIGINT)
-                try:
-                    process.wait(timeout=5)
-                except TimeoutExpired:
-                    self._signal_process(
-                        process, signal.SIGKILL if os.name != "nt" else signal.SIGTERM
-                    )
-                    process.wait(timeout=2)
+                _terminate_owned_process_group(process)
             if local_run.status != "failed":
                 local_run.status = "stopped"
 
@@ -371,6 +373,7 @@ class RepoExecutor:
         on_started: Callable[[LocalRun], None],
     ) -> LocalRun:
         """Register ownership before waiting for ordinary task readiness."""
+        ensure_cancellable_shell_supported()
         local_run = self._start_local_run(repo_name, task_slug)
         on_started(local_run)
         try:
@@ -384,7 +387,10 @@ class RepoExecutor:
             assert process is not None
             repo_config = self._config.repos[repo_name]
             if repo_config.start_mode != "background":
-                self._finish_local_run(local_run)
+                while (returncode := local_run.poll()) is None:
+                    cancel_event.wait(0.05)
+                # Keep the leader waitable until mixed-run group cleanup.
+                self._finish_local_run(local_run, returncode=returncode)
             if cancel_event.is_set():
                 return local_run
             if not local_run.result.success:
@@ -394,7 +400,7 @@ class RepoExecutor:
                     repo_config.healthcheck,
                     self._resolve_cwd(repo_name, task_slug),
                     self.resolve_env_runner(repo_name),
-                    proc=process if repo_config.start_mode == "background" else None,
+                    process_poll=local_run.poll,
                 )
                 local_run.result.healthcheck = healthcheck
                 if cancel_event.is_set():
@@ -402,7 +408,7 @@ class RepoExecutor:
                 if not healthcheck.ready:
                     local_run.status = "failed"
                     raise RuntimeError(f"{repo_name}: failed to start")
-            returncode = process.poll()
+            returncode = local_run.poll()
             if returncode is not None and returncode != 0:
                 local_run.status = "failed"
                 raise RuntimeError(f"{repo_name}: failed to start")

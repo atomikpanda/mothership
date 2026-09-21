@@ -1,3 +1,8 @@
+import os
+import shlex
+import signal
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
@@ -9,7 +14,7 @@ import pytest
 from mship.core.config import ConfigLoader, Healthcheck, RepoConfig, WorkspaceConfig
 from mship.core.executor import ExecutionResult, RepoExecutor, RepoResult
 from mship.core.graph import DependencyGraph
-from mship.core.healthcheck import HealthcheckResult
+from mship.core.healthcheck import HealthcheckResult, HealthcheckRunner
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellRunner, ShellResult
 
@@ -248,154 +253,151 @@ def test_mixed_foreground_readiness_requires_successful_completion(
         assert readiness == ["stopped"]
 
 
-def test_mixed_launch_healthcheck_failure_stops_local_and_blocks_profile(
-    tmp_path: Path, mock_shell
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="uses /proc to distinguish live descendants from zombies",
+)
+@pytest.mark.parametrize(
+    ("start_mode", "outcome"),
+    [
+        ("background", "complete"),
+        ("foreground", "complete"),
+        ("foreground", "detached"),
+        ("foreground", "fail"),
+        ("background", "healthcheck-fail"),
+    ],
+)
+def test_mixed_local_cleanup_stops_descendants_after_leader_exit(
+    tmp_path: Path, start_mode, outcome
 ):
+    leaf = tmp_path / "leaf.py"
+    leaf.write_text(
+        "import os, signal, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path('leaf-pid').write_text(str(os.getpid()))\n"
+        "while True: time.sleep(.01)\n"
+    )
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "subprocess.Popen([sys.executable, 'leaf.py'])\n"
+        "while not Path('leaf-pid').exists(): time.sleep(.01)\n"
+        + (
+            "raise SystemExit(0)\n"
+            if start_mode == "background" or outcome == "detached"
+            else "while True: time.sleep(.01)\n"
+        )
+    )
+    processes = []
+
+    class Shell(ShellRunner):
+        def build_command(self, command, env_runner=None):
+            if command == "task run":
+                return shlex.join([sys.executable, str(parent)])
+            assert command == "task healthy"
+            return shlex.join(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; exit(0 if Path('leaf-pid').exists() else 1)",
+                ]
+            )
+
+        def run_streaming(self, *args, **kwargs):
+            process = super().run_streaming(*args, **kwargs)
+            processes.append(process)
+            return process
+
+    shell = Shell()
     config = WorkspaceConfig(
         workspace="test",
         repos={
             "local": RepoConfig(
-                path=tmp_path / "local",
+                path=tmp_path,
                 type="service",
-                start_mode="background",
-                healthcheck=Healthcheck(sleep="1ms"),
+                start_mode=start_mode,
+                healthcheck=Healthcheck(
+                    task="healthy", timeout="5s", retry_interval="20ms"
+                ),
             ),
             "profile": RepoConfig(
-                path=tmp_path / "profile", type="service", depends_on=["local"]
+                path=tmp_path,
+                type="service",
+                depends_on=["local"]
+                if start_mode == "background" or outcome == "detached"
+                else [],
             ),
         },
     )
-    state_dir = tmp_path / ".mothership"
-    state_dir.mkdir()
-    process = MagicMock()
-    process.pid = 999999
-    process.returncode = None
-    process.poll.return_value = None
-    process.stdout = None
-    process.stderr = None
-    mock_shell.run_streaming.return_value = process
-    healthcheck = MagicMock()
-    healthcheck.wait.return_value = HealthcheckResult(
-        ready=False, message="not ready", duration_s=0
-    )
+
+    class Healthchecks(HealthcheckRunner):
+        def wait(self, *args, **kwargs):
+            ready = super().wait(*args, **kwargs)
+            if outcome == "healthcheck-fail":
+                assert ready.ready
+                return HealthcheckResult(ready=False, message="unhealthy", duration_s=0)
+            return ready
+
     executor = RepoExecutor(
         config,
         DependencyGraph(config),
-        StateManager(state_dir),
-        mock_shell,
-        healthcheck=healthcheck,
+        StateManager(tmp_path / ".mothership"),
+        shell,
+        Healthchecks(shell),
     )
-    profile_started = Event()
-
-    def launch_profile(_ready, _cancel_event):
-        profile_started.set()
-        return SimpleNamespace(status="stopped")
-
-    with pytest.raises(RuntimeError, match="local: failed to start"):
-        executor.launch_profiled({"profile": launch_profile}, local_repos=("local",))
-
-    assert not profile_started.is_set()
-    process.send_signal.assert_called()
-
-
-def test_mixed_launch_cancels_foreground_local_process_after_profile_failure(
-    tmp_path: Path, mock_shell
-):
-    config = WorkspaceConfig(
-        workspace="test",
-        repos={
-            "local": RepoConfig(path=tmp_path / "local", type="service"),
-            "profile": RepoConfig(path=tmp_path / "profile", type="service"),
-        },
-    )
-    state_dir = tmp_path / ".mothership"
-    state_dir.mkdir()
-    released = Event()
-    process = MagicMock()
-    process.pid = 999999
-    process.returncode = None
-    process.poll.return_value = None
-    process.stdout = None
-    process.stderr = None
-    process.send_signal.side_effect = lambda _signal: released.set()
-    process.wait.side_effect = lambda **_kwargs: 130 if released.wait(timeout=1) else 1
-    mock_shell.run_streaming.return_value = process
-    executor = RepoExecutor(
-        config,
-        DependencyGraph(config),
-        StateManager(state_dir),
-        mock_shell,
-        healthcheck=MagicMock(),
-    )
-    local_started = Event()
-
-    def start_process(*args, **kwargs):
-        local_started.set()
-        return process
-
-    mock_shell.run_streaming.side_effect = start_process
-
-    def launch_profile(_ready, _cancel_event):
-        assert local_started.wait(timeout=1)
-        raise RuntimeError("profile launch failed")
-
-    with pytest.raises(RuntimeError, match="profile launch failed"):
-        executor.launch_profiled({"profile": launch_profile}, local_repos=("local",))
-
-    assert released.is_set()
-    process.send_signal.assert_called()
-
-
-def test_mixed_launch_releases_foreground_local_after_profile_completion(
-    tmp_path: Path, mock_shell
-):
-    config = WorkspaceConfig(
-        workspace="test",
-        repos={
-            "local": RepoConfig(path=tmp_path / "local", type="service"),
-            "profile": RepoConfig(path=tmp_path / "profile", type="service"),
-        },
-    )
-    state_dir = tmp_path / ".mothership"
-    state_dir.mkdir()
-    released = Event()
-    process = MagicMock()
-    process.pid = 999999
-    process.returncode = None
-    process.poll.return_value = None
-    process.stdout = None
-    process.stderr = None
-    process.send_signal.side_effect = lambda _signal: released.set()
-    process.wait.side_effect = lambda **_kwargs: 0 if released.wait(timeout=1) else 1
-    mock_shell.run_streaming.return_value = process
-    executor = RepoExecutor(
-        config,
-        DependencyGraph(config),
-        StateManager(state_dir),
-        mock_shell,
-        healthcheck=MagicMock(),
-    )
-    local_started = Event()
-
-    def start_process(*args, **kwargs):
-        local_started.set()
-        return process
-
-    mock_shell.run_streaming.side_effect = start_process
+    profile_started = False
 
     def launch_profile(ready, _cancel_event):
-        assert local_started.wait(timeout=1)
-        run = SimpleNamespace(status="stopped")
-        ready(run)
-        return run
+        nonlocal profile_started
+        profile_started = True
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "leaf-pid").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        pid = int((tmp_path / "leaf-pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        if outcome == "fail":
+            raise RuntimeError("profile failed")
+        ready(SimpleNamespace(status="active"))
+        return SimpleNamespace(status="stopped")
 
-    finals = executor.launch_profiled(
-        {"profile": launch_profile}, local_repos=("local",)
-    )
-
-    assert finals["profile"].status == "stopped"
-    assert released.is_set()
-    process.send_signal.assert_called()
+    try:
+        if outcome in {"fail", "healthcheck-fail"}:
+            with pytest.raises(RuntimeError):
+                executor.launch_profiled(
+                    {"profile": launch_profile}, local_repos=("local",)
+                )
+        else:
+            executor.launch_profiled(
+                {"profile": launch_profile}, local_repos=("local",)
+            )
+        assert profile_started is (outcome != "healthcheck-fail")
+        pid = int((tmp_path / "leaf-pid").read_text())
+        status = Path(f"/proc/{pid}/stat")
+        assert (
+            not status.exists()
+            or status.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+        )
+        assert all(process.returncode is not None for process in processes)
+    finally:
+        # Reap only fixture-owned processes if the regression fails.
+        marker = tmp_path / "leaf-pid"
+        if marker.exists():
+            pid = int(marker.read_text())
+            cmdline = Path(f"/proc/{pid}/cmdline")
+            if (
+                cmdline.exists()
+                and b"leaf.py" in cmdline.read_bytes()
+                and Path(f"/proc/{pid}/cwd").resolve() == tmp_path
+            ):
+                os.kill(pid, signal.SIGKILL)
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+                process.wait()
 
 
 def test_execute_fail_fast(executor_deps):

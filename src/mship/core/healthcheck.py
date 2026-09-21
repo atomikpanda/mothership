@@ -3,6 +3,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -38,6 +39,8 @@ class HealthcheckRunner:
         repo_path: Path,
         env_runner: str | None = None,
         proc: subprocess.Popen | None = None,
+        *,
+        process_poll: Callable[[], int | None] | None = None,
     ) -> HealthcheckResult:
         timeout_s = _parse_duration(healthcheck.timeout)
         interval_s = _parse_duration(healthcheck.retry_interval)
@@ -64,8 +67,8 @@ class HealthcheckRunner:
             # ignored because many legitimate `run` tasks (e.g., `docker
             # run -d`) detach cleanly; the probe is the right signal for
             # those. Non-zero exit means the task itself died.
-            if proc is not None:
-                rc = proc.poll()
+            if process_poll is not None or proc is not None:
+                rc = process_poll() if process_poll is not None else proc.poll()
                 if rc is not None and rc != 0:
                     return HealthcheckResult(
                         ready=False,

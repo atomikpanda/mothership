@@ -224,6 +224,12 @@ the ordinary processes it owns when the profiled streams finish, fail, or are
 interrupted. Ordinary repositories do not receive synthetic run IDs; requesting
 a profile, host, or target for one is an error rather than a fallback.
 
+Ordinary processes in mixed runs require POSIX process groups and non-reaping
+child observation. Cleanup retains each group leader's identity until its
+remaining group members terminate, escalating to a forced stop when needed.
+Children that deliberately create a different process group or session are
+outside that ownership boundary.
+
 A ready acknowledgement is not a successful final outcome. A subsequent nonzero
 backend exit records the run as `failed` and makes the command fail. A zero exit
 records `stopped`; an authenticated cancellation receipt matching the acknowledged
