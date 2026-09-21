@@ -5,11 +5,11 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
-
+from mship.cli.remote_flags import RemoteFlagCommand
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(rich_help_panel="Setup")
+    @app.command(cls=RemoteFlagCommand, rich_help_panel="Setup")
     def bootstrap(
         repos: Optional[str] = typer.Option(
             None, "--repos", help="Comma-separated repo names (default: all)."

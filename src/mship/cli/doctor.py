@@ -4,10 +4,11 @@ from pathlib import Path
 import typer
 
 from mship.cli.output import Output
+from mship.cli.remote_flags import RemoteFlagCommand
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(rich_help_panel="Inspection")
+    @app.command(cls=RemoteFlagCommand, rich_help_panel="Inspection")
     def doctor(
         no_network: bool = typer.Option(
             False, "--no-network",

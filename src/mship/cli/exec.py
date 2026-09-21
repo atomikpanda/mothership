@@ -1235,6 +1235,14 @@ def register(app: typer.Typer, get_container):
             targets = [repo_name]
         else:
             targets = sorted(config.repos) if all_services else [service]
+        if resolved_task is None and (
+            profile is not None or host is not None or target is not None
+        ):
+            output.error(
+                "Recorded-run log selectors require an active task. "
+                "Pass --task or run from an active task's worktree."
+            )
+            raise typer.Exit(code=1)
         for name in targets:
             if name not in config.repos:
                 available = ", ".join(sorted(config.repos.keys()))

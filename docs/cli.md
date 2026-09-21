@@ -271,17 +271,28 @@ Neither command probes the caller's toolchain, runs application setup/tasks, or
 accepts SDK licenses. Ordinary `doctor` and `bootstrap` retain their existing
 local workspace behavior.
 
-#530's profile/runtime code does **not** add `--profile`, `--host`, or
-`--target` flags to `mship run`; it does not add profile capture or profile logs
-commands; and it does not activate real Flutter, Android, iOS, browser, or
-PlatformIO backends. `mship logs` remains the existing service log tail.
+Repositories with configured `run_profiles` support task-bound launches through
+`mship run --profile NAME`, optionally constrained by `--host NAME` and
+`--target ALIAS`. Packaged Flutter, Android, iOS, browser, and PlatformIO
+backends are opt-in through configuration and require prepared host prerequisites.
 
-The shared typed runner and `POST /exec/tool` are internal adapter APIs
-documented in [`remote-run.md`](remote-run.md), not a public CLI route. The
-existing #506 public-relay boundary is unchanged: credential resolution for
-source transfer, execution, and cleanup plus real relay-path proof remain
-separate release work. This reference makes no hardware, relay, macOS, or
-device readiness claim.
+`capture` and `logs` can observe an existing acknowledged profile run using
+`--run-id`, or narrow recorded runs with `--profile`, `--host`, and `--target`.
+Recorded-run selectors require a resolvable active task (`--task`, `MSHIP_TASK`,
+or cwd); they do not launch a replacement session. Ordinary service log tailing
+remains available without a task when no recorded-run selector is supplied.
+
+```bash
+mship run --task feature-a --repos app --profile android-usb --host lab-android --target pixel-8
+mship capture --task feature-a --repo app --run-id <run-id>
+mship logs app --task feature-a --run-id <run-id>
+```
+
+The shared typed runner and `POST /exec/tool` remain internal adapter APIs, not
+a separate public CLI command. See [`remote-run.md`](remote-run.md) for profile
+configuration, relay credential handling, source/binary provenance, and
+platform-specific verification limits. Command availability alone does not
+establish hardware, binary, or device readiness.
 
 ## `mship finish`
 

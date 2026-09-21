@@ -960,6 +960,48 @@ def test_mship_logs_known_service_missing_logs_target_errors(configured_exec_app
     mock_shell.run_task.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("selector", "value"),
+    [
+        ("--profile", "dev"),
+        ("--host", "runner-1"),
+        ("--target", "staging"),
+    ],
+)
+def test_mship_logs_recorded_selectors_require_active_task(
+    workspace: Path, selector: str, value: str
+):
+    """Recorded-log selectors fail before selecting or running without a task."""
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    mock_shell = MagicMock(spec=ShellRunner)
+    container.shell.override(mock_shell)
+    try:
+        with (
+            patch(
+                "mship.core.session_capture.select_session_capture"
+            ) as select_capture,
+            patch(
+                "mship.core.run_target.service.RemoteBackendExecutor"
+            ) as remote_executor,
+        ):
+            result = runner.invoke(app, ["logs", "shared", selector, value])
+
+        assert result.exit_code != 0, result.output
+        assert "active task" in result.output.lower()
+        assert "assertionerror" not in result.output.lower()
+        assert "traceback" not in result.output.lower()
+        mock_shell.run_task.assert_not_called()
+        select_capture.assert_not_called()
+        remote_executor.assert_not_called()
+    finally:
+        _reset_container()
+
+
 def test_mship_logs_runs_when_taskfile_has_logs_target(configured_exec_app):
     """When the Taskfile DOES define `logs:`, the command shells out as
     before — the new check is non-intrusive for the happy path."""
