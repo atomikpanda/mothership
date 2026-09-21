@@ -219,6 +219,7 @@ def _run_profile(
 ) -> int:
     """Preflight every profile context, then launch them in dependency order."""
     from mship.cli.run_target import choose_profile, choose_target
+    from mship.core.executor import LocalRun
     from mship.core.run_host import RunHostStore
     from mship.core.run_target.models import (
         AppRun,
@@ -305,25 +306,29 @@ def _run_profile(
         output.error(str(error))
         return 1
 
-    if unprofiled:
-        build = container.executor().execute(
-            "build", repos=unprofiled, task_slug=task_obj.slug
-        )
-        if not build.success:
-            for result in build.results:
-                if not result.success:
-                    output.error(f"{result.repo}: build failed before profile launch")
-            return 1
-
     announced: set[str] = set()
     announce_lock = Lock()
 
-    def announce_ready(repo_name: str, run: AppRun) -> None:
+    def mark_announced(repo_name: str) -> bool:
         with announce_lock:
             if repo_name in announced:
-                return
+                return False
             announced.add(repo_name)
+            return True
+
+    def announce_ready(repo_name: str, run: AppRun) -> None:
+        if not mark_announced(repo_name):
+            return
         message = f"{repo_name}: run {run.id} is ready"
+        if output.human_mode:
+            output.success(message)
+        else:
+            output.progress(message)
+
+    def announce_local_ready(repo_name: str, _run: LocalRun) -> None:
+        if not mark_announced(repo_name):
+            return
+        message = f"{repo_name}: local service is ready"
         if output.human_mode:
             output.success(message)
         else:
@@ -354,6 +359,9 @@ def _run_profile(
                 for repo_name, (selected, selected_profile) in planned.items()
             },
             cancel=executor.cancel_run,
+            local_repos=tuple(unprofiled),
+            task_slug=task_obj.slug,
+            on_local_ready=announce_local_ready,
         )
     except (TargetSelectionError, RuntimeError) as error:
         output.error(str(error))

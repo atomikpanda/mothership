@@ -215,10 +215,19 @@ mship run --task feature-a --repos app --profile android-usb \
 
 Each selected profiled repository must resolve against the active task. Before
 any application launches, mship discovers and preflights every selected profile;
-the dependency graph's ready boundaries remain in force. Each launched
-repository gets one separate run ID. A selected repository with no profiles
-keeps the ordinary unprofiled flow; requesting a profile, host, or target for
-such a repository is an error rather than a fallback.
+the dependency graph's ready boundaries remain in force. Each profiled
+repository gets one separate run ID. Selected repositories without profiles run
+their ordinary `run` tasks in the task's worktrees, not just their `build` tasks.
+Foreground task completion and background healthchecks gate dependent launches,
+including dependencies between ordinary and profiled repositories. Mship stops
+the ordinary processes it owns when the profiled streams finish, fail, or are
+interrupted. Ordinary repositories do not receive synthetic run IDs; requesting
+a profile, host, or target for one is an error rather than a fallback.
+
+A ready acknowledgement is not a successful final outcome. A subsequent nonzero
+backend exit records the run as `failed` and makes the command fail. A zero exit
+records `stopped`; an authenticated cancellation receipt matching the acknowledged
+owner and generation also remains a successful stop.
 
 ### Automatic observation selectors
 

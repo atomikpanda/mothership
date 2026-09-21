@@ -641,3 +641,64 @@ def test_launch_reconciles_concurrent_close_only_with_exact_host_receipt(
         with pytest.raises(TargetSelectionError) as error:
             executor.launch_selected(selected, repo_name="app", profile_name="phone")
         assert error.value.code == "identity_lost"
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "error_code", "exact_owner", "expected_status"),
+    [
+        (None, None, False, "active"),
+        (0, None, False, "stopped"),
+        (23, None, False, "failed"),
+        (23, "cancelled", True, "stopped"),
+    ],
+)
+def test_launch_reconciles_ready_backend_completion_status(
+    tmp_path, monkeypatch, exit_code, error_code, exact_owner, expected_status
+):
+    executor, host = _stored_observation_executor(tmp_path, status="stopped")
+    selected = resolve_launch(
+        config=executor.config,
+        task=executor.task_obj,
+        repo_name="app",
+        profile_name="phone",
+        host_name=None,
+        remote_role=None,
+        target_alias="phone",
+        registry=_Registry([host]),
+        preferences=_Preferences(),
+        execute=_PreparedExecutor(),
+        choose=lambda candidates: pytest.fail("unique target must not prompt"),
+    )
+
+    def remote_operation(self, host, execution, *, event_sink=None, cancel_event=None):
+        if execution.preparation == "discover":
+            return _result()
+        receipt = ToolResult(
+            status="running",
+            owner_ref="owner",
+            generation="generation",
+            source_revision=_SHA,
+        )
+        event_sink(SimpleNamespace(kind="started", result=receipt))
+        event_sink(SimpleNamespace(kind="ready", result=receipt))
+        return BackendResult(
+            exit_code=exit_code,
+            stdout=b"",
+            stderr=b"",
+            error_code=error_code,
+            owner_ref=receipt.owner_ref if exact_owner else None,
+            owner_generation=receipt.generation if exact_owner else None,
+            artifacts=(),
+        )
+
+    monkeypatch.setattr(RemoteBackendExecutor, "__call__", remote_operation)
+
+    completed = executor.launch_selected(
+        selected, repo_name="app", profile_name="phone"
+    )
+
+    assert completed.status == expected_status
+    with executor.store.read() as transaction:
+        persisted = transaction.app_runs.get(transaction.connection, completed.id)
+    assert persisted is not None
+    assert persisted.status == expected_status

@@ -23,12 +23,16 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shlex
+import sys
 import tarfile
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Event, Thread
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -45,6 +49,8 @@ from mship.core.remote_exec import (
 )
 from mship.core.remote_tool import ToolEvent, ToolResult
 from mship.core.run_host import HostRegistration, RunHostConnection, RunHostError, RunHostResolver, RunHostStore
+from mship.core.run_target import service as run_target_service
+from mship.core.run_target.models import TargetSelectionError
 from mship.core.spec import AcceptanceCriterion, Spec
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
@@ -1198,6 +1204,156 @@ def test_cli_run_bare_remote_ambiguous_roles_is_clean_error_not_traceback(
         assert isinstance(result.exception, SystemExit) or result.exception is None
         assert "Traceback" not in (result.output or "")
         assert "role-x" in result.output and "role-y" in result.output
+    finally:
+        _reset()
+
+
+
+def test_cli_mixed_profile_run_starts_local_service_in_task_worktree(
+    tmp_path, monkeypatch
+):
+    _write_run_workspace(tmp_path, run_hosts=["device"], repos=["local", "profile"])
+    worktrees = _seed_task_with_worktree(tmp_path, "t1", "local", "profile")
+    local_worktree = worktrees["local"]
+    (tmp_path / "mothership.yaml").write_text(
+        """\
+workspace: t
+run_hosts: [device]
+repos:
+  local:
+    path: ./local
+    type: service
+    start_mode: background
+    healthcheck: {task: healthy, timeout: 5s, retry_interval: 20ms}
+  profile:
+    path: ./profile
+    type: service
+    depends_on: [local]
+    tasks: {discover: discover, launch: launch}
+    run_backends:
+      remote:
+        discover_task: discover
+        operations: {run: launch}
+    run_profiles:
+      device:
+        backend: remote
+        hosts: {roles: [device]}
+        options: {}
+    default_run_profile: device
+"""
+    )
+    script = local_worktree / "serve.py"
+    script.write_text(
+        "import os, signal, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGINT, lambda *_: exit(0))\n"
+        "Path('started').write_text(str(os.getpid()))\n"
+        "while True: time.sleep(.01)\n"
+    )
+
+    class LocalShell(ShellRunner):
+        def build_command(self, command, env_runner=None):
+            if command == "task run":
+                return shlex.join([sys.executable, str(script)])
+            assert command == "task healthy"
+            return shlex.join(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; exit(0 if Path('started').exists() else 1)",
+                ]
+            )
+
+    _configure(tmp_path)
+    container.shell.override(LocalShell())
+    remote_backend = MagicMock()
+
+    def launch_selected(_selected, *, on_ready, **_kwargs):
+        pid = int((local_worktree / "started").read_text())
+        os.kill(pid, 0)
+        on_ready(SimpleNamespace(id="profile-run", status="active"))
+        return SimpleNamespace(id="profile-run", status="stopped")
+
+    remote_backend.launch_selected.side_effect = launch_selected
+    monkeypatch.setattr(
+        run_target_service, "RemoteBackendExecutor", lambda **_kwargs: remote_backend
+    )
+    monkeypatch.setattr(
+        run_target_service, "resolve_launch", lambda **_kwargs: object()
+    )
+    try:
+        result = runner.invoke(app, ["run", "--task", "t1"])
+        assert result.exit_code == 0, result.output
+        pid = int((local_worktree / "started").read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert not (tmp_path / "local" / "started").exists()
+    finally:
+        _reset()
+
+
+def test_cli_mixed_profile_preflight_failure_does_not_start_local_service(
+    tmp_path, monkeypatch
+):
+    _write_run_workspace(
+        tmp_path, run_hosts=["device"], repos=["local", "first", "second"]
+    )
+    (tmp_path / "mothership.yaml").write_text(
+        """\
+workspace: t
+run_hosts: [device]
+repos:
+  local:
+    path: ./local
+    type: service
+    start_mode: background
+  first:
+    path: ./first
+    type: service
+    tasks: {discover: discover, launch: launch}
+    run_backends:
+      remote:
+        discover_task: discover
+        operations: {run: launch}
+    run_profiles:
+      device:
+        backend: remote
+        hosts: {roles: [device]}
+        options: {}
+    default_run_profile: device
+  second:
+    path: ./second
+    type: service
+    tasks: {discover: discover, launch: launch}
+    run_backends:
+      remote:
+        discover_task: discover
+        operations: {run: launch}
+    run_profiles:
+      device:
+        backend: remote
+        hosts: {roles: [device]}
+        options: {}
+    default_run_profile: device
+"""
+    )
+    _seed_task(tmp_path, slug="t1", repos=["local", "first", "second"])
+    mock_shell = _configure(tmp_path)
+    monkeypatch.setattr(
+        run_target_service, "RemoteBackendExecutor", lambda **_kwargs: MagicMock()
+    )
+
+    def resolve_launch(*, repo_name, **_kwargs):
+        if repo_name == "second":
+            raise TargetSelectionError("unavailable", "second target unavailable")
+        return object()
+
+    monkeypatch.setattr(run_target_service, "resolve_launch", resolve_launch)
+    try:
+        result = runner.invoke(app, ["run", "--task", "t1"])
+        assert result.exit_code == 1, result.output
+        assert "second target unavailable" in result.output
+        mock_shell.run_streaming.assert_not_called()
     finally:
         _reset()
 

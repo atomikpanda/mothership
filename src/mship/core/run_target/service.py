@@ -796,7 +796,9 @@ class RemoteBackendExecutor:
                     )
                 elif result.exit_code is not None:
                     current_transition(
-                        "stopped", current.owner_ref, current.owner_generation
+                        "stopped" if result.exit_code == 0 else "failed",
+                        current.owner_ref,
+                        current.owner_generation,
                     )
         with self.store.read() as transaction:
             final = transaction.app_runs.get(transaction.connection, run.id)

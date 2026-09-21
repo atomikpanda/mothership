@@ -1,3 +1,5 @@
+import os
+import signal
 import time as _time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -5,8 +7,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Event, Thread
-from typing import TypeVar
+from subprocess import Popen, TimeoutExpired
+from threading import Event, Lock, Thread
+from typing import TypeVar, cast
 
 from mship.core.config import WorkspaceConfig, Dependency
 from mship.core.graph import DependencyGraph
@@ -47,6 +50,19 @@ class ExecutionResult:
     @property
     def success(self) -> bool:
         return all(r.success for r in self.results)
+
+
+@dataclass
+class LocalRun:
+    """An ordinary local service participating in a mixed run launch."""
+
+    result: RepoResult
+    process: Popen | None
+    drain_threads: list = field(default_factory=list)
+    started_at: float = 0.0
+    status: str = "active"
+    cancelled: bool = False
+    stop_lock: Lock = field(default_factory=Lock, repr=False)
 
 
 @dataclass
@@ -108,6 +124,10 @@ class RepoExecutor:
         self._shell = shell
         self._healthcheck = healthcheck
         self._printer: StreamPrinter | None = None
+
+    def configure_run_output(self, repos: list[str]) -> None:
+        """Enable the ordinary run stream printer for the specified repos."""
+        self._printer = StreamPrinter(repos=sorted(set(repos)))
 
     def resolve_task_name(self, repo_name: str, canonical: str) -> str:
         repo = self._config.repos[repo_name]
@@ -252,6 +272,148 @@ class RepoExecutor:
             return parent.path / repo_config.path
         return repo_config.path
 
+    def _start_local_run(self, repo_name: str, task_slug: str | None) -> LocalRun:
+        """Start one ordinary run task without waiting for a foreground process."""
+        repo_config = self._config.repos[repo_name]
+        if "run" in repo_config.not_applicable:
+            return LocalRun(
+                result=self._make_skip_result(repo_name, "run"),
+                process=None,
+                status="stopped",
+            )
+
+        actual_name = self.resolve_task_name(repo_name, "run")
+        env_runner = self.resolve_env_runner(repo_name)
+        command = self._shell.build_command(f"task {actual_name}", env_runner)
+        started_at = _time.monotonic()
+        process = self._shell.run_streaming(
+            command,
+            cwd=self._resolve_cwd(repo_name, task_slug),
+            env=self.resolve_upstream_env(repo_name, task_slug) or None,
+        )
+        drain_threads: list = []
+        if self._printer is not None:
+            drain_threads = drain_to_printer(process, repo_name, self._printer)
+        return LocalRun(
+            result=RepoResult(
+                repo=repo_name,
+                task_name=actual_name,
+                shell_result=ShellResult(returncode=0, stdout="", stderr=""),
+                background_pid=(
+                    process.pid if repo_config.start_mode == "background" else None
+                ),
+            ),
+            process=process,
+            drain_threads=drain_threads,
+            started_at=started_at,
+        )
+
+    def _finish_local_run(self, local_run: LocalRun) -> LocalRun:
+        """Wait for a foreground local run and record its terminal outcome."""
+        if local_run.process is None:
+            return local_run
+        returncode = local_run.process.wait()
+        for thread in local_run.drain_threads:
+            thread.join(timeout=1.0)
+        local_run.result.shell_result = ShellResult(
+            returncode=returncode, stdout="", stderr=""
+        )
+        local_run.result.duration_ms = int(
+            (_time.monotonic() - local_run.started_at) * 1000
+        )
+        with local_run.stop_lock:
+            local_run.status = (
+                "stopped" if local_run.cancelled or returncode == 0 else "failed"
+            )
+        return local_run
+
+    @staticmethod
+    def _signal_process(process: Popen, sig: int) -> None:
+        """Signal an owned local process group, falling back to its leader."""
+        try:
+            if os.name == "nt":
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                os.killpg(process.pid, sig)
+        except ProcessLookupError, OSError:
+            try:
+                process.send_signal(sig)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def cancel_local_run(self, local_run: LocalRun) -> None:
+        """Stop an ordinary process owned by a mixed launch without hanging."""
+        with local_run.stop_lock:
+            if local_run.cancelled:
+                return
+            local_run.cancelled = True
+            process = local_run.process
+            if process is not None and process.returncode is None:
+                self._signal_process(process, signal.SIGINT)
+                try:
+                    process.wait(timeout=5)
+                except TimeoutExpired:
+                    self._signal_process(
+                        process, signal.SIGKILL if os.name != "nt" else signal.SIGTERM
+                    )
+                    process.wait(timeout=2)
+            if local_run.status != "failed":
+                local_run.status = "stopped"
+
+    def launch_local(
+        self,
+        repo_name: str,
+        task_slug: str | None,
+        on_ready: Callable[[LocalRun], None],
+        cancel_event: Event,
+        on_started: Callable[[LocalRun], None],
+    ) -> LocalRun:
+        """Register ownership before waiting for ordinary task readiness."""
+        local_run = self._start_local_run(repo_name, task_slug)
+        on_started(local_run)
+        try:
+            if cancel_event.is_set():
+                self.cancel_local_run(local_run)
+                return local_run
+            if local_run.result.skipped:
+                on_ready(local_run)
+                return local_run
+            process = local_run.process
+            assert process is not None
+            repo_config = self._config.repos[repo_name]
+            if repo_config.start_mode != "background":
+                self._finish_local_run(local_run)
+            if cancel_event.is_set():
+                return local_run
+            if not local_run.result.success:
+                raise RuntimeError(f"{repo_name}: failed to start")
+            if repo_config.healthcheck is not None:
+                healthcheck = self._healthcheck.wait(
+                    repo_config.healthcheck,
+                    self._resolve_cwd(repo_name, task_slug),
+                    self.resolve_env_runner(repo_name),
+                    proc=process if repo_config.start_mode == "background" else None,
+                )
+                local_run.result.healthcheck = healthcheck
+                if cancel_event.is_set():
+                    return local_run
+                if not healthcheck.ready:
+                    local_run.status = "failed"
+                    raise RuntimeError(f"{repo_name}: failed to start")
+            returncode = process.poll()
+            if returncode is not None and returncode != 0:
+                local_run.status = "failed"
+                raise RuntimeError(f"{repo_name}: failed to start")
+            if cancel_event.is_set():
+                return local_run
+            on_ready(local_run)
+            return local_run
+        except BaseException:
+            self.cancel_local_run(local_run)
+            raise
+
     def _execute_one(
         self,
         repo_name: str,
@@ -268,68 +430,18 @@ class RepoExecutor:
         # declared not applicable for this repo, skip without invoking go-task.
         # The result is recorded as skipped (not pass/fail).
         if canonical_task in repo_config.not_applicable:
-            return (
-                RepoResult(
-                    repo=repo_name,
-                    task_name=f"(skipped: {canonical_task} not applicable)",
-                    shell_result=ShellResult(returncode=0, stdout="", stderr=""),
-                    skipped=True,
-                ),
-                None,
-            )
+            return (self._make_skip_result(repo_name, canonical_task), None)
+
+        if canonical_task == "run":
+            local_run = self._start_local_run(repo_name, task_slug)
+            if repo_config.start_mode == "background":
+                return local_run.result, local_run.process
+            return self._finish_local_run(local_run).result, None
 
         actual_name = self.resolve_task_name(repo_name, canonical_task)
         env_runner = self.resolve_env_runner(repo_name)
         upstream_env = self.resolve_upstream_env(repo_name, task_slug)
         cwd = self._resolve_cwd(repo_name, task_slug)
-
-        if repo_config.start_mode == "background" and canonical_task == "run":
-            # Launch as background subprocess, don't wait
-            command = self._shell.build_command(f"task {actual_name}", env_runner)
-            popen = self._shell.run_streaming(command, cwd=cwd)
-            # Drain stdout/stderr to the shared printer. Threads are daemon
-            # and die naturally when the PIPEs close at process exit.
-            if self._printer is not None:
-                drain_to_printer(popen, repo_name, self._printer)
-            return (
-                RepoResult(
-                    repo=repo_name,
-                    task_name=actual_name,
-                    shell_result=ShellResult(returncode=0, stdout="", stderr=""),
-                    background_pid=popen.pid,
-                ),
-                popen,
-            )
-
-        if canonical_task == "run":
-            # Foreground `run` task: stream output live via Popen + drain
-            # threads, then wait for completion. This replaces the old
-            # capture-and-never-print behavior of run_task().
-            command = self._shell.build_command(f"task {actual_name}", env_runner)
-            _start = _time.monotonic()
-            popen = self._shell.run_streaming(
-                command, cwd=cwd, env=upstream_env or None
-            )
-            threads: list = []
-            if self._printer is not None:
-                threads = drain_to_printer(popen, repo_name, self._printer)
-            returncode = popen.wait()
-            for t in threads:
-                t.join(timeout=1.0)
-            _elapsed_ms = int((_time.monotonic() - _start) * 1000)
-            return (
-                RepoResult(
-                    repo=repo_name,
-                    task_name=actual_name,
-                    # Output already streamed to stdout; the ShellResult
-                    # carries only the returncode for downstream logic.
-                    shell_result=ShellResult(
-                        returncode=returncode, stdout="", stderr=""
-                    ),
-                    duration_ms=_elapsed_ms,
-                ),
-                None,
-            )
 
         # Non-run tasks (setup, test, ...) keep the capture-and-return path.
         _start = _time.monotonic()
@@ -402,7 +514,7 @@ class RepoExecutor:
         tiers = self._graph.topo_tiers(repos)
 
         if canonical_task == "run":
-            self._printer = StreamPrinter(repos=sorted(set(repos)))
+            self.configure_run_output(repos)
         else:
             self._printer = None
 
@@ -532,36 +644,62 @@ class RepoExecutor:
         ],
         *,
         cancel: Callable[[_LaunchResult], None] | None = None,
+        local_repos: tuple[str, ...] = (),
+        task_slug: str | None = None,
+        on_local_ready: Callable[[str, LocalRun], None] | None = None,
     ) -> dict[str, _LaunchResult]:
-        """Launch dependency tiers after each owner acknowledges readiness.
+        """Run local and profiled owners through one dependency-ready scheduler.
 
-        Workers retain their cancellable launch stream while downstream tiers
-        start. A pre-ready worker is cancelled through its own request event;
-        an acknowledged owner is stopped only through the exact-owner callback.
+        Local ownership is registered at spawn, separately from readiness:
+        foreground tasks must finish and background tasks must pass healthchecks.
+        Local processes live until the profiled launch streams end.
         """
         results: dict[str, _LaunchResult] = {}
-        completed: dict[str, _LaunchResult] = {}
         ready: dict[str, _LaunchResult] = {}
+        acknowledged: set[str] = set()
+        local_runs: dict[str, LocalRun] = {}
+        local_names = set(local_repos)
+        profile_names = set(launches)
+        launch_names = profile_names | local_names
         events: Queue[tuple[str, str, object]] = Queue()
         inflight: dict[str, Event] = {}
         cancelled: set[str] = set()
         workers: list[Thread] = []
         terminal: set[str] = set()
+        if local_repos:
+            self.configure_run_output(list(local_repos))
+
+        def stop_local(repo_name: str, run: LocalRun) -> None:
+            cancelled.add(repo_name)
+            inflight[repo_name].set()
+            self.cancel_local_run(run)
 
         def stop_live() -> None:
-            for repo_name, cancel_event in tuple(inflight.items()):
-                if repo_name not in ready:
-                    cancel_event.set()
-            if cancel is None:
-                return
-            for repo_name, value in tuple(ready.items()):
-                if repo_name in cancelled:
-                    continue
-                cancelled.add(repo_name)
-                try:
-                    cancel(value)
-                except Exception:
-                    continue
+            for repo_name, event in inflight.items():
+                if repo_name in local_names or repo_name not in ready:
+                    event.set()
+            for repo_name, run in tuple(local_runs.items()):
+                stop_local(repo_name, run)
+            if cancel is not None:
+                for repo_name, value in ready.items():
+                    if repo_name not in cancelled:
+                        cancelled.add(repo_name)
+                        try:
+                            cancel(value)
+                        except Exception:
+                            continue
+
+        def stop_remaining_locals() -> None:
+            if profile_names and profile_names <= terminal:
+                for repo_name, run in tuple(local_runs.items()):
+                    if (
+                        repo_name not in terminal
+                        and repo_name not in cancelled
+                        and run.status == "active"
+                        and run.process is not None
+                        and run.process.returncode is None
+                    ):
+                        stop_local(repo_name, run)
 
         def process(
             repo_name: str,
@@ -570,49 +708,65 @@ class RepoExecutor:
             pending: set[str],
             reject_ended: bool = False,
         ) -> None:
+            if event == "started":
+                return
             if event in {"done", "failed"}:
                 terminal.add(repo_name)
+            if repo_name in local_names and repo_name in cancelled:
+                pending.discard(repo_name)
+                return
             if event == "failed":
                 if isinstance(value, BaseException):
                     raise value
-                raise RuntimeError(f"profile launch for {repo_name} failed")
+                raise RuntimeError(f"launch for {repo_name} failed")
             if event == "ready":
-                ready[repo_name] = value  # type: ignore[assignment]
+                acknowledged.add(repo_name)
+                if repo_name in local_names:
+                    if on_local_ready is not None:
+                        on_local_ready(repo_name, cast(LocalRun, value))
+                else:
+                    ready[repo_name] = cast(_LaunchResult, value)
                 pending.discard(repo_name)
                 return
-            results[repo_name] = value  # type: ignore[assignment]
             if repo_name in pending:
                 raise RuntimeError(
                     f"profile launch for {repo_name} ended before readiness"
                 )
             status = getattr(value, "status", None)
-            if repo_name in ready and status in {"failed", "unknown"}:
+            if repo_name in acknowledged and status in {"failed", "unknown"}:
                 raise RuntimeError(
                     f"profile launch for {repo_name} failed after readiness"
                 )
-            if (
-                reject_ended
-                and repo_name in ready
-                and status is not None
-                and status != "active"
-            ):
-                raise RuntimeError(
-                    f"profile launch for {repo_name} ended after readiness"
-                )
+            if repo_name not in local_names:
+                results[repo_name] = cast(_LaunchResult, value)
+                if reject_ended and status is not None and status != "active":
+                    raise RuntimeError(
+                        f"profile launch for {repo_name} ended after readiness"
+                    )
 
         def start(repo_name: str) -> None:
             cancel_event = Event()
             inflight[repo_name] = cancel_event
 
+            def started(run: LocalRun) -> None:
+                local_runs[repo_name] = run
+                events.put((repo_name, "started", run))
+
             def worker() -> None:
                 try:
-                    value = launches[repo_name](
-                        lambda ready_value: events.put(
-                            (repo_name, "ready", ready_value)
-                        ),
-                        cancel_event,
-                    )
-                    completed[repo_name] = value
+                    if repo_name in local_names:
+                        value = self.launch_local(
+                            repo_name,
+                            task_slug,
+                            lambda run: events.put((repo_name, "ready", run)),
+                            cancel_event,
+                            started,
+                        )
+                    else:
+                        value = launches[repo_name](
+                            lambda run: events.put((repo_name, "ready", run)),
+                            cancel_event,
+                        )
                     events.put((repo_name, "done", value))
                 except BaseException as error:
                     events.put((repo_name, "failed", error))
@@ -622,12 +776,13 @@ class RepoExecutor:
             workers.append(thread)
 
         try:
-            tiers = self._graph.topo_tiers(list(launches))
+            tiers = self._graph.topo_tiers(list(launch_names))
             for tier_index, tier in enumerate(tiers):
                 pending = set(tier)
                 for repo_name in tier:
                     start(repo_name)
                 while pending:
+                    stop_remaining_locals()
                     process(*events.get(), pending=pending)
                 if tier_index == len(tiers) - 1:
                     continue
@@ -640,23 +795,17 @@ class RepoExecutor:
                         )
                     except Empty:
                         break
-            remaining = set(launches) - terminal
-            while remaining:
-                repo_name, event, value = events.get()
-                process(repo_name, event, value, pending=set())
-                if event in {"done", "failed"}:
-                    remaining.discard(repo_name)
+            while terminal != launch_names:
+                stop_remaining_locals()
+                process(*events.get(), pending=set())
             for worker in workers:
                 worker.join()
-            results.update(completed)
-        except KeyboardInterrupt:
-            stop_live()
-            for worker in workers:
-                worker.join(timeout=5)
-            raise
         except BaseException:
             stop_live()
             for worker in workers:
                 worker.join(timeout=5)
             raise
+        finally:
+            for repo_name, run in tuple(local_runs.items()):
+                stop_local(repo_name, run)
         return results

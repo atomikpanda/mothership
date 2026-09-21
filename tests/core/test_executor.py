@@ -6,9 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mship.core.config import ConfigLoader, RepoConfig, WorkspaceConfig
-from mship.core.executor import RepoExecutor, ExecutionResult, RepoResult
+from mship.core.config import ConfigLoader, Healthcheck, RepoConfig, WorkspaceConfig
+from mship.core.executor import ExecutionResult, RepoExecutor, RepoResult
 from mship.core.graph import DependencyGraph
+from mship.core.healthcheck import HealthcheckResult
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellRunner, ShellResult
 
@@ -210,6 +211,191 @@ def test_profile_post_ready_failure_cancels_live_sibling(tmp_path: Path, mock_sh
     assert len(cancelled) == 2
     assert cancelled[0] is first_run
     assert cancelled[1] is second_run
+
+
+
+@pytest.mark.parametrize("exit_code", [0, 17])
+def test_mixed_foreground_readiness_requires_successful_completion(
+    tmp_path: Path, mock_shell, exit_code
+):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={"local": RepoConfig(path=tmp_path, type="service")},
+    )
+    process = MagicMock()
+    process.poll.return_value = exit_code
+    process.wait.return_value = exit_code
+    process.returncode = exit_code
+    mock_shell.run_streaming.return_value = process
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(tmp_path / ".mothership"),
+        mock_shell,
+        healthcheck=MagicMock(),
+    )
+    readiness = []
+
+    def ready(run):
+        readiness.append(run.status)
+
+    if exit_code:
+        with pytest.raises(RuntimeError):
+            executor.launch_local("local", None, ready, Event(), lambda run: None)
+        assert readiness == []
+    else:
+        executor.launch_local("local", None, ready, Event(), lambda run: None)
+        assert readiness == ["stopped"]
+
+
+def test_mixed_launch_healthcheck_failure_stops_local_and_blocks_profile(
+    tmp_path: Path, mock_shell
+):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "local": RepoConfig(
+                path=tmp_path / "local",
+                type="service",
+                start_mode="background",
+                healthcheck=Healthcheck(sleep="1ms"),
+            ),
+            "profile": RepoConfig(
+                path=tmp_path / "profile", type="service", depends_on=["local"]
+            ),
+        },
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    process = MagicMock()
+    process.pid = 999999
+    process.returncode = None
+    process.poll.return_value = None
+    process.stdout = None
+    process.stderr = None
+    mock_shell.run_streaming.return_value = process
+    healthcheck = MagicMock()
+    healthcheck.wait.return_value = HealthcheckResult(
+        ready=False, message="not ready", duration_s=0
+    )
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(state_dir),
+        mock_shell,
+        healthcheck=healthcheck,
+    )
+    profile_started = Event()
+
+    def launch_profile(_ready, _cancel_event):
+        profile_started.set()
+        return SimpleNamespace(status="stopped")
+
+    with pytest.raises(RuntimeError, match="local: failed to start"):
+        executor.launch_profiled({"profile": launch_profile}, local_repos=("local",))
+
+    assert not profile_started.is_set()
+    process.send_signal.assert_called()
+
+
+def test_mixed_launch_cancels_foreground_local_process_after_profile_failure(
+    tmp_path: Path, mock_shell
+):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "local": RepoConfig(path=tmp_path / "local", type="service"),
+            "profile": RepoConfig(path=tmp_path / "profile", type="service"),
+        },
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    released = Event()
+    process = MagicMock()
+    process.pid = 999999
+    process.returncode = None
+    process.poll.return_value = None
+    process.stdout = None
+    process.stderr = None
+    process.send_signal.side_effect = lambda _signal: released.set()
+    process.wait.side_effect = lambda **_kwargs: 130 if released.wait(timeout=1) else 1
+    mock_shell.run_streaming.return_value = process
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(state_dir),
+        mock_shell,
+        healthcheck=MagicMock(),
+    )
+    local_started = Event()
+
+    def start_process(*args, **kwargs):
+        local_started.set()
+        return process
+
+    mock_shell.run_streaming.side_effect = start_process
+
+    def launch_profile(_ready, _cancel_event):
+        assert local_started.wait(timeout=1)
+        raise RuntimeError("profile launch failed")
+
+    with pytest.raises(RuntimeError, match="profile launch failed"):
+        executor.launch_profiled({"profile": launch_profile}, local_repos=("local",))
+
+    assert released.is_set()
+    process.send_signal.assert_called()
+
+
+def test_mixed_launch_releases_foreground_local_after_profile_completion(
+    tmp_path: Path, mock_shell
+):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "local": RepoConfig(path=tmp_path / "local", type="service"),
+            "profile": RepoConfig(path=tmp_path / "profile", type="service"),
+        },
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    released = Event()
+    process = MagicMock()
+    process.pid = 999999
+    process.returncode = None
+    process.poll.return_value = None
+    process.stdout = None
+    process.stderr = None
+    process.send_signal.side_effect = lambda _signal: released.set()
+    process.wait.side_effect = lambda **_kwargs: 0 if released.wait(timeout=1) else 1
+    mock_shell.run_streaming.return_value = process
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(state_dir),
+        mock_shell,
+        healthcheck=MagicMock(),
+    )
+    local_started = Event()
+
+    def start_process(*args, **kwargs):
+        local_started.set()
+        return process
+
+    mock_shell.run_streaming.side_effect = start_process
+
+    def launch_profile(ready, _cancel_event):
+        assert local_started.wait(timeout=1)
+        run = SimpleNamespace(status="stopped")
+        ready(run)
+        return run
+
+    finals = executor.launch_profiled(
+        {"profile": launch_profile}, local_repos=("local",)
+    )
+
+    assert finals["profile"].status == "stopped"
+    assert released.is_set()
+    process.send_signal.assert_called()
 
 
 def test_execute_fail_fast(executor_deps):
