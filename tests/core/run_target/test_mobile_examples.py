@@ -113,6 +113,115 @@ def test_android_discovery_accepts_modern_and_legacy_avd_identity(
     assert candidate["binding"]["android"]["avd_name"] == "Pixel_9_API_35"
 
 
+@pytest.mark.parametrize(
+    ("configured_component", "resolver_output", "ready"),
+    [
+        (
+            "com.example.product/com.example.product.MainActivity",
+            (
+                "priority=0 preferredOrder=0 match=0x108000 "
+                "specificIndex=-1 isDefault=false\n"
+                "com.example.product/.MainActivity"
+            ),
+            True,
+        ),
+        (
+            "com.example.product/.MainActivity",
+            "com.example.product/com.example.product.MainActivity",
+            True,
+        ),
+        (
+            "com.example.product/.MainActivity",
+            "com.example.other/.MainActivity",
+            False,
+        ),
+        (
+            "com.example.product/.MainActivity",
+            "com.example.product/.OtherActivity",
+            False,
+        ),
+        (
+            "com.example.product/.MainActivity",
+            "com.example.product/.MainActivityAlias",
+            False,
+        ),
+        (
+            "com.example.product/.MainActivity",
+            "unexpected-metadata\ncom.example.product/.MainActivity",
+            False,
+        ),
+        (
+            "com.example.product/.MainActivity",
+            (
+                "com.example.product/.MainActivity\n"
+                "com.example.product/.SecondaryActivity"
+            ),
+            False,
+        ),
+    ],
+    ids=[
+        "full-configured-short-resolved-with-metadata",
+        "short-configured-full-resolved",
+        "wrong-package",
+        "wrong-class",
+        "prefix-only-match",
+        "malformed-output",
+        "ambiguous-components",
+    ],
+)
+def test_android_discovery_requires_one_equivalent_resolved_component(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    configured_component: str,
+    resolver_output: str,
+    ready: bool,
+) -> None:
+    backend = android_backend
+    fixture = json.loads(
+        (_FIXTURES / "mobile-android-devices-redacted.json").read_text()
+    )
+    template = _android_template()
+    template["component"] = configured_component
+    request = _request()
+    request["options"] = {
+        "package": template["package"],
+        "component": configured_component,
+        "instrumentation": None,
+        "platform": "android",
+        "transport": "emulator",
+    }
+    properties = fixture["properties"]["emulator-5554"]
+    monkeypatch.setattr(backend, "load_request", lambda: request)
+    monkeypatch.setattr(
+        backend,
+        "load_bindings",
+        lambda: {"paths": {"android": template}, "aliases": {}},
+    )
+    monkeypatch.setattr(
+        backend, "_adb_service", lambda _: b"emulator-5554 device product:device"
+    )
+
+    def shell(_serial: str, command: str, *, getprop: bool = True) -> str:
+        if getprop:
+            return properties.get(command, "")
+        if command.startswith("cmd package path "):
+            return "package:/data/app/base.apk"
+        if command.startswith("cmd package resolve-activity "):
+            return resolver_output
+        raise AssertionError(command)
+
+    monkeypatch.setattr(backend, "_adb_shell", shell)
+    backend.discover()
+
+    (candidate,) = json.loads(capsys.readouterr().out)["candidates"]
+    assert candidate["ready"] is ready
+    if ready:
+        assert candidate["reason"] is None
+        assert candidate["binding"]["android"]["component"] == configured_component
+    else:
+        assert candidate["reason"] is not None
+
+
 def test_flutter_fixture_classifies_android_and_preserves_platform_in_private_descriptor():
     backend = flutter_backend
     devices = json.loads(

@@ -46,6 +46,35 @@ _PACKAGE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
 _COMPONENT = re.compile(
     r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+/(?:[A-Za-z][A-Za-z0-9_.$]*|\.[A-Za-z][A-Za-z0-9_.$]*)$"
 )
+_RESOLVER_METADATA = re.compile(
+    r"^priority=-?[0-9]+ preferredOrder=-?[0-9]+ match=0x[0-9A-Fa-f]+ "
+    r"specificIndex=-?[0-9]+ isDefault=(?:true|false)$"
+)
+
+
+def _component_identity(package: str, component: str) -> tuple[str, str]:
+    """Return a package and fully qualified activity class for a component."""
+    component_package, activity = component.split("/", 1)
+    if component_package != package:
+        raise _error("invalid", "Android component does not match package")
+    return package, package + activity if activity.startswith(".") else activity
+
+
+def _resolved_component_identity(output: str) -> tuple[str, str] | None:
+    """Parse one ``resolve-activity --brief`` component, or reject the reply."""
+    lines = output.splitlines()
+    if len(lines) == 2 and _RESOLVER_METADATA.fullmatch(lines[0]):
+        component = lines[1]
+    elif len(lines) == 1:
+        component = lines[0]
+    else:
+        return None
+    if _COMPONENT.fullmatch(component) is None:
+        return None
+    package, _ = component.split("/", 1)
+    return _component_identity(package, component)
+
+
 _FIXTURE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _TASK_KEY = re.compile(r"^[A-Za-z0-9:_./-]{1,128}$")
 _TCP = re.compile(r"^tcp:([1-9][0-9]{0,4})$")
@@ -200,8 +229,7 @@ class AndroidBinding:
             raise _error("invalid", "Invalid Android USB binding")
         package = _text(data["package"], pattern=_PACKAGE, field="package")
         component = _text(data["component"], pattern=_COMPONENT, field="component")
-        if not component.startswith(package + "/"):
-            raise _error("invalid", "Android component does not match package")
+        _component_identity(package, component)
         raw_capabilities = data["capabilities"]
         if (
             not isinstance(raw_capabilities, list)
@@ -270,7 +298,9 @@ class AndroidProfileOptions:
             raise _error("invalid", "Invalid Android profile transport")
         if transport is not None and transport != binding.transport:
             raise _error("unavailable", "Android profile transport is unavailable")
-        if package != binding.package or component != binding.component:
+        if _component_identity(package, component) != _component_identity(
+            binding.package, binding.component
+        ):
             raise _error("invalid", "Android profile does not match selected target")
         return cls(package, component, instrument, platform, transport)
 
@@ -701,6 +731,10 @@ class AndroidSessionOwner:
             )
             decoded = json.loads(payload.decode("utf-8"))
             identity = strict_object(decoded, {"package", "component"})
+            package = _text(identity["package"], pattern=_PACKAGE, field="package")
+            component = _text(
+                identity["component"], pattern=_COMPONENT, field="component"
+            )
         except (
             OSError,
             UnicodeDecodeError,
@@ -710,9 +744,8 @@ class AndroidSessionOwner:
             raise _error(
                 "unavailable", "Declared Android package inspection failed"
             ) from error
-        if (
-            identity["package"] != self.target.binding.package
-            or identity["component"] != self.target.binding.component
+        if _component_identity(package, component) != _component_identity(
+            self.target.binding.package, self.target.binding.component
         ):
             raise _error(
                 "invalid", "Verified Android artifact does not match selected app"
@@ -754,7 +787,11 @@ class AndroidSessionOwner:
             "--brief",
             self.target.binding.component,
         )
-        if self.target.binding.component not in resolved.decode("utf-8", "replace"):
+        if _resolved_component_identity(
+            resolved.decode("utf-8", "replace")
+        ) != _component_identity(
+            self.target.binding.package, self.target.binding.component
+        ):
             raise _error(
                 "unhealthy", "Installed Android app identity was not acknowledged"
             )

@@ -22,6 +22,8 @@ from mship.backends.common import (
 from mship.core.android_session import (
     AndroidBinding,
     AndroidProfileOptions,
+    _component_identity,
+    _resolved_component_identity,
     main as owner_main,
 )
 from mship.core.session_inputs import SessionError
@@ -255,7 +257,9 @@ def _app_ready(binding: AndroidBinding) -> bool:
         f"cmd package resolve-activity --brief {binding.component}",
         getprop=False,
     )
-    return binding.component in resolved
+    return _resolved_component_identity(resolved) == _component_identity(
+        binding.package, binding.component
+    )
 
 
 def _dynamic_binding(

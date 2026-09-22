@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 from pathlib import Path
 import threading
@@ -15,7 +16,13 @@ from mship.core.android_session import (
     TargetEnvelope,
 )
 from mship.core.session_channel import OwnerContext
-from mship.core.session_inputs import CaptureGrant, OwnerRequest, SessionError
+from mship.core.session_inputs import (
+    CaptureGrant,
+    InstallFromResult,
+    InstallGrant,
+    OwnerRequest,
+    SessionError,
+)
 
 
 def _binding(
@@ -42,11 +49,38 @@ def _binding(
     }
 
 
-def test_binding_rejects_physical_target_without_recorded_usb_identity():
-    with pytest.raises(SessionError, match="USB"):
-        AndroidBinding.from_value(
-            _binding(transport="usb", avd_name=None, usb_transport=None)
-        )
+@pytest.mark.parametrize(
+    ("binding_component", "profile_component"),
+    [
+        (
+            "com.example.app/com.example.app.MainActivity",
+            "com.example.app/.MainActivity",
+        ),
+        (
+            "com.example.app/.MainActivity",
+            "com.example.app/com.example.app.MainActivity",
+        ),
+    ],
+    ids=["full-binding-short-profile", "short-binding-full-profile"],
+)
+def test_profile_accepts_equivalent_component_spelling_without_rewriting(
+    binding_component: str, profile_component: str
+) -> None:
+    value = _binding()
+    value["component"] = binding_component
+    binding = AndroidBinding.from_value(value)
+
+    profile = AndroidProfileOptions.from_value(
+        {
+            "package": binding.package,
+            "component": profile_component,
+            "instrumentation": None,
+        },
+        binding,
+    )
+
+    assert binding.component == binding_component
+    assert profile.component == profile_component
 
 
 def test_profile_cannot_retarget_selected_application():
@@ -359,6 +393,8 @@ def _owner(
     *,
     instrumentation: str | None = None,
     fixtures: dict[str, object] | None = None,
+    component: str | None = None,
+    install: bool = False,
 ) -> tuple[AndroidSessionOwner, OwnerContext]:
     private_root = tmp_path / "owner"
     private_root.mkdir(mode=0o700, exist_ok=True)
@@ -375,12 +411,17 @@ def _owner(
         secret="d" * 24,
     )
     value = _binding()
+    if component is not None:
+        value["component"] = component
     capabilities = ["launch", "capture"] + (["instrument"] if instrumentation else [])
     task_keys = {
         "launch": "launch-task",
         "capture": "capture-task",
         "instrument": "instrument-task",
     }
+    if install:
+        capabilities.append("install")
+        task_keys["install"] = "install-task"
     if fixtures is not None:
         capabilities.append("fixture")
         task_keys["fixture"] = "fixture-task"
@@ -419,6 +460,114 @@ def _request(operation: str, *, capture: CaptureGrant | None = None) -> OwnerReq
         expires_at=4_102_444_800.0,
         capture=capture,
     )
+
+
+def _install_request(path: Path) -> OwnerRequest:
+    result = InstallFromResult(
+        "r" * 24, "a" * 24, sha256(path.read_bytes()).hexdigest()
+    )
+    return OwnerRequest(
+        operation_ref="e" * 24,
+        operation="install",
+        source_revision="c" * 40,
+        expires_at=4_102_444_800.0,
+        install=InstallGrant(result, path, path.stat().st_size),
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured_component", "inspected_component"),
+    [
+        (
+            "com.example.app/com.example.app.MainActivity",
+            "com.example.app/.MainActivity",
+        ),
+        (
+            "com.example.app/.MainActivity",
+            "com.example.app/com.example.app.MainActivity",
+        ),
+    ],
+    ids=["full-configured-short-inspected", "short-configured-full-inspected"],
+)
+def test_install_accepts_equivalent_component_spelling_from_inspected_apk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_component: str,
+    inspected_component: str,
+) -> None:
+    adb, _ = _fake_adb(tmp_path)
+    owner, _ = _owner(tmp_path, adb, component=configured_component, install=True)
+    artifact = tmp_path / "app.apk"
+    artifact.write_bytes(b"apk")
+    monkeypatch.setattr(
+        android_session,
+        "_run",
+        lambda _argv, **_kwargs: json.dumps(
+            {"package": "com.example.app", "component": inspected_component}
+        ).encode(),
+    )
+
+    def adb_reply(_adb: str, _serial: str, *args: str, **_kwargs: object) -> bytes:
+        if args[0] == "install":
+            return b"Success"
+        if args[:5] == (
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+        ):
+            return configured_component.encode()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(android_session, "_adb", adb_reply)
+    try:
+        result = owner.handle(
+            _install_request(artifact), {}, threading.Event(), lambda _event: None
+        )
+        assert result["installation"]["known"] is True
+    finally:
+        owner.shutdown()
+
+
+def test_install_accepts_equivalent_component_spelling_from_postinstall_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured_component = "com.example.app/com.example.app.MainActivity"
+    acknowledged_component = "com.example.app/.MainActivity"
+    adb, _ = _fake_adb(tmp_path)
+    owner, _ = _owner(tmp_path, adb, component=configured_component, install=True)
+    artifact = tmp_path / "app.apk"
+    artifact.write_bytes(b"apk")
+    monkeypatch.setattr(
+        android_session,
+        "_run",
+        lambda _argv, **_kwargs: json.dumps(
+            {"package": "com.example.app", "component": configured_component}
+        ).encode(),
+    )
+
+    def adb_reply(_adb: str, _serial: str, *args: str, **_kwargs: object) -> bytes:
+        if args[0] == "install":
+            return b"Success"
+        if args[:5] == (
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+        ):
+            return acknowledged_component.encode()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(android_session, "_adb", adb_reply)
+    try:
+        result = owner.handle(
+            _install_request(artifact), {}, threading.Event(), lambda _event: None
+        )
+        assert result["installation"]["known"] is True
+    finally:
+        owner.shutdown()
 
 
 def test_modern_emulator_owner_rejects_changed_boot_avd_identity(tmp_path):

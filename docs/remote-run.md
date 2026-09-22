@@ -309,6 +309,12 @@ project-owned backends retain the established protocol and may opt into only a
 compatible `android` or `flutter` session owner. Physical iOS remains
 unavailable until a concrete native USB owner exists.
 
+Native Android component checks treat `com.example.app/.MainActivity` and
+`com.example.app/com.example.app.MainActivity` as the same activity in discovery,
+profile/binding validation, APK inspection, and post-install acknowledgement.
+The configured spelling is preserved; another package or activity is not a
+match. Malformed or ambiguous activity resolver output is rejected.
+
 The browser launch owner retains one Playwright connection and the actual page
 for the whole run. Logs and capture use its authenticated, owner-private Unix
 control socket, not a second Playwright connection or a search for a matching
