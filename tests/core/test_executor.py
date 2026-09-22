@@ -1,12 +1,20 @@
+import os
+import shlex
+import signal
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from mship.core.config import ConfigLoader, WorkspaceConfig
-from mship.core.executor import RepoExecutor, ExecutionResult, RepoResult
+from mship.core.config import ConfigLoader, Healthcheck, RepoConfig, WorkspaceConfig
+from mship.core.executor import ExecutionResult, RepoExecutor, RepoResult
 from mship.core.graph import DependencyGraph
+from mship.core.healthcheck import HealthcheckResult, HealthcheckRunner
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellRunner, ShellResult
 
@@ -42,7 +50,9 @@ def executor_deps(workspace: Path, mock_shell: MagicMock):
 
 def test_execute_runs_in_dependency_order(executor_deps):
     config, graph, state_mgr, mock_shell = executor_deps
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("test", repos=["shared", "auth-service", "api-gateway"])
 
     assert mock_shell.run_task.call_count == 3
@@ -53,6 +63,343 @@ def test_execute_runs_in_dependency_order(executor_deps):
     assert shared_idx < auth_idx < api_idx
 
 
+def test_profile_launches_follow_dependency_tiers_after_preflight(executor_deps):
+    config, graph, state_mgr, mock_shell = executor_deps
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
+    started: list[str] = []
+
+    def launch(repo: str):
+        def _launch(ready, _cancel_event) -> str:
+            started.append(repo)
+            value = f"run-{repo}"
+            ready(value)
+            return value
+
+        return _launch
+
+    results = executor.launch_profiled(
+        {
+            "shared": launch("shared"),
+            "auth-service": launch("auth-service"),
+            "api-gateway": launch("api-gateway"),
+        }
+    )
+
+    assert started == ["shared", "auth-service", "api-gateway"]
+    assert results == {
+        "shared": "run-shared",
+        "auth-service": "run-auth-service",
+        "api-gateway": "run-api-gateway",
+    }
+
+
+def test_profile_dependency_starts_after_upstream_ready_not_upstream_exit(
+    executor_deps,
+):
+    config, graph, state_mgr, mock_shell = executor_deps
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
+    dependent_started = Event()
+
+    def upstream(ready, _cancel_event) -> str:
+        ready("run-shared")
+        assert dependent_started.wait(timeout=1)
+        return "run-shared"
+
+    def dependent(ready, _cancel_event) -> str:
+        dependent_started.set()
+        ready("run-auth")
+        return "run-auth"
+
+    results = executor.launch_profiled({"shared": upstream, "auth-service": dependent})
+
+    assert results == {"shared": "run-shared", "auth-service": "run-auth"}
+
+
+def test_profile_sibling_failure_cancels_only_ready_owner(tmp_path: Path, mock_shell):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "first": RepoConfig(path=tmp_path / "first", type="service"),
+            "second": RepoConfig(path=tmp_path / "second", type="service"),
+            "third": RepoConfig(path=tmp_path / "third", type="service"),
+        },
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(state_dir),
+        mock_shell,
+        healthcheck=MagicMock(),
+    )
+    first_ready = Event()
+    release_first = Event()
+    cancelled: list[str] = []
+    pre_ready_cancelled = Event()
+
+    def first(ready, _cancel_event) -> str:
+        ready("run-first")
+        first_ready.set()
+        assert release_first.wait(timeout=1)
+        return "run-first"
+
+    def second(_ready, _cancel_event) -> str:
+        assert first_ready.wait(timeout=1)
+        raise RuntimeError("second launch failed")
+
+    def third(_ready, cancel_event) -> str:
+        assert cancel_event.wait(timeout=1)
+        pre_ready_cancelled.set()
+        return "run-third"
+
+    def cancel(run: str) -> None:
+        cancelled.append(run)
+        release_first.set()
+
+    with pytest.raises(RuntimeError, match="second launch failed"):
+        executor.launch_profiled(
+            {"first": first, "second": second, "third": third},
+            cancel=cancel,
+        )
+    assert cancelled == ["run-first"]
+
+    assert pre_ready_cancelled.is_set()
+
+
+def test_profile_post_ready_failure_cancels_live_sibling(tmp_path: Path, mock_shell):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "first": RepoConfig(path=tmp_path / "first", type="service"),
+            "second": RepoConfig(path=tmp_path / "second", type="service"),
+        },
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(state_dir),
+        mock_shell,
+        healthcheck=MagicMock(),
+    )
+    first_ready = Event()
+    release_first = Event()
+    first_run = SimpleNamespace(status="active")
+    second_run = SimpleNamespace(status="active")
+    cancelled: list[object] = []
+
+    def first(ready, _cancel_event):
+        ready(first_run)
+        first_ready.set()
+        assert release_first.wait(timeout=1)
+        return SimpleNamespace(status="stopped")
+
+    def second(ready, _cancel_event):
+        assert first_ready.wait(timeout=1)
+        ready(second_run)
+        raise RuntimeError("second run exited")
+
+    def cancel(run) -> None:
+        cancelled.append(run)
+        if run is first_run:
+            release_first.set()
+
+    with pytest.raises(RuntimeError, match="second run exited"):
+        executor.launch_profiled({"first": first, "second": second}, cancel=cancel)
+
+    assert len(cancelled) == 2
+    assert cancelled[0] is first_run
+    assert cancelled[1] is second_run
+
+
+
+@pytest.mark.parametrize("exit_code", [0, 17])
+def test_mixed_foreground_readiness_requires_successful_completion(
+    tmp_path: Path, mock_shell, exit_code
+):
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={"local": RepoConfig(path=tmp_path, type="service")},
+    )
+    process = MagicMock()
+    process.poll.return_value = exit_code
+    process.wait.return_value = exit_code
+    process.returncode = exit_code
+    mock_shell.run_streaming.return_value = process
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(tmp_path / ".mothership"),
+        mock_shell,
+        healthcheck=MagicMock(),
+    )
+    readiness = []
+
+    def ready(run):
+        readiness.append(run.status)
+
+    if exit_code:
+        with pytest.raises(RuntimeError):
+            executor.launch_local("local", None, ready, Event(), lambda run: None)
+        assert readiness == []
+    else:
+        executor.launch_local("local", None, ready, Event(), lambda run: None)
+        assert readiness == ["stopped"]
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="uses /proc to distinguish live descendants from zombies",
+)
+@pytest.mark.parametrize(
+    ("start_mode", "outcome"),
+    [
+        ("background", "complete"),
+        ("foreground", "complete"),
+        ("foreground", "detached"),
+        ("foreground", "fail"),
+        ("background", "healthcheck-fail"),
+    ],
+)
+def test_mixed_local_cleanup_stops_descendants_after_leader_exit(
+    tmp_path: Path, start_mode, outcome
+):
+    leaf = tmp_path / "leaf.py"
+    leaf.write_text(
+        "import os, signal, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path('leaf-pid').write_text(str(os.getpid()))\n"
+        "while True: time.sleep(.01)\n"
+    )
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "subprocess.Popen([sys.executable, 'leaf.py'])\n"
+        "while not Path('leaf-pid').exists(): time.sleep(.01)\n"
+        + (
+            "raise SystemExit(0)\n"
+            if start_mode == "background" or outcome == "detached"
+            else "while True: time.sleep(.01)\n"
+        )
+    )
+    processes = []
+
+    class Shell(ShellRunner):
+        def build_command(self, command, env_runner=None):
+            if command == "task run":
+                return shlex.join([sys.executable, str(parent)])
+            assert command == "task healthy"
+            return shlex.join(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; exit(0 if Path('leaf-pid').exists() else 1)",
+                ]
+            )
+
+        def run_streaming(self, *args, **kwargs):
+            process = super().run_streaming(*args, **kwargs)
+            processes.append(process)
+            return process
+
+    shell = Shell()
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "local": RepoConfig(
+                path=tmp_path,
+                type="service",
+                start_mode=start_mode,
+                healthcheck=Healthcheck(
+                    task="healthy", timeout="5s", retry_interval="20ms"
+                ),
+            ),
+            "profile": RepoConfig(
+                path=tmp_path,
+                type="service",
+                depends_on=["local"]
+                if start_mode == "background" or outcome == "detached"
+                else [],
+            ),
+        },
+    )
+
+    class Healthchecks(HealthcheckRunner):
+        def wait(self, *args, **kwargs):
+            ready = super().wait(*args, **kwargs)
+            if outcome == "healthcheck-fail":
+                assert ready.ready
+                return HealthcheckResult(ready=False, message="unhealthy", duration_s=0)
+            return ready
+
+    executor = RepoExecutor(
+        config,
+        DependencyGraph(config),
+        StateManager(tmp_path / ".mothership"),
+        shell,
+        Healthchecks(shell),
+    )
+    profile_started = False
+
+    def launch_profile(ready, _cancel_event):
+        nonlocal profile_started
+        profile_started = True
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "leaf-pid").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        pid = int((tmp_path / "leaf-pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        if outcome == "fail":
+            raise RuntimeError("profile failed")
+        ready(SimpleNamespace(status="active"))
+        return SimpleNamespace(status="stopped")
+
+    try:
+        if outcome in {"fail", "healthcheck-fail"}:
+            with pytest.raises(RuntimeError):
+                executor.launch_profiled(
+                    {"profile": launch_profile}, local_repos=("local",)
+                )
+        else:
+            executor.launch_profiled(
+                {"profile": launch_profile}, local_repos=("local",)
+            )
+        assert profile_started is (outcome != "healthcheck-fail")
+        pid = int((tmp_path / "leaf-pid").read_text())
+        status = Path(f"/proc/{pid}/stat")
+        assert (
+            not status.exists()
+            or status.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+        )
+        assert all(process.returncode is not None for process in processes)
+    finally:
+        # Reap only fixture-owned processes if the regression fails.
+        marker = tmp_path / "leaf-pid"
+        if marker.exists():
+            pid = int(marker.read_text())
+            cmdline = Path(f"/proc/{pid}/cmdline")
+            if (
+                cmdline.exists()
+                and b"leaf.py" in cmdline.read_bytes()
+                and Path(f"/proc/{pid}/cwd").resolve() == tmp_path
+            ):
+                os.kill(pid, signal.SIGKILL)
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+                process.wait()
+
+
 def test_execute_fail_fast(executor_deps):
     config, graph, state_mgr, mock_shell = executor_deps
     mock_shell.run_task.side_effect = [
@@ -60,7 +407,9 @@ def test_execute_fail_fast(executor_deps):
         ShellResult(returncode=0, stdout="ok", stderr=""),
         ShellResult(returncode=0, stdout="ok", stderr=""),
     ]
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("test", repos=["shared", "auth-service", "api-gateway"])
     assert result.success is False
     assert mock_shell.run_task.call_count == 1
@@ -73,7 +422,9 @@ def test_execute_all_flag(executor_deps):
         ShellResult(returncode=0, stdout="ok", stderr=""),
         ShellResult(returncode=0, stdout="ok", stderr=""),
     ]
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute(
         "test", repos=["shared", "auth-service", "api-gateway"], run_all=True
     )
@@ -104,7 +455,9 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute("test", repos=["shared"])
     mock_shell.run_task.assert_called_once()
     call_kwargs = mock_shell.run_task.call_args.kwargs
@@ -132,7 +485,9 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute("test", repos=["shared"])
     call_kwargs = mock_shell.run_task.call_args.kwargs
     assert call_kwargs["env_runner"] == "dotenvx run --"
@@ -160,7 +515,9 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute("test", repos=["shared"])
     call_kwargs = mock_shell.run_task.call_args.kwargs
     assert call_kwargs["env_runner"] == "op run --"
@@ -168,7 +525,9 @@ repos:
 
 def test_execute_updates_test_results(executor_deps):
     config, graph, state_mgr, mock_shell = executor_deps
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute(
         "test",
         repos=["shared", "auth-service", "api-gateway"],
@@ -181,7 +540,9 @@ def test_execute_updates_test_results(executor_deps):
     assert task.test_results["api-gateway"].status == "pass"
 
 
-def test_execute_skips_test_when_in_not_applicable(workspace: Path, mock_shell: MagicMock):
+def test_execute_skips_test_when_in_not_applicable(
+    workspace: Path, mock_shell: MagicMock
+):
     """Repos that declare `not_applicable: [test]` are skipped — no `task test` invocation,
     and the test result is recorded as `status="skip"`. See #109.
     """
@@ -219,9 +580,13 @@ repos:
     )
     state_mgr.save(WorkspaceState(tasks={"test-task": task}))
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute(
-        "test", repos=["shared", "fixtures"], task_slug="test-task",
+        "test",
+        repos=["shared", "fixtures"],
+        task_slug="test-task",
     )
 
     # `task test` was invoked once (for shared) — fixtures was skipped.
@@ -243,14 +608,18 @@ repos:
 
 def test_upstream_env_no_task_slug(executor_deps):
     config, graph, state_mgr, mock_shell = executor_deps
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     env = executor.resolve_upstream_env("auth-service", None)
     assert env == {}
 
 
 def test_upstream_env_no_worktrees(executor_deps):
     config, graph, state_mgr, mock_shell = executor_deps
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     # test-task has no worktrees
     env = executor.resolve_upstream_env("auth-service", "test-task")
     assert env == {}
@@ -266,7 +635,9 @@ def test_upstream_env_with_worktrees(executor_deps):
     }
     state_mgr.save(state)
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     env = executor.resolve_upstream_env("auth-service", "test-task")
     assert env["UPSTREAM_SHARED"] == "/tmp/shared-wt"
     assert env["UPSTREAM_SHARED_TYPE"] == "compile"
@@ -282,7 +653,9 @@ def test_upstream_env_hyphenated_name(executor_deps):
     }
     state_mgr.save(state)
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     env = executor.resolve_upstream_env("api-gateway", "test-task")
     assert "UPSTREAM_SHARED" in env
     assert "UPSTREAM_AUTH_SERVICE" in env
@@ -297,7 +670,9 @@ def test_execute_passes_upstream_env(executor_deps):
     }
     state_mgr.save(state)
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute(
         "test",
         repos=["shared", "auth-service"],
@@ -311,7 +686,11 @@ def test_execute_passes_upstream_env(executor_deps):
     assert auth_call.kwargs["env"]["UPSTREAM_SHARED_TYPE"] == "compile"
 
     # shared call should have no upstream env (no dependencies)
-    shared_call = next(c for c in calls if "shared" in str(c.kwargs["cwd"]) and "auth" not in str(c.kwargs["cwd"]))
+    shared_call = next(
+        c
+        for c in calls
+        if "shared" in str(c.kwargs["cwd"]) and "auth" not in str(c.kwargs["cwd"])
+    )
     assert shared_call.kwargs["env"] is None
 
 
@@ -342,7 +721,9 @@ def test_execute_uses_worktree_path_when_available(workspace: Path):
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute("test", repos=["shared"], task_slug="wt-test")
 
     # Should run in worktree path, not repo config path
@@ -353,7 +734,9 @@ def test_execute_uses_worktree_path_when_available(workspace: Path):
 def test_execute_falls_back_to_repo_path_without_worktree(executor_deps):
     """Without worktrees, executor uses the repo config path."""
     config, graph, state_mgr, mock_shell = executor_deps
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     executor.execute("test", repos=["shared"], task_slug="test-task")
 
     call_kwargs = mock_shell.run_task.call_args.kwargs
@@ -403,7 +786,9 @@ repos:
     state_mgr.save(state)
 
     mock_shell = MagicMock(spec=ShellRunner)
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     env = executor.resolve_upstream_env("ios-app", "type-test")
     assert env["UPSTREAM_SHARED"] == "/tmp/shared-wt"
     assert env["UPSTREAM_SHARED_TYPE"] == "compile"
@@ -437,7 +822,9 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("test", repos=["shared", "auth-service", "api-gateway"])
     assert result.success
     assert mock_shell.run_task.call_count == 3
@@ -475,7 +862,9 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     cwd = executor._resolve_cwd("web", None)
     assert cwd == web
 
@@ -507,7 +896,9 @@ repos:
     popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("run", repos=["shared"])
 
     assert result.success
@@ -533,7 +924,9 @@ def test_foreground_start_mode_uses_run_streaming(workspace: Path):
     popen_mock.wait.return_value = 0
     mock_shell.run_streaming.return_value = popen_mock
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("run", repos=["shared"])
     # run_task should NOT be called for foreground run
     mock_shell.run_task.assert_not_called()
@@ -570,7 +963,9 @@ repos:
     popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("run", repos=["shared"])
 
     assert len(result.background_processes) == 1
@@ -603,7 +998,9 @@ repos:
     popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("run", repos=["shared"])
     assert result.results[0].background_pid == 55555
 
@@ -619,7 +1016,9 @@ def test_foreground_repo_result_has_no_pid(workspace: Path):
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("test", repos=["shared"])
     assert result.results[0].background_pid is None
 
@@ -644,9 +1043,13 @@ repos:
     state_mgr = StateManager(state_dir)
 
     mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run_task.return_value = ShellResult(returncode=1, stdout="", stderr="fail")
+    mock_shell.run_task.return_value = ShellResult(
+        returncode=1, stdout="", stderr="fail"
+    )
 
-    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    executor = RepoExecutor(
+        config, graph, state_mgr, mock_shell, healthcheck=MagicMock()
+    )
     result = executor.execute("test", repos=["shared", "auth-service"])
     assert not result.success
     assert mock_shell.run_task.call_count == 1
@@ -681,6 +1084,7 @@ repos:
     mock_shell.run_streaming.return_value = popen_mock
 
     from mship.core.healthcheck import HealthcheckRunner
+
     hc_runner = HealthcheckRunner(mock_shell)
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=hc_runner)
@@ -727,6 +1131,7 @@ repos:
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
     from mship.core.healthcheck import HealthcheckRunner
+
     hc_runner = HealthcheckRunner(mock_shell)
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=hc_runner)
@@ -767,6 +1172,7 @@ repos:
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
     from mship.core.healthcheck import HealthcheckRunner
+
     hc_runner = HealthcheckRunner(mock_shell)
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=hc_runner)
@@ -778,8 +1184,10 @@ repos:
 def test_repo_result_has_duration_ms_default():
     from mship.core.executor import RepoResult
     from mship.util.shell import ShellResult
+
     r = RepoResult(
-        repo="x", task_name="test",
+        repo="x",
+        task_name="test",
         shell_result=ShellResult(returncode=0, stdout="", stderr=""),
     )
     assert r.duration_ms == 0
@@ -851,9 +1259,10 @@ repos:
 
     class _Shell(_ShellRunner):
         def build_command(self, command: str, env_runner: str | None = None) -> str:
-            return command[len("task "):] if command.startswith("task ") else command
+            return command[len("task ") :] if command.startswith("task ") else command
 
     from mship.core.healthcheck import HealthcheckRunner
+
     shell = _Shell()
     hc = HealthcheckRunner(shell)
 

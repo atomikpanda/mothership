@@ -41,27 +41,39 @@ Wire contract (Task 5's client parses this):
       recognized artifact is turned into an ERROR (an error line + a
       non-zero exit code), matching local `capture.run_capture`. `run`/
       `build` never emit an artifact block.
-    - The LAST line always matches `__MSHIP_EXIT__:<nonce> <code>\\n` where
+    - A quiet legacy operation emits the nonce-tagged control line
+      `__MSHIP_KEEPALIVE__:<nonce>\n` every 30 seconds. It is never child
+      output and the client consumes it without rendering it; this keeps the
+      proxied response alive without changing task-result framing.
+    - The LAST line always matches `__MSHIP_EXIT__:<nonce> <code>\n` where
       <code> is a base-10 int (0 == success). This conveys the remote
       task's exit code as DATA, never as an HTTP error status — a non-zero
       task exit does not raise; the client must parse this trailing line
       (matched against its nonce) to learn the real result and mirror it as
       its own process exit code.
 """
+
 from __future__ import annotations
 
+from pathlib import Path
 import errno
 import hashlib
 import io
-import queue
+import json
+import os
+import re
+import secrets
 import shlex
 import shutil
+import stat
+import sys
 import tarfile
 import tempfile
 import threading
-from collections.abc import Sequence
-from dataclasses import dataclass
-from pathlib import Path
+import time
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from typing import Iterator, Protocol
 
 try:
@@ -72,12 +84,43 @@ except ModuleNotFoundError:
 from mship.core import capture as _cap
 from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
-from mship.core.run_ref import RunRefNameError
+from mship.core import host_tools
+from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
+from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
+from mship.core.tool_process import ToolOperationRegistry
+from mship.core.task_result_publication import (
+    AuthenticatedExecutionProvenance,
+    TaskResultPublisher,
+)
+from mship.core.task_results import TaskResultStore
+from mship.core.session_channel import (
+    CLAIM_TTL_SECONDS,
+    OwnerClient,
+    OwnerContext,
+    decode_private_json,
+)
+from mship.core.session_inputs import (
+    OwnerRequest,
+    SessionError,
+    identifier,
+    strict_object,
+)
+from mship.core.session_runtime import (
+    SESSION_RESERVED_INPUTS,
+    SessionPreparation,
+)
+from mship.core.run_target.models import BackendConfig, DiscoveryRequest
+from mship.core.run_target.host import (
+    TARGET_BINDINGS_FILE,
+    TARGET_CONTEXT_FILE,
+    TARGET_REQUEST_FILE,
+    owner_profile_input_files,
+    _decode_profile_json,
+)
 from mship.core.run_ref import run_ref as build_run_ref
 from mship.util.shell import (
     ShellCancellationUnsupported,
     ShellCancelled,
-    _terminate_owned_process_group,
     ensure_cancellable_shell_supported,
 )
 from mship.util.taskfile import taskfile_has_target
@@ -95,6 +138,10 @@ EXIT_MARKER = "__MSHIP_EXIT__"
 # exactly that many raw (uncompressed) tar bytes. Nonce-tagged for the same
 # anti-spoof reason as EXIT_MARKER. See module docstring for the full framing.
 ARTIFACT_MARKER = "__MSHIP_ARTIFACTS__"
+
+# Empty nonce-tagged control line used only to keep an accepted quiet legacy
+# response body alive. It is neither child output nor a terminal record.
+KEEPALIVE_MARKER = "__MSHIP_KEEPALIVE__"
 
 
 class UnknownVerbError(ValueError):
@@ -114,10 +161,9 @@ class MaterializeError(Exception):
 
 class ShellLike(Protocol):
     """The subset of `mship.util.shell.ShellRunner` this module needs.
-    `.run_argv` issues git plumbing (fetch/worktree add/reset, base-freshness
-    probes); `.run_streaming` launches the go-task target itself so its
-    output can be drained incrementally. Same shapes as the real
-    `ShellRunner` — tests inject a fake implementing just this surface."""
+    `.run_argv` issues git plumbing; `.spawn_argv` launches the selected
+    tool with structured arguments and an exact server-owned environment.
+    Process supervision belongs to ToolOperationRegistry."""
 
     def run_argv(
         self,
@@ -128,9 +174,7 @@ class ShellLike(Protocol):
         cancel_event: threading.Event | None = None,
     ): ...
 
-    def run_streaming(self, command: str, cwd: Path, env: dict[str, str] | None = None): ...
-
-    def build_command(self, command: str, env_runner: str | None = None) -> str: ...
+    def spawn_argv(self, args: Sequence[str], cwd: Path | int, env: dict[str, str]): ...
 
 
 @dataclass
@@ -154,6 +198,10 @@ class RemoteExecDeps:
     shell: ShellLike
     workspace_root: Path
     cancel_event: threading.Event | None = None
+    operations: ToolOperationRegistry | None = None
+    result_store: TaskResultStore | None = None
+    execution_provenance: AuthenticatedExecutionProvenance | None = None
+    work_item_id_for_task: Callable[[str], str | None] | None = None
 
 
 def _hub_dir(workspace_root: Path, task: str) -> Path:
@@ -163,25 +211,147 @@ def _hub_dir(workspace_root: Path, task: str) -> Path:
 def _acquire_task_execution_lock(
     workspace_root: Path,
     task: str,
-) -> io.TextIOWrapper:
+    *,
+    repo: str | None = None,
+) -> ExitStack:
+    """Keep legacy task-wide exclusion while isolating distinct source roots."""
     if fcntl is None:
         raise OSError("POSIX file locking is unavailable")
-
     lock_dir = workspace_root / ".mothership" / "remote-exec-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
-    lock_file = (lock_dir / f"{digest}.lock").open("a+")
+    locks = ExitStack()
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+        task_file = locks.enter_context((lock_dir / f"{digest}.lock").open("a+"))
+        mode = fcntl.LOCK_EX if repo is None else fcntl.LOCK_SH
+        fcntl.flock(task_file.fileno(), mode | fcntl.LOCK_NB)
+        if repo is not None:
+            digest = hashlib.sha256(f"{task}\0{repo}".encode()).hexdigest()
+            repo_file = locks.enter_context((lock_dir / f"{digest}.lock").open("a+"))
+            fcntl.flock(repo_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        lock_file.close()
+        locks.close()
         if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
             raise BlockingIOError(exc.errno, exc.strerror) from exc
         raise
     except BaseException:
-        lock_file.close()
+        locks.close()
         raise
-    return lock_file
+    return locks
+
+
+def cleanup_task_worktrees(
+    task: str,
+    repos: Sequence[str],
+    expected_revisions: Mapping[str, str],
+    *,
+    deps: RemoteExecDeps,
+) -> str:
+    """Remove only selected, clean worktrees at their recorded revisions."""
+    try:
+        if canonical_run_ref_segment(task) != task:
+            return "invalid"
+    except RunRefNameError:
+        return "invalid"
+    if (
+        not repos
+        or len(set(repos)) != len(repos)
+        or set(repos) != set(expected_revisions)
+        or any(
+            not isinstance(repo, str)
+            or not isinstance(expected_revisions.get(repo), str)
+            or re.fullmatch(
+                r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", expected_revisions[repo]
+            ) is None
+            for repo in repos
+        )
+    ):
+        return "invalid"
+    workspace = deps.workspace_root.resolve()
+    hub = _hub_dir(workspace, task)
+    if (
+        hub.parent != workspace / ".worktrees"
+        or hub.parent.is_symlink()
+        or hub.is_symlink()
+    ):
+        return "invalid"
+    targets: dict[str, tuple[Path, Path, str, str]] = {}
+    for name in repos:
+        config = deps.config.repos.get(name)
+        if config is None:
+            return "invalid"
+        root_name = config.git_root or name
+        root_config = deps.config.repos.get(root_name)
+        if root_config is None:
+            return "invalid"
+        repo_path = Path(root_config.path)
+        if repo_path.is_symlink() or not repo_path.resolve().is_relative_to(workspace):
+            return "invalid"
+        target = hub / root_name
+        if target.parent != hub or target.is_symlink():
+            return "invalid"
+        targets[root_name] = (
+            repo_path,
+            target,
+            deps.config.branch_pattern.replace("{slug}", task),
+            expected_revisions[name],
+        )
+    if _operations(deps).admission_status(task) != "available":
+        return _operations(deps).admission_status(task)
+    try:
+        lock_file = _acquire_task_execution_lock(deps.workspace_root, task)
+    except BlockingIOError:
+        return "busy"
+    except OSError:
+        return "unknown"
+    try:
+        if _operations(deps).admission_status(task) != "available":
+            return _operations(deps).admission_status(task)
+        for root_name, (repo_path, target, branch, expected) in targets.items():
+            if not os.path.lexists(target):
+                continue
+            listing = _run_shell(
+                deps.shell, ("git", "worktree", "list", "--porcelain"), repo_path,
+                cancel_event=deps.cancel_event,
+            )
+            if listing.returncode != 0:
+                return "unknown"
+            records = [record.splitlines() for record in listing.stdout.split("\n\n")]
+            lines = next(
+                (record for record in records if record and record[0] == f"worktree {target}"),
+                None,
+            )
+            if lines is None or (
+                "detached" not in lines and f"branch refs/heads/{branch}" not in lines
+            ):
+                return "unknown"
+            head = _git_rev(deps.shell, target, "HEAD", cancel_event=deps.cancel_event)
+            if head != expected:
+                return "unknown"
+            if "detached" in lines and _git_rev(
+                deps.shell, repo_path, build_run_ref(task, root_name),
+                cancel_event=deps.cancel_event,
+            ) != expected:
+                return "unknown"
+            dirty = _run_shell(
+                deps.shell,
+                ("git", "status", "--porcelain", "--untracked-files=normal"),
+                target,
+                cancel_event=deps.cancel_event,
+            )
+            if dirty.returncode != 0 or dirty.stdout:
+                return "unknown"
+            removal = _run_shell(
+                deps.shell, ("git", "worktree", "remove", "--force", str(target)),
+                repo_path, cancel_event=deps.cancel_event,
+            )
+            if removal.returncode != 0 or os.path.lexists(target):
+                return "unknown"
+        return "removed"
+    except (OSError, RunRefNameError):
+        return "unknown"
+    finally:
+        lock_file.close()
 
 
 def _run_shell(
@@ -419,111 +589,79 @@ def materialize_worktree(
         )
 
 
-def _drain_to_queue(proc, q: "queue.Queue[str]") -> list[threading.Thread]:
-    """Start daemon threads that read `proc.stdout`/`proc.stderr` line by
-    line and push each line onto `q` as it's produced — the same drain
-    pattern as `util.stream_printer.drain_to_printer`, but feeding a queue
-    a generator can pull from instead of a printer."""
+class _CaptureDigestReader(io.BufferedReader):
+    def __init__(self, raw: io.RawIOBase):
+        super().__init__(raw)
+        self.digest = hashlib.sha256()
 
-    def _drain(stream):
-        if stream is None:
-            return
-        try:
-            while True:
-                line = stream.readline()
-                if not isinstance(line, str) or line == "":
-                    break
-                q.put(line)
-        except Exception:
-            pass
-        finally:
-            try:
-                stream.close()
-            except Exception:
-                pass
-
-    threads = [
-        threading.Thread(target=_drain, args=(proc.stdout,), daemon=True),
-        threading.Thread(target=_drain, args=(proc.stderr,), daemon=True),
-    ]
-    for t in threads:
-        t.start()
-    return threads
+    def read(self, size: int | None = -1) -> bytes:
+        data = super().read(size)
+        self.digest.update(data)
+        return data
 
 
-def _stream_proc_lines(
-    proc,
-    cancel_event: threading.Event | None = None,
-) -> Iterator[bytes]:
-    """Yield each stdout/stderr line from `proc` as UTF-8 bytes AS IT'S
-    PRODUCED (not buffered until the process exits) — this is what makes
-    `run_verb_stream` a live stream rather than a final blob. Returns once
-    both pipes are drained and the process has exited, or returns False when
-    the response reports that its client disconnected."""
-    q: "queue.Queue[str]" = queue.Queue()
-    threads = _drain_to_queue(proc, q)
-    poll = getattr(proc, "poll", None)
-
-    def process_is_running() -> bool:
-        if not callable(poll):
-            return False
-        try:
-            return poll() is None
-        except Exception:
-            return False
-
-    while (
-        any(t.is_alive() for t in threads)
-        or not q.empty()
-        or process_is_running()
-    ):
-        if cancel_event is not None and cancel_event.is_set():
-            return False
-        try:
-            line = q.get(timeout=0.05)
-        except queue.Empty:
-            continue
-        yield line.encode("utf-8", errors="replace")
-    for t in threads:
-        t.join(timeout=1.0)
-    return True
-
-
-def _terminate_proc(proc, *, completed: bool) -> None:
-    """Stop abnormal task trees; leave normally reaped groups untouched."""
-    if proc is None or completed:
-        return
-
-    try:
-        _terminate_owned_process_group(proc)
-    except Exception:
-        # Preserve cleanup for lightweight Popen-shaped fakes that do not expose
-        # the full process-group surface.
-        terminate = getattr(proc, "terminate", None)
-        if not callable(terminate):
-            return
-        try:
-            terminate()
-        except Exception:
-            return
-    wait = getattr(proc, "wait", None)
-    if not callable(wait):
-        return
-    try:
-        wait()
-    except Exception:
-        pass
-
-
-def _build_artifact_tar(artifacts: list[_cap.Artifact]) -> bytes:
-    """Pack the discovered artifact files into an in-memory tar, each stored
-    at its basename (e.g. `screen.png`, `layout.json`) rather than its full
-    remote temp-dir path — that's all Task 5's client needs to know to
-    reconstruct them under its own local capture directory."""
+def _build_artifact_tar(
+    artifacts: list[_cap.Artifact],
+    *,
+    directory_fd: int | None = None,
+    max_bytes: int | None = None,
+    expected_artifacts: Mapping[str, tuple[int, str]] | None = None,
+) -> bytes:
+    """Use the existing basename-only tar envelope; session reads stay fd-pinned."""
     buf = io.BytesIO()
+    total = 0
     with tarfile.open(fileobj=buf, mode="w") as tar:
         for artifact in artifacts:
-            tar.add(artifact.path, arcname=artifact.path.name)
+            if directory_fd is None:
+                tar.add(artifact.path, arcname=artifact.path.name)
+                continue
+            expected = (
+                None
+                if expected_artifacts is None
+                else expected_artifacts.get(artifact.path.name)
+            )
+            if expected is None and expected_artifacts is not None:
+                raise OSError("capture artifact has no owner acknowledgement")
+            fd = os.open(
+                artifact.path.name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            reader = _CaptureDigestReader if expected is not None else io.BufferedReader
+            with reader(io.FileIO(fd, "rb", closefd=True)) as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or info.st_size <= 0
+                ):
+                    raise OSError("capture artifact is not a private regular file")
+                if expected is not None and info.st_size != expected[0]:
+                    raise OSError(
+                        "capture artifact size does not match owner acknowledgement"
+                    )
+                total += info.st_size
+                if max_bytes is not None and total + 32 * 1024 > max_bytes:
+                    raise OSError("capture artifacts exceed the transfer limit")
+                member = tarfile.TarInfo(artifact.path.name)
+                member.size = info.st_size
+                member.mode = 0o600
+                tar.addfile(member, stream)
+                if (
+                    expected is not None
+                    and isinstance(stream, _CaptureDigestReader)
+                    and stream.digest.hexdigest() != expected[1]
+                ):
+                    raise OSError(
+                        "capture artifact bytes do not match owner acknowledgement"
+                    )
+                after = os.fstat(stream.fileno())
+                if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                ):
+                    raise OSError("capture artifact changed while being collected")
     return buf.getvalue()
 
 
@@ -538,34 +676,33 @@ def run_verb_stream(
     nonce: str,
     run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
-    """Run one remote execution stream while owning its per-task process lock.
-
-    Cancellable streams fail with framed infrastructure data before locking or
-    execution when this host cannot safely observe process-group cleanup.
-    """
-    if deps.cancel_event is not None:
-        try:
-            ensure_cancellable_shell_supported()
-        except ShellCancellationUnsupported:
-            yield b"error: remote execution unavailable; execution was not started\n"
-            yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
-            return
-
+    """Legacy wire adapter over the shared preparation/process owner."""
+    try:
+        ensure_cancellable_shell_supported()
+        task = canonical_run_ref_segment(task)
+    except ShellCancellationUnsupported, RunRefNameError:
+        yield b"error: remote execution unavailable; execution was not started\n"
+        yield f"{EXIT_MARKER}:{nonce} 1\n".encode()
+        return
     try:
         lock_file = _acquire_task_execution_lock(deps.workspace_root, task)
     except BlockingIOError:
         yield (
             f"error: remote task {task!r} is already running; "
             "try again after it finishes\n"
-        ).encode("utf-8")
-        yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
+        ).encode()
+        yield f"{EXIT_MARKER}:{nonce} 2\n".encode()
         return
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         yield b"error: remote-task locking failed; execution was not started\n"
-        yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
+        yield f"{EXIT_MARKER}:{nonce} 1\n".encode()
         return
-
     try:
+        admission = _operations(deps).admission_status(task)
+        if admission != "available":
+            yield f"error: remote task execution ownership is {admission}\n".encode()
+            yield f"{EXIT_MARKER}:{nonce} 2\n".encode()
+            return
         yield from _run_verb_stream_unlocked(
             verb,
             task,
@@ -577,10 +714,217 @@ def run_verb_stream(
             run_ref_repos=run_ref_repos,
         )
     finally:
+        lock_file.close()
+
+
+class _PreparationError(Exception):
+    def __init__(self, status: str, message: str, exit_code: int = 1):
+        super().__init__(message)
+        self.status = status
+        self.exit_code = exit_code
+
+
+def _operations(deps: RemoteExecDeps) -> ToolOperationRegistry:
+    if deps.operations is None:
+        deps.operations = ToolOperationRegistry(deps.workspace_root)
+    return deps.operations
+
+
+class _PreparedTask:
+    """One server-owned source preparation, shared by every adapter."""
+
+    def __init__(
+        self,
+        deps: RemoteExecDeps,
+        task: str,
+        repos: Sequence[str],
+        run_ref_repos: Sequence[str],
+    ):
+        self.deps = deps
+        self.task = canonical_run_ref_segment(task)
+        self.hub = _hub_dir(deps.workspace_root, self.task)
+        if not self.hub.resolve().is_relative_to(deps.workspace_root.resolve()):
+            raise _PreparationError("invalid", "task worktree escapes workspace", 2)
+        self.branch = deps.config.branch_pattern.replace("{slug}", self.task)
+        names = {name: name for name in deps.config.repos}
+        unknown = [name for name in (*repos, *run_ref_repos) if name not in names]
+        if unknown:
+            raise _PreparationError(
+                "invalid",
+                f"unknown repo(s) {', '.join(unknown)}; known repos: "
+                f"{', '.join(sorted(names)) or '(none)'}",
+                2,
+            )
+        self.repos = [names[name] for name in repos]
+        self.run_refs: dict[str, str] = {}
+        for name in set(run_ref_repos):
+            try:
+                self.run_refs[names[name]] = build_run_ref(self.task, names[name])
+            except RunRefNameError as exc:
+                raise _PreparationError(
+                    "invalid",
+                    "cannot build a run ref for this request",
+                    2,
+                ) from exc
+        self.materialized: dict[str, Path] = {}
+
+    def _top(self, name: str) -> Generator[bytes, None, Path]:
+        if name in self.materialized:
+            return self.materialized[name]
+        deps = self.deps
+        config = deps.config.repos[name]
+        path = self.hub / name
+        if not path.resolve().is_relative_to(self.hub.resolve()):
+            raise _PreparationError("invalid", "repository worktree escapes task", 2)
+        ref = self.run_refs.get(name)
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
+            if ref is None:
+                warning = check_base_freshness(
+                    deps.shell,
+                    config.path,
+                    config.base_branch,
+                    cancel_event=deps.cancel_event,
+                )
+                if warning is not None:
+                    yield f"{warning}\n".encode()
+            materialize_worktree(
+                deps.shell,
+                config.path,
+                path,
+                self.branch,
+                repo_name=name,
+                run_ref=ref,
+                cancel_event=deps.cancel_event,
+            )
+        except MaterializeError as exc:
+            raise _PreparationError("materialization_error", str(exc)) from exc
+        self.materialized[name] = path
+        return path
+
+    def prepare(self, name: str) -> Generator[bytes, None, Path]:
+        config = self.deps.config.repos[name]
+        if config.git_root is not None:
+            parent = yield from self._top(config.git_root)
+            path = parent / config.path
+            if not path.resolve().is_relative_to(parent.resolve()):
+                raise _PreparationError("invalid", "child repository escapes parent", 2)
+            self.materialized[name] = path
+        else:
+            path = yield from self._top(name)
+        return path
+
+    def context(self, name: str) -> ToolContext:
+        try:
+            path = self.materialized[name].resolve(strict=True)
+        except OSError as exc:
+            raise _PreparationError(
+                "materialization_error",
+                "prepared worktree is unavailable",
+            ) from exc
+        if not path.is_relative_to(self.hub.resolve()) or not path.is_relative_to(
+            self.deps.workspace_root.resolve()
+        ):
+            raise _PreparationError("invalid", "prepared worktree escapes workspace", 2)
+        revision = _git_rev(
+            self.deps.shell,
+            path,
+            "HEAD",
+            cancel_event=self.deps.cancel_event,
+        )
+        if (
+            revision is None
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision) is None
+        ):
+            raise _PreparationError(
+                "materialization_error",
+                "cannot verify prepared source identity",
+            )
+        return ToolContext(
+            task=self.task,
+            repo=name,
+            worktree=path,
+            source_revision=revision,
+            env_runner=self.deps.config.repos[name].env_runner
+            or self.deps.config.env_runner,
+        )
+
+
+def _setup_events(
+    prepared: _PreparedTask, name: str, context: ToolContext
+) -> Generator[ToolEvent, None, None]:
+    deps = prepared.deps
+    config = deps.config.repos[name]
+    actual = config.tasks.get("setup", "setup")
+    if "setup" in config.not_applicable or not taskfile_has_target(
+        context.worktree, actual
+    ):
+        yield ToolEvent("result", result=ToolResult("completed", exit_code=0))
+        return
+    key = remote_setup.setup_key(context.worktree, config.setup_inputs)
+    key_path = remote_setup.key_file(deps.workspace_root, prepared.task, name)
+    if not remote_setup.needs_setup(key_path, key):
+        yield ToolEvent("result", result=ToolResult("completed", exit_code=0))
+        return
+    setup_argv: tuple[str, ...] = ("task", actual)
+    setup_env: dict[str, str] = {}
+    if config.host_tools is not None:
+        setup_argv = ("mise", "exec", "--", "task", actual)
+        setup_env = host_tools.mise_environment(
+            worktree=context.worktree,
+            state_dir=deps.workspace_root / ".mothership",
+            declaration=config.host_tools,
+            safe=False,
+        )
+    request = ToolRequest(task=prepared.task, repo=name, argv=setup_argv, env=setup_env)
+    stream = _operations(deps).run(
+        request,
+        context,
+        cancel_event=deps.cancel_event,
+        spawn=deps.shell.spawn_argv,
+    )
+    try:
+        for event in stream:
+            if event.kind == "result" and event.result is not None:
+                if event.result.status == "completed" and event.result.exit_code == 0:
+                    verified = prepared.context(name)
+                    if (
+                        verified.source_revision != context.source_revision
+                        or verified.worktree != context.worktree
+                    ):
+                        raise _PreparationError(
+                            "materialization_error",
+                            "setup changed prepared source identity",
+                        )
+                    remote_setup.record_setup(key_path, key)
+            yield event
+    finally:
+        stream.close()
+
+
+def _legacy_events(
+    events: Iterator[ToolEvent], *, nonce: str
+) -> Generator[bytes, None, ToolResult]:
+    """Adapt typed events without altering a child's unterminated output."""
+    result = ToolResult("protocol_error")
+    try:
+        for event in events:
+            if event.kind in {"stdout", "stderr"} and event.data:
+                yield event.data
+            elif event.kind == "keepalive":
+                yield f"{KEEPALIVE_MARKER}:{nonce}\n".encode()
+            elif event.kind == "result" and event.result is not None:
+                result = event.result
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
+    return result
+
+
+def _legacy_code(result: ToolResult) -> int:
+    if result.status == "completed":
+        return result.exit_code if result.exit_code is not None else 1
+    return 2 if result.status in {"invalid", "busy"} else 1
 
 
 def _run_verb_stream_unlocked(
@@ -594,302 +938,997 @@ def _run_verb_stream_unlocked(
     nonce: str,
     run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
-    """The serve-side body of `POST /exec/{verb}`.
-
-    A plain sync generator — the FastAPI endpoint runs it off the event
-    loop (e.g. via `starlette.concurrency.iterate_in_threadpool`) since it
-    does blocking subprocess/git I/O. For each repo, in order:
-
-      1. MOS-203 base-freshness check (auto-fetch + an optional warning
-         line — see `check_base_freshness`).
-      2. Materialize `<workspace_root>/.worktrees/<task>/<repo>` on the
-         task's branch (see `materialize_worktree`). `git_root` (nested
-         subdirectory) repos skip their own fetch/worktree-add and resolve
-         to a path under their parent's worktree instead, mirroring
-         `WorktreeManager.spawn`'s treatment of subdirectory services.
-      2b. A repo named in `run_ref_repos` is materialized from THIS host's own
-          scratch ref for the task instead — the operator pushed a commit
-          synthesized from their working tree straight here, so the revision is
-          already local and NO fetch (not even the base-freshness probe, which
-          exists only to refresh this host's view of origin) is issued for it.
-          Names are TOP-LEVEL git repo names, so a `git_root` child is covered
-          by its parent's entry.
-      3. Resolve the repo's go-task target for `verb` + its env_runner;
-         for `verb == "capture"` build the same env-var contract as local
-         capture (`MSHIP_CAPTURE_DIR` a fresh remote temp dir,
-         `MSHIP_CAPTURE_KINDS`, `MSHIP_CAPTURE_PLATFORM`) — see
-         `mship.core.capture.run_capture`.
-      4. Run it via `ShellRunner.run_streaming`, yielding each stdout/stderr
-         line as it's produced.
-      4b. For `verb == "capture"` only: once that repo's task exits, if it
-          succeeded and produced artifacts in `MSHIP_CAPTURE_DIR`
-          (`capture.discover_artifacts`), yield them as a length-prefixed
-          tar block (`ARTIFACT_MARKER` line + raw tar bytes — see module
-          docstring). A capture that exits 0 with NO recognized artifact is
-          turned into an error (an error line + a non-zero exit), matching
-          local `capture.run_capture`'s hard-error contract. Either way the
-          remote capture temp dir is removed afterward (even on a client
-          disconnect — see the per-repo `finally`). `run`/`build` skip this
-          entirely (stream-only).
-      5. Stop at the first repo whose task exits non-zero (fail-fast,
-         mirroring `RepoExecutor`'s tier behavior) rather than continuing
-         to the next repo.
-
-    Always ends with the trailing sentinel line
-    `f"{EXIT_MARKER}:{nonce} {code}\\n"` conveying the run's exit code as
-    DATA — never raises for a non-zero task exit (see module docstring for
-    the full wire contract). `nonce` is the per-request anti-spoof secret
-    (see `core/serve.py post_exec`); every control record is tagged with it.
-
-    Task 6 hardening (both fail the SAME way — an error line naming the
-    problem, then a non-zero `__MSHIP_EXIT__`, never a raised exception mid
-    generator):
-      - An unknown repo name (not in `deps.config.repos`) is rejected
-        UPFRONT, before the per-repo loop starts and before any git/task
-        command runs for ANY repo in the request (Task 3 previously left
-        this a raw `KeyError` on `config.repos[repo_name]`).
-      - A branch-materialize failure (a git fetch/checkout/reset/worktree-add
-        exiting non-zero — see `materialize_worktree`/`MaterializeError`)
-        stops at that repo exactly like a failing task would; already-yielded
-        output from earlier repos in the same request is preserved.
-    """
     if verb not in VERBS:
-        raise UnknownVerbError(
-            f"unknown verb {verb!r}; expected one of {VERBS}"
-        )
-
-    kinds: list[str] | None = None
-    if verb == "capture":
-        kinds = _cap.resolve_kinds(kind)
-
-    config = deps.config
-    shell = deps.shell
-    hub = _hub_dir(deps.workspace_root, task)
-    branch = config.branch_pattern.replace("{slug}", task)
-
-    # Select names through the trusted server configuration. These values are
-    # subsequently used in worktree paths, git refs/arguments, task names, and
-    # command working directories. Preserve the client's order and duplicates
-    # for execution while rebuilding each selected value from the server-owned
-    # key objects.
-    configured_names = {name: name for name in config.repos}
-    requested_names = [*repos, *(run_ref_repos or [])]
-    unknown_repos = [name for name in requested_names if name not in configured_names]
-    if unknown_repos:
-        yield (
-            f"error: unknown repo(s) {', '.join(unknown_repos)}; known "
-            f"repos: {', '.join(sorted(config.repos)) or '(none)'}\n"
-        ).encode("utf-8")
-        yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
-        return
-
-    repos = [configured_names[name] for name in repos]
-    scratch_repos = sorted({
-        configured_names[name] for name in (run_ref_repos or [])
-    })
-    run_refs: dict[str, str] = {}
-    for scratch_repo in scratch_repos:
-        try:
-            run_refs[scratch_repo] = build_run_ref(task, scratch_repo)
-        except RunRefNameError as exc:
-            # A name that cannot form a ref is refused before anything runs —
-            # as stream DATA, never a raised exception mid-generator, matching
-            # the unknown-repo guard above.
-            yield f"error: cannot build a run ref for this request: {exc}\n".encode("utf-8")
-            yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
-            return
-
-    materialized: dict[str, Path] = {}
+        raise UnknownVerbError(f"unknown verb {verb!r}; expected one of {VERBS}")
+    kinds = _cap.resolve_kinds(kind) if verb == "capture" else None
     exit_code = 0
-
-    def _ensure_materialized(top_repo: str) -> Iterator[bytes]:
-        """Materialize a TOP-LEVEL repo's task-branch worktree at
-        `<hub>/<repo>`, recording it in `materialized`. A generator so it can
-        yield the base-freshness warning or a clean materialization error through
-        the stream. Its `yield from` value (PEP 380) is True on success, False
-        if materialization fails or the client disconnects. A materialization
-        failure has already emitted its exit sentinel; cancellation simply
-        unwinds so the response can close.
-
-        Idempotent: a repo already in `materialized` (e.g. a parent brought in
-        while resolving an earlier `git_root` child, then reached again in the
-        loop, or a parent also listed explicitly in `repos`) is a no-op — it is
-        never re-fetched/reset."""
-        if top_repo in materialized:
-            return True
-        rc = config.repos[top_repo]
-        repo_path = rc.path
-        worktree_path = hub / top_repo
-        ref = run_refs.get(top_repo)
-
-        try:
-            if ref is None:
-                # Origin is the source of truth for this repo, so make sure this
-                # host's view of its base is current first (MOS-203). Skipped
-                # entirely on the scratch-ref path: nothing there comes from
-                # origin, and a fetch would be pure latency.
-                warning = check_base_freshness(
-                    shell,
-                    repo_path,
-                    rc.base_branch,
-                    cancel_event=deps.cancel_event,
-                )
-                if warning is not None:
-                    yield f"{warning}\n".encode("utf-8")
-
-            materialize_worktree(
-                shell,
-                repo_path,
-                worktree_path,
-                branch,
-                repo_name=top_repo,
-                run_ref=ref,
-                cancel_event=deps.cancel_event,
+    try:
+        prepared = _PreparedTask(deps, task, repos, run_ref_repos or ())
+        for name in prepared.repos:
+            yield from prepared.prepare(name)
+            context = prepared.context(name)
+            setup = yield from _legacy_events(
+                _setup_events(prepared, name, context), nonce=nonce
             )
-        except ShellCancelled:
-            return False
-        except MaterializeError as exc:
-            yield f"error: {exc}\n".encode("utf-8")
-            yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
-            return False
-
-        materialized[top_repo] = worktree_path
-        return True
-
-    def _ensure_setup(repo_name: str, repo_config, worktree_path: Path) -> Iterator[bytes]:
-        """Run `task setup` in a freshly-materialized worktree when it is
-        needed, streaming its output live exactly like the verb itself.
-
-        Git carries source, not dependencies. Without this, an exact-source run
-        against stale dependencies fails with a module-not-found that has no
-        visible relationship to the edit — the same confusing-staleness class
-        the rest of this feature exists to eliminate. So the host DERIVES them.
-
-        Keyed (see `core/remote_setup.py`): the first materialization on this
-        host, then only when the repo's declared `setup_inputs` change. Skipped
-        entirely for a repo that declares `setup` not applicable or whose
-        Taskfile has no such target — `task setup` in a repo that never defined
-        one exits non-zero, and that must not fail every remote run.
-
-        PEP 380 value: True to continue, False when setup FAILED — in which case
-        the error line and the exit sentinel have ALREADY been emitted and the
-        caller MUST return, exactly like `_ensure_materialized`.
-        """
-        if "setup" in repo_config.not_applicable:
-            return True
-        actual_setup = repo_config.tasks.get("setup", "setup")
-        if not taskfile_has_target(worktree_path, actual_setup):
-            return True
-
-        key = remote_setup.setup_key(worktree_path, repo_config.setup_inputs)
-        key_path = remote_setup.key_file(deps.workspace_root, task, repo_name)
-        if not remote_setup.needs_setup(key_path, key):
-            return True
-
-        yield f"setup: {repo_name} (task {actual_setup})\n".encode("utf-8")
-        env_runner = repo_config.env_runner or config.env_runner
-        command = shell.build_command(f"task {actual_setup}", env_runner)
-        completed = False
-        proc = None
-        try:
-            proc = shell.run_streaming(command, cwd=worktree_path, env=None)
-            if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
-                return False
-            setup_code = proc.wait()
-            completed = True
-        finally:
-            _terminate_proc(proc, completed=completed)
-
-        if setup_code != 0:
-            # Surface setup's OWN failure rather than letting the verb run
-            # against half-built dependencies and report something that does not
-            # name the real cause (spec ac18).
-            yield (
-                f"error: `task {actual_setup}` failed on the run host for repo "
-                f"{repo_name!r} (exit {setup_code}); the output above is setup's "
-                f"own. The {verb} was not started.\n"
-            ).encode("utf-8")
-            yield f"{EXIT_MARKER}:{nonce} {setup_code}\n".encode("utf-8")
-            return False
-
-        # Recorded only after a SUCCESSFUL setup: caching a failure would skip
-        # the retry that fixes it.
-        remote_setup.record_setup(key_path, key)
-        return True
-
-    for repo_name in repos:
-        repo_config = config.repos[repo_name]
-
-        if repo_config.git_root is not None:
-            # Subdirectory child (mirrors WorktreeManager.spawn): its git tree
-            # IS the parent's worktree. Guarantee the PARENT is materialized
-            # first (parent-first) — even when this request lists only the
-            # child, or lists it before its parent — then resolve the child's
-            # path UNDER the materialized parent worktree. Previously this fell
-            # back to a never-fetched `hub / git_root` dir, so the task could
-            # run against the serve host's stale/source tree.
-            if not (yield from _ensure_materialized(repo_config.git_root)):
+            if setup.status == "cancelled":
                 return
-            parent_wt = materialized[repo_config.git_root]
-            worktree_path = parent_wt / repo_config.path
-            materialized[repo_name] = worktree_path
+            if setup.status != "completed" or setup.exit_code != 0:
+                exit_code = _legacy_code(setup)
+                yield (
+                    f"error: setup failed on the run host for repo {name!r} "
+                    f"(exit {exit_code}); the {verb} was not started.\n"
+                ).encode()
+                break
+            out_dir: Path | None = None
+            try:
+                env: dict[str, str] = {}
+                if verb == "capture":
+                    out_dir = Path(tempfile.mkdtemp(prefix="mship-remote-capture-"))
+                    env = {
+                        "MSHIP_CAPTURE_DIR": str(out_dir),
+                        "MSHIP_CAPTURE_KINDS": ",".join(kinds or []),
+                    }
+                    if platform is not None:
+                        env["MSHIP_CAPTURE_PLATFORM"] = platform
+                actual = deps.config.repos[name].tasks.get(verb, verb)
+                request = ToolRequest(
+                    task=task, repo=name, argv=("task", actual), env=env
+                )
+                result = yield from _legacy_events(
+                    _operations(deps).run(
+                        request,
+                        context,
+                        cancel_event=deps.cancel_event,
+                        spawn=deps.shell.spawn_argv,
+                    ),
+                    nonce=nonce,
+                )
+                if result.status == "cancelled":
+                    return
+                exit_code = _legacy_code(result)
+                if result.status != "completed":
+                    yield f"error: remote execution {result.status}\n".encode()
+                if verb == "capture" and exit_code == 0:
+                    artifacts = _cap.discover_artifacts(out_dir, kinds or [])
+                    if artifacts:
+                        data = _build_artifact_tar(artifacts)
+                        yield f"{ARTIFACT_MARKER}:{nonce} {len(data)}\n".encode()
+                        yield data
+                    else:
+                        yield (
+                            f"error: capture target produced no recognized artifact "
+                            f"in {out_dir} for kinds {kinds or []}.\n"
+                        ).encode()
+                        exit_code = 1
+            finally:
+                if out_dir is not None:
+                    shutil.rmtree(out_dir, ignore_errors=True)
+            if exit_code != 0:
+                break
+    except _PreparationError as exc:
+        yield f"error: {exc}\n".encode()
+        exit_code = exc.exit_code
+    except ShellCancelled:
+        return
+    except OSError, ValueError:
+        yield b"error: remote execution preparation or evidence failed\n"
+        exit_code = 1
+    yield f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode()
+
+
+def _host_tool_runner(
+    *,
+    command: host_tools.HostToolCommand,
+    context: ToolContext,
+    deps: RemoteExecDeps,
+) -> host_tools.HostToolInvocation:
+    """Run one server-created mise/catalog probe through the existing owner."""
+    request = ToolRequest(
+        task=context.task,
+        repo=context.repo,
+        argv=command.argv,
+        env=command.environment,
+        preparation="launch" if command.mutating else "discover",
+        max_stdout_bytes=None if command.mutating else 64 * 1024,
+        max_stderr_bytes=None if command.mutating else 16 * 1024,
+        timeout_seconds=None if command.mutating else 20,
+    )
+    probe_context = replace(context, env_runner=None)
+    events = _operations(deps).run(
+        request,
+        probe_context,
+        cancel_event=deps.cancel_event,
+        spawn=deps.shell.spawn_argv,
+    )
+    result = ToolResult("protocol_error")
+    try:
+        for event in events:
+            if event.kind == "result" and event.result is not None:
+                result = event.result
+    finally:
+        events.close()
+    return host_tools.HostToolInvocation(
+        status=result.status,
+        exit_code=result.exit_code,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def _host_tool_report(
+    request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
+) -> ToolResult | None:
+    """Resolve a typed host-tools request after server source materialization."""
+    if request.host_tools_action is None:
+        return None
+    declaration = deps.config.repos[request.repo].host_tools
+    if declaration is None:
+        resolution = host_tools.HostToolResolution(
+            host_tools.server_identity(deps.workspace_root / ".mothership"),
+            context.task,
+            context.repo,
+            context.source_revision,
+            None,
+            None,
+            None,
+            "invalid_configuration",
+        )
+    else:
+        state_dir = deps.workspace_root / ".mothership"
+        identity = host_tools.server_identity(state_dir)
+        runner = lambda command: _host_tool_runner(
+            command=command, context=context, deps=deps
+        )
+        if request.host_tools_action == "bootstrap":
+            resolution = host_tools.bootstrap(
+                declaration=declaration,
+                worktree=context.worktree,
+                state_dir=state_dir,
+                identity=identity,
+                task=context.task,
+                repo=context.repo,
+                source_revision=context.source_revision,
+                run=runner,
+            )
         else:
-            if not (yield from _ensure_materialized(repo_name)):
-                return
-            worktree_path = materialized[repo_name]
+            resolution = host_tools.diagnose(
+                declaration=declaration,
+                worktree=context.worktree,
+                state_dir=state_dir,
+                identity=identity,
+                task=context.task,
+                repo=context.repo,
+                source_revision=context.source_revision,
+                run=runner,
+            )
+    report = host_tools.doctor_report(resolution).safe_dict()
+    return ToolResult(
+        "completed",
+        exit_code=0,
+        host_tools_report=report,
+    )
 
-        if not (yield from _ensure_setup(repo_name, repo_config, worktree_path)):
+
+def _bootstrap_host_tool_events(
+    request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
+) -> Generator[ToolEvent, None, None]:
+    """Bootstrap once, forwarding the actual install stream before its report."""
+    declaration = deps.config.repos[request.repo].host_tools
+    state_dir = deps.workspace_root / ".mothership"
+    if declaration is None:
+        report = _host_tool_report(request, context, deps=deps)
+        yield ToolEvent("result", result=report or ToolResult("invalid"))
+        return
+    identity = host_tools.server_identity(state_dir)
+    runner = lambda command: _host_tool_runner(
+        command=command, context=context, deps=deps
+    )
+    resolution = host_tools.diagnose(
+        declaration=declaration,
+        worktree=context.worktree,
+        state_dir=state_dir,
+        identity=identity,
+        task=context.task,
+        repo=context.repo,
+        source_revision=context.source_revision,
+        run=runner,
+    )
+    if resolution.status == "healthy":
+        host_tools.record_receipt(state_dir, resolution)
+        yield ToolEvent(
+            "result",
+            result=ToolResult(
+                "completed",
+                exit_code=0,
+                host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+            ),
+        )
+        return
+    if resolution.status in {"invalid_configuration", "missing_mise"}:
+        yield ToolEvent(
+            "result",
+            result=ToolResult(
+                "completed",
+                exit_code=1,
+                host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+            ),
+        )
+        return
+    environment = host_tools.mise_environment(
+        worktree=context.worktree,
+        state_dir=state_dir,
+        declaration=declaration,
+        locked=resolution.lock_digest is not None,
+        safe=False,
+    )
+    install = ToolRequest(
+        task=context.task,
+        repo=context.repo,
+        argv=("mise", "install"),
+        env=environment,
+        preparation="launch",
+    )
+    stream = _operations(deps).run(
+        install,
+        replace(context, env_runner=None),
+        cancel_event=deps.cancel_event,
+        spawn=deps.shell.spawn_argv,
+    )
+    outcome = ToolResult("protocol_error")
+    owner: ToolResult | None = None
+    try:
+        for event in stream:
+            if event.kind == "started" and event.result is not None:
+                owner = event.result
+                yield event
+            elif event.kind in {"stdout", "stderr"}:
+                yield event
+            elif event.kind == "result" and event.result is not None:
+                outcome = event.result
+    finally:
+        stream.close()
+    if outcome.status == "completed" and outcome.exit_code == 0:
+        resolution = host_tools.diagnose(
+            declaration=declaration,
+            worktree=context.worktree,
+            state_dir=state_dir,
+            identity=identity,
+            task=context.task,
+            repo=context.repo,
+            source_revision=context.source_revision,
+            run=runner,
+        )
+        if resolution.status == "healthy":
+            host_tools.record_receipt(state_dir, resolution)
+    result = ToolResult(
+        "completed",
+        exit_code=0 if resolution.status == "healthy" else 1,
+        owner_ref=None if owner is None else owner.owner_ref,
+        generation=None if owner is None else owner.generation,
+        source_revision=None if owner is None else owner.source_revision,
+        host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+    )
+    yield ToolEvent("result", result=result)
+
+
+def _resolve_host_tools_for_launch(
+    request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
+) -> ToolResult | ToolRequest | None:
+    """Gate setup and launch on server-side readiness; never provision here."""
+    declaration = deps.config.repos[request.repo].host_tools
+    if declaration is None:
+        return request
+    state_dir = deps.workspace_root / ".mothership"
+    resolution = host_tools.diagnose(
+        declaration=declaration,
+        worktree=context.worktree,
+        state_dir=state_dir,
+        identity=host_tools.server_identity(state_dir),
+        task=context.task,
+        repo=context.repo,
+        source_revision=context.source_revision,
+        run=lambda command: _host_tool_runner(
+            command=command, context=context, deps=deps
+        ),
+    )
+    if resolution.status != "healthy":
+        return ToolResult(
+            "completed",
+            exit_code=1,
+            host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+        )
+    actual = (
+        request.argv[1]
+        if len(request.argv) == 2 and request.argv[0] == "task"
+        else None
+    )
+    if actual is None:
+        return None
+    if any(key.startswith("MISE_") for key in request.env):
+        return ToolResult("invalid")
+    environment = host_tools.mise_environment(
+        worktree=context.worktree,
+        state_dir=state_dir,
+        declaration=declaration,
+        safe=False,
+    )
+    return replace(
+        request,
+        argv=("mise", "exec", "--", "task", actual),
+        env={**request.env, **environment},
+    )
+
+
+def _session_configuration(
+    request: ToolRequest, deps: RemoteExecDeps
+) -> tuple[DiscoveryRequest, BackendConfig] | None:
+    payload = request.input_files.get(TARGET_REQUEST_FILE)
+    if payload is None:
+        return None
+    profile_request = DiscoveryRequest.model_validate(_decode_profile_json(payload))
+    repo = deps.config.repos.get(request.repo)
+    if repo is None:
+        return None
+    backend = repo.run_backends.get(profile_request.backend)
+    if backend is None or backend.session_owner is None:
+        return None
+    return profile_request, backend
+
+
+def _resolve_tool_request(
+    request: ToolRequest, *, deps: RemoteExecDeps
+) -> ToolRequest | None:
+    """Resolve configured task keys and host-only profile inputs before launch."""
+    repo_config = deps.config.repos.get(request.repo)
+    if repo_config is None:
+        return None
+    if SESSION_RESERVED_INPUTS & (request.input_files.keys() | request.env.keys()):
+        return None
+    if request.host_tools_action is not None:
+        if request.env or request.input_files or request.task_key is not None:
+            return None
+        expected = "discover" if request.host_tools_action == "diagnose" else "launch"
+        if request.preparation != expected:
+            return None
+        return request
+    try:
+        session_config = _session_configuration(request, deps)
+        parent_inputs = None
+        if session_config is not None:
+            if session_config[0].operation.startswith("source-"):
+                return None
+            if request.env or set(request.input_files) - {
+                TARGET_REQUEST_FILE,
+                TARGET_CONTEXT_FILE,
+                "MSHIP_SESSION_OPERATION_FILE",
+            }:
+                return None
+            if request.preparation == "observe":
+                if request.owner_ref is None or request.generation is None:
+                    return None
+                parent = _operations(deps).session_for_owner(
+                    task=request.task,
+                    repo=request.repo,
+                    owner_ref=request.owner_ref,
+                    generation=request.generation,
+                )
+                if parent is None:
+                    return None
+                _, parent_inputs = parent
+            action = request.input_files.get("MSHIP_SESSION_OPERATION_FILE")
+            if action is not None:
+                _decode_profile_json(action)
+        elif request.install_from_result is not None:
+            return None
+        if (
+            TARGET_REQUEST_FILE in request.input_files
+            and request.preparation == "observe"
+        ):
+            allowed_inputs = {TARGET_REQUEST_FILE}
+            if session_config is not None:
+                allowed_inputs.add("MSHIP_SESSION_OPERATION_FILE")
+            if request.env or set(request.input_files) - allowed_inputs:
+                return None
+            if (
+                request.owner_ref is None
+                or request.generation is None
+                or request.source_revision is None
+            ):
+                return None
+            parent_inputs = _operations(deps).inputs_for_owner(
+                task=request.task,
+                repo=request.repo,
+                owner_ref=request.owner_ref,
+                generation=request.generation,
+                source_revision=request.source_revision,
+            )
+            if parent_inputs is None:
+                return None
+        profile_inputs = {
+            TARGET_REQUEST_FILE,
+            TARGET_CONTEXT_FILE,
+            TARGET_BINDINGS_FILE,
+        } & request.input_files.keys()
+        input_files = (
+            owner_profile_input_files(
+                request.input_files,
+                task=request.task,
+                repo=request.repo,
+                config=repo_config,
+                task_key=request.task_key,
+                preparation=request.preparation,
+                source_revision=request.source_revision,
+                parent_input_files=parent_inputs,
+            )
+            if request.task_key is not None or profile_inputs
+            else dict(request.input_files)
+        )
+        if request.task_key is None:
+            return replace(request, input_files=input_files)
+        builtin_operation = None
+        backend = None
+        if TARGET_REQUEST_FILE in input_files:
+            profile_request = DiscoveryRequest.model_validate(
+                _decode_profile_json(input_files[TARGET_REQUEST_FILE])
+            )
+            backend = repo_config.run_backends[profile_request.backend]
+            builtin_operation = backend.builtin_operation(request.task_key)
+        if builtin_operation is not None and backend is not None:
+            assert backend.builtin is not None
+            argv = (sys.executable, "-I", "-m", "mship.backends", backend.builtin)
+            if builtin_operation == "discover":
+                argv += ("discover",)
+        else:
+            actual = repo_config.tasks.get(request.task_key)
+            if actual is None:
+                return None
+            argv = ("task", actual)
+        return replace(
+            request,
+            argv=argv,
+            task_key=None,
+            input_files=input_files,
+            install_from_result=None,
+        )
+    except TypeError, ValueError:
+        return None
+
+
+def run_tool_stream(
+    request: ToolRequest,
+    *,
+    deps: RemoteExecDeps,
+    capture_kinds: tuple[str, ...] | None = None,
+    capture_platform: str | None = None,
+    on_session_prepared: Callable[[OwnerContext], None] | None = None,
+    source_update_id: str | None = None,
+    owner_operation: str | None = None,
+    capture_directory: Path | None = None,
+) -> Generator[ToolEvent, None, None]:
+    """Execute one typed tool operation without a second transport/owner."""
+    task_key = request.task_key
+    install_from_result = request.install_from_result
+    resolved = _resolve_tool_request(request, deps=deps)
+    if resolved is None:
+        yield ToolEvent("result", result=ToolResult("invalid"))
+        return
+    request = resolved
+    try:
+        session_config = _session_configuration(request, deps)
+        if TARGET_REQUEST_FILE in request.input_files:
+            request = replace(
+                request, env={**request.env, "MSHIP_SESSION_PYTHON": sys.executable}
+            )
+        session = None
+        if session_config is not None and request.preparation != "discover":
+            profile_request, backend = session_config
+            session = SessionPreparation(
+                operation=profile_request.operation,
+                owner_kind=backend.session_owner or "",
+                sealed_context=request.input_files.get(TARGET_CONTEXT_FILE),
+                install=install_from_result,
+                result_store=deps.result_store,
+                capture_kinds=capture_kinds,
+                capture_platform=capture_platform,
+            )
+            if owner_operation is not None:
+                if (
+                    owner_operation != "source-release"
+                    or source_update_id is None
+                    or session.owner_kind != "flutter"
+                ):
+                    raise SessionError("invalid", "Invalid internal source operation")
+                session = replace(session, operation=owner_operation)
+        elif install_from_result is not None:
+            yield ToolEvent("result", result=ToolResult("invalid"))
             return
-
-        actual_task_name = repo_config.tasks.get(verb, verb)
-        env_runner = repo_config.env_runner or config.env_runner
-
-        # `out_dir`/`proc` live outside the try so the `finally` can always
-        # clean them up even if a client disconnect (GeneratorExit) fires at
-        # any `yield` below — before the temp dir would otherwise be removed,
-        # and while the task subprocess is still running (FIX 8).
-        out_dir: Path | None = None
-        proc = None
-        completed = False
-        try:
-            env: dict[str, str] | None = None
-            if verb == "capture":
-                out_dir = Path(tempfile.mkdtemp(prefix="mship-remote-capture-"))
-                env = {
-                    "MSHIP_CAPTURE_DIR": str(out_dir),
-                    "MSHIP_CAPTURE_KINDS": ",".join(kinds or []),
-                }
-                if platform is not None:
-                    env["MSHIP_CAPTURE_PLATFORM"] = platform
-
-            command = shell.build_command(f"task {actual_task_name}", env_runner)
-            proc = shell.run_streaming(command, cwd=worktree_path, env=env)
-            if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
+        elif (
+            request.preparation == "launch"
+            and TARGET_CONTEXT_FILE in request.input_files
+        ):
+            selected_request = _decode_profile_json(
+                request.input_files[TARGET_REQUEST_FILE]
+            )
+            if selected_request["operation"] == "run":
+                session = SessionPreparation(
+                    operation="run",
+                    owner_kind=None,
+                    sealed_context=request.input_files[TARGET_CONTEXT_FILE],
+                )
+        elif capture_kinds is not None:
+            if capture_directory is None or request.preparation != "observe":
+                yield ToolEvent("result", result=ToolResult("invalid"))
                 return
-            exit_code = proc.wait()
-            completed = True
-
-            if verb == "capture":
-                artifacts = _cap.discover_artifacts(out_dir, kinds or []) if exit_code == 0 else []
-                if artifacts:
-                    tar_bytes = _build_artifact_tar(artifacts)
-                    yield f"{ARTIFACT_MARKER}:{nonce} {len(tar_bytes)}\n".encode("utf-8")
-                    yield tar_bytes
-                elif exit_code == 0:
-                    # Parity with local `capture.run_capture`: a capture that
-                    # "succeeds" but produced nothing recognized is a hard
-                    # error, not a silent success.
-                    yield (
-                        f"error: capture target produced no recognized artifact "
-                        f"in {out_dir} for kinds {kinds or []}.\n"
-                    ).encode("utf-8")
-                    exit_code = 1
+            profile_request = _decode_profile_json(
+                request.input_files[TARGET_REQUEST_FILE]
+            )
+            if profile_request.get("operation") != "capture":
+                yield ToolEvent("result", result=ToolResult("invalid"))
+                return
+            request = replace(
+                request,
+                env={
+                    **request.env,
+                    "MSHIP_CAPTURE_DIR": str(capture_directory),
+                    "MSHIP_CAPTURE_KINDS": ",".join(capture_kinds),
+                    "MSHIP_CAPTURE_PLATFORM": capture_platform or "",
+                },
+            )
+    except ValueError, SessionError:
+        yield ToolEvent("result", result=ToolResult("invalid"))
+        return
+    operations = _operations(deps)
+    if request.preparation == "observe":
+        stream = operations.observe(
+            request,
+            cancel_event=deps.cancel_event,
+            spawn=deps.shell.spawn_argv,
+            session=session,
+            on_session_prepared=on_session_prepared,
+            source_update_id=source_update_id,
+        )
+        try:
+            yield from stream
         finally:
-            _terminate_proc(proc, completed=completed)
-            if out_dir is not None:
-                shutil.rmtree(out_dir, ignore_errors=True)
+            stream.close()
+        return
+    try:
+        ensure_cancellable_shell_supported()
+    except ShellCancellationUnsupported:
+        yield ToolEvent("result", result=ToolResult("unsupported"))
+        return
+    try:
+        repo_config = deps.config.repos[request.repo]
+        lock_file = _acquire_task_execution_lock(
+            deps.workspace_root,
+            request.task,
+            repo=repo_config.git_root or request.repo,
+        )
+    except BlockingIOError:
+        yield ToolEvent("result", result=ToolResult("busy"))
+        return
+    except OSError, UnicodeError:
+        yield ToolEvent("result", result=ToolResult("evidence_error"))
+        return
+    try:
+        admission = operations.admission_status(request.task, repo=request.repo)
+        if admission != "available":
+            yield ToolEvent("result", result=ToolResult(admission))
+            return
+        prepared = _PreparedTask(
+            deps,
+            request.task,
+            (request.repo,),
+            request.run_ref_repos,
+        )
+        # Preparation progress is not backend discovery output.
+        for _ in prepared.prepare(request.repo):
+            pass
+        context = prepared.context(request.repo)
+        if (
+            request.source_revision is not None
+            and request.source_revision != context.source_revision
+        ):
+            yield ToolEvent("result", result=ToolResult("materialization_error"))
+            return
+        if request.host_tools_action == "bootstrap":
+            yield from _bootstrap_host_tool_events(request, context, deps=deps)
+            return
+        if request.host_tools_action is not None:
+            report = _host_tool_report(request, context, deps=deps)
+            if report is None:
+                yield ToolEvent("result", result=ToolResult("invalid"))
+            else:
+                yield ToolEvent("result", result=report)
+            return
+        host_tools_resolution = _resolve_host_tools_for_launch(
+            request, context, deps=deps
+        )
+        if isinstance(host_tools_resolution, ToolResult):
+            yield ToolEvent("result", result=host_tools_resolution)
+            return
+        if host_tools_resolution is None:
+            yield ToolEvent("result", result=ToolResult("invalid"))
+            return
+        request = host_tools_resolution
+        if request.preparation == "launch":
+            setup_result = ToolResult("protocol_error")
+            setup_stream = _setup_events(prepared, request.repo, context)
+            try:
+                for event in setup_stream:
+                    if event.kind in {"stdout", "stderr"}:
+                        yield event
+                    elif event.kind == "result" and event.result is not None:
+                        setup_result = event.result
+            finally:
+                setup_stream.close()
+            if setup_result.status != "completed" or setup_result.exit_code != 0:
+                status = (
+                    setup_result.status
+                    if setup_result.status != "completed"
+                    else "launch_error"
+                )
+                yield ToolEvent("result", result=ToolResult(status))
+                return
+        publisher: TaskResultPublisher | None = None
+        publish_result = None
+        if task_key is not None:
+            declaration = deps.config.repos[request.repo].task_outputs.get(task_key)
+            if declaration is not None:
+                if deps.result_store is None:
+                    yield ToolEvent("result", result=ToolResult("evidence_error"))
+                    return
+                try:
+                    publisher = TaskResultPublisher.prepare(
+                        store=deps.result_store,
+                        declaration=declaration,
+                        context=context,
+                        task_key=task_key,
+                        output_parent=deps.workspace_root
+                        / ".mothership"
+                        / "task-output-roots",
+                        work_item_id=(
+                            None
+                            if deps.work_item_id_for_task is None
+                            else deps.work_item_id_for_task(request.task)
+                        ),
+                        provenance=deps.execution_provenance,
+                    )
+                except OSError, ValueError:
+                    yield ToolEvent("result", result=ToolResult("evidence_error"))
+                    return
+                # Server-owned values overwrite untrusted request environment.
+                request = replace(
+                    request,
+                    env={**request.env, **publisher.environment},
+                )
+                publish_result = publisher.publish
+        stream = operations.run(
+            request,
+            context,
+            cancel_event=deps.cancel_event,
+            spawn=deps.shell.spawn_argv,
+            publish_result=publish_result,
+            session=session,
+        )
+        try:
+            yield from stream
+        finally:
+            stream.close()
+            if publisher is not None:
+                publisher.cleanup()
+    except _PreparationError as exc:
+        yield ToolEvent("result", result=ToolResult(exc.status))
+    except ShellCancelled:
+        yield ToolEvent("result", result=ToolResult("cancelled"))
+    except OSError, ValueError:
+        yield ToolEvent("result", result=ToolResult("evidence_error"))
+    finally:
+        lock_file.close()
 
-        if exit_code != 0:
-            break
 
-    yield f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode("utf-8")
+def source_owner_operation(
+    operation: ToolRequest,
+    owner: OwnerContext,
+    name: str,
+    payload: Mapping[str, object],
+    *,
+    deps: RemoteExecDeps,
+) -> dict[str, object]:
+    """Run one server-authenticated source handoff step, never a caller command."""
+    stages = {
+        "source-reserve": "reserved",
+        "source-commit": "context-committed",
+        "source-release": "reloaded",
+        "source-abort": "aborted",
+    }
+    if name not in stages or owner.secret is None:
+        raise SessionError("invalid", "Invalid framework source control")
+    fields = {"update_id"}
+    if name in {"source-reserve", "source-commit"}:
+        fields.add("new_source_revision")
+    data = strict_object(dict(payload), fields)
+    update_id = identifier(data["update_id"])
+    if (
+        owner.task != operation.task
+        or owner.repo != operation.repo
+        or owner.owner_ref != operation.owner_ref
+        or owner.generation != operation.generation
+    ):
+        raise SessionError("invalid", "Source control does not match recorded owner")
+    if name == "source-release":
+        found = _operations(deps).session_for_owner(
+            task=owner.task,
+            repo=owner.repo,
+            owner_ref=owner.owner_ref,
+            generation=owner.generation,
+        )
+        if found is None:
+            raise SessionError("unknown", "Framework source owner is unavailable")
+        current, inputs = found
+        target = _decode_profile_json(inputs[TARGET_CONTEXT_FILE])
+        task_keys = target.get("task_keys")
+        if (
+            not isinstance(task_keys, dict)
+            or task_keys.get("reload") != operation.task_key
+            or current.source_revision != owner.source_revision
+        ):
+            raise SessionError("invalid", "Source reload task does not match owner")
+        request_body = _decode_profile_json(inputs[TARGET_REQUEST_FILE])
+        request_body["operation"] = "reload"
+        request = ToolRequest(
+            task=owner.task,
+            repo=owner.repo,
+            argv=(),
+            task_key=operation.task_key,
+            input_files={
+                TARGET_REQUEST_FILE: json.dumps(request_body, separators=(",", ":")),
+                "MSHIP_SESSION_OPERATION_FILE": json.dumps(data, separators=(",", ":")),
+            },
+            preparation="observe",
+            owner_ref=owner.owner_ref,
+            generation=owner.generation,
+            source_revision=current.source_revision,
+        )
+        stdout = bytearray()
+        outcome = None
+        reload_claim: OwnerRequest | None = None
+
+        def prepared(context: OwnerContext) -> None:
+            nonlocal reload_claim
+            if context.request is None or context.request.operation != "source-release":
+                raise SessionError("unknown", "Source reload authorization is missing")
+            reload_claim = context.request
+
+        events = run_tool_stream(
+            request,
+            deps=deps,
+            source_update_id=update_id,
+            owner_operation="source-release",
+            on_session_prepared=prepared,
+        )
+        try:
+            for event in events:
+                if event.kind == "stdout":
+                    if len(stdout) + len(event.data) > 64 * 1024:
+                        raise SessionError(
+                            "unknown", "Source reload acknowledgement is oversized"
+                        )
+                    stdout.extend(event.data)
+                elif event.kind == "result":
+                    outcome = event.result
+        finally:
+            events.close()
+        if outcome is None or outcome.status != "completed" or outcome.exit_code != 0:
+            raise SessionError("unknown", "Source reload was not acknowledged")
+        if reload_claim is None:
+            raise SessionError("unknown", "Source reload authorization is missing")
+        owner.verify_source_reload(reload_claim, update_id)
+        result = decode_private_json(bytes(stdout))
+    else:
+        request = OwnerRequest(
+            operation_ref=secrets.token_urlsafe(24),
+            operation=name,
+            source_revision=owner.source_revision,
+            expires_at=time.time() + CLAIM_TTL_SECONDS,
+        )
+        result = OwnerClient(owner.issue(request)).call(
+            name,
+            data,
+            cancel_event=deps.cancel_event,
+            timeout=30,
+        )
+    if result != {"update_id": update_id, "stage": stages[name]}:
+        raise SessionError("unknown", "Source control acknowledgement does not match")
+    return result
+
+
+def run_observe_capture_stream(
+    operation: ToolRequest,
+    *,
+    deps: RemoteExecDeps,
+    kinds: Sequence[str],
+    platform: str,
+    nonce: str,
+) -> Generator[bytes, None, None]:
+    """Capture through one existing owner without preparing any source or app."""
+    capture_directory: Path | None = None
+    capture_fd: int | None = None
+    capture_parent_fd: int | None = None
+    capture_authority: tuple[OwnerContext, OwnerRequest] | None = None
+    generic = False
+
+    def prepared(context: OwnerContext) -> None:
+        nonlocal capture_directory, capture_fd, capture_parent_fd
+        nonlocal capture_authority
+        request = context.request
+        if request is None or request.operation != "capture" or request.capture is None:
+            raise SessionError("invalid", "Missing owner capture grant")
+        parent = _operations(deps).session_for_owner(
+            task=context.task,
+            repo=context.repo,
+            owner_ref=context.owner_ref,
+            generation=context.generation,
+        )
+        if parent is None:
+            raise SessionError("unknown", "Capture parent is no longer available")
+        capture_authority = (parent[0], request)
+        capture_directory = request.capture.directory
+        capture_parent_fd = os.open(
+            capture_directory.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        capture_fd = os.open(
+            capture_directory.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=capture_parent_fd,
+        )
+        info = os.fstat(capture_fd)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise SessionError("unknown", "Capture grant directory is not private")
+
+    def cleanup() -> bool:
+        nonlocal capture_fd, capture_parent_fd
+        descriptor, parent_descriptor = capture_fd, capture_parent_fd
+        capture_fd = capture_parent_fd = None
+        if descriptor is None:
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
+            return True
+        assert capture_directory is not None and parent_descriptor is not None
+        known = True
+        try:
+            # Outputs are flat. Never recursively remove unexpected directories.
+            with os.scandir(descriptor) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        known = False
+                    else:
+                        os.unlink(entry.name, dir_fd=descriptor)
+            expected = os.fstat(descriptor)
+            actual = os.stat(
+                capture_directory.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                return False
+            os.rmdir(capture_directory.name, dir_fd=parent_descriptor)
+            parent_info = os.fstat(parent_descriptor)
+            current_parent = capture_directory.parent.stat(follow_symlinks=False)
+            if (current_parent.st_dev, current_parent.st_ino) != (
+                parent_info.st_dev,
+                parent_info.st_ino,
+            ):
+                return False
+            capture_directory.parent.rmdir()
+        except OSError:
+            known = False
+        finally:
+            os.close(descriptor)
+            os.close(parent_descriptor)
+        return known
+
+    code = 1
+    try:
+        if (
+            operation.preparation != "observe"
+            or operation.task_key is None
+            or operation.argv
+            or operation.install_from_result is not None
+            or not isinstance(platform, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", platform)
+            or not kinds
+            or len(kinds) > 2
+            or len(set(kinds)) != len(kinds)
+            or any(kind not in _cap.ALL_KINDS for kind in kinds)
+        ):
+            raise SessionError("invalid", "Invalid session capture request")
+        generic = _session_configuration(operation, deps) is None
+        if generic:
+            resolved = _resolve_tool_request(operation, deps=deps)
+            if (
+                resolved is None
+                or operation.owner_ref is None
+                or operation.generation is None
+            ):
+                raise SessionError("invalid", "Invalid selected capture operation")
+            context = _decode_profile_json(resolved.input_files[TARGET_CONTEXT_FILE])
+            binding = context.get("private_binding")
+            bound_platform = (
+                binding.get("platform") if isinstance(binding, dict) else None
+            )
+            if bound_platform != platform:
+                raise SessionError(
+                    "invalid", "Capture platform does not match selected target"
+                )
+            root = Path(tempfile.mkdtemp(prefix="mship-observe-capture-")).resolve()
+            capture_directory = root / "outputs"
+            capture_directory.mkdir(mode=0o700)
+            capture_parent_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            capture_fd = os.open(
+                "outputs",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=capture_parent_fd,
+            )
+        result = None
+        events = run_tool_stream(
+            operation,
+            deps=deps,
+            capture_kinds=tuple(kinds),
+            capture_platform=platform,
+            on_session_prepared=prepared,
+            capture_directory=capture_directory if generic else None,
+        )
+        try:
+            for event in events:
+                if event.kind == "keepalive":
+                    yield f"{KEEPALIVE_MARKER}:{nonce}\n".encode()
+                elif event.kind == "result":
+                    result = event.result
+        finally:
+            events.close()
+        if result is None or result.status != "completed" or result.exit_code != 0:
+            raise SessionError("unavailable", "Session capture was not acknowledged")
+        if capture_directory is None or capture_fd is None:
+            raise SessionError("unknown", "Session capture grant is unavailable")
+        expected = os.fstat(capture_fd)
+        actual = capture_directory.stat(follow_symlinks=False)
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise SessionError("unknown", "Session capture directory changed")
+        artifacts = _cap.discover_artifacts(capture_directory, list(kinds))
+        if {artifact.kind for artifact in artifacts} != set(kinds):
+            raise SessionError(
+                "unavailable", "Session capture omitted a requested artifact"
+            )
+        manifest = None
+        if generic:
+            if _resolve_tool_request(operation, deps=deps) is None:
+                raise SessionError("unknown", "Capture owner is no longer live")
+        else:
+            if capture_authority is None:
+                raise SessionError(
+                    "unknown", "Capture owner acknowledgement is unavailable"
+                )
+            authority, capture_request = capture_authority
+            manifest = authority.verify_capture(capture_request)
+            if set(manifest) != {artifact.path.name for artifact in artifacts}:
+                raise SessionError("unknown", "Capture artifact identity changed")
+        data = _build_artifact_tar(
+            artifacts,
+            directory_fd=capture_fd,
+            max_bytes=256 * 1024 * 1024,
+            expected_artifacts=manifest,
+        )
+        if not cleanup():
+            raise SessionError(
+                "unknown", "Session capture output cleanup is incomplete"
+            )
+        yield f"{ARTIFACT_MARKER}:{nonce} {len(data)}\n".encode()
+        yield data
+        code = 0
+    except OSError, ValueError, SessionError:
+        yield b"error: selected session capture or artifact validation failed\n"
+    finally:
+        cleanup()
+    yield f"{EXIT_MARKER}:{nonce} {code}\n".encode()

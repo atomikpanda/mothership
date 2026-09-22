@@ -1,19 +1,109 @@
+import os
+from pathlib import Path
+
 import typer
 
 from mship.cli.output import Output
+from mship.cli.remote_flags import RemoteFlagCommand
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(rich_help_panel="Inspection")
+    @app.command(cls=RemoteFlagCommand, rich_help_panel="Inspection")
     def doctor(
         no_network: bool = typer.Option(
             False, "--no-network",
             help="Skip connectivity network probes (faster; config-level checks only).",
         ),
+        remote: str | None = typer.Option(
+            None,
+            "--remote",
+            flag_value="",
+            help="Inspect one selected run host; bare flag auto-resolves its role.",
+        ),
+        task: str | None = typer.Option(
+            None, "--task", help="Active task whose branch is inspected remotely."
+        ),
+        repo: str | None = typer.Option(
+            None, "--repo", help="Exactly one repository to inspect remotely."
+        ),
     ):
         """Check workspace health and configuration."""
         container = get_container()
         output = Output()
+
+        if remote is not None:
+            if no_network:
+                output.error("--no-network cannot be combined with --remote")
+                raise typer.Exit(code=1)
+            if not repo or "," in repo:
+                output.error("--remote doctor requires exactly one --repo")
+                raise typer.Exit(code=1)
+            from mship.core.host_tools import remote_operation
+            from mship.core.run_host import RunHostError, RunHostResolver, RunHostStore, resolve_run_host
+            from mship.core.task_resolver import (
+                AmbiguousTaskError,
+                NoActiveTaskError,
+                UnknownTaskError,
+                resolve_task,
+            )
+
+            config = container.config()
+            if repo not in config.repos:
+                output.error(f"Unknown repo {repo!r}")
+                raise typer.Exit(code=1)
+            try:
+                task_obj, _ = resolve_task(
+                    container.state_manager().load(),
+                    cli_task=task,
+                    env_task=os.environ.get("MSHIP_TASK"),
+                    cwd=Path.cwd(),
+                )
+            except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError):
+                output.error("--remote doctor requires a resolvable active --task")
+                raise typer.Exit(code=1)
+            if repo not in task_obj.worktrees:
+                output.error("--remote doctor repo is not part of the active task")
+                raise typer.Exit(code=1)
+            try:
+                conn = resolve_run_host(
+                    remote or None,
+                    repo=config.repos[repo],
+                    config=config,
+                    store=RunHostStore(container.state_dir()),
+                )
+            except RunHostError as error:
+                output.error(str(error))
+                raise typer.Exit(code=1)
+            report = remote_operation(
+                action="diagnose",
+                task_obj=task_obj,
+                repo=repo,
+                config=config,
+                shell=container.shell(),
+                host=conn,
+                resolver=RunHostResolver(),
+                output=output,
+            )
+            if report is None:
+                output.error("selected run host did not return a valid host-tools report")
+                raise typer.Exit(code=1)
+            payload = report.safe_dict()
+            if output.human_mode:
+                output.print(f"[bold]Remote host tools:[/bold] {payload['category']}")
+                output.print(f"  {payload['remediation']}")
+            else:
+                # Additive: retain local-doctor JSON keys when remote mode is used.
+                output.json({
+                    "checks": [],
+                    "warnings": 0,
+                    "errors": 0 if report.category == "healthy" else 1,
+                    "config_path": str(Path(container.config_path()).resolve()),
+                    "config_resolution_source": None,
+                    "remote_host_tools": payload,
+                })
+            if report.category != "healthy":
+                raise typer.Exit(code=1)
+            return
 
         from mship.core.doctor import DoctorChecker
         from mship.core.config import ConfigLoader
@@ -26,7 +116,6 @@ def register(app: typer.Typer, get_container):
         shell = container.shell()
 
         # issue 366 #6: resolve which config is live + how it resolved, to report.
-        from pathlib import Path
         config_path = container.config_path()
         config_source = None
         try:

@@ -1,4 +1,5 @@
 """`mship capture` — capture the running UI for an agent to inspect."""
+
 from __future__ import annotations
 
 import os
@@ -7,9 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from typer.core import TyperCommand
 
 from mship.cli.output import Output
+from mship.cli.remote_flags import RemoteFlagCommand
 from mship.core import capture as _cap
 from mship.core.dispatch import resolve_repo
 from mship.core.task_resolver import (
@@ -20,29 +21,14 @@ from mship.core.task_resolver import (
 )
 
 
-class _RemoteFlagCommand(TyperCommand):
-    """A `TyperCommand` that lets `--remote` double as a bare flag OR take a
-    value (`--remote=<role>`) — the "optional value option" Click recipe
-    (`is_flag=False, flag_value=...`) that `typer.Option` explicitly doesn't
-    support (see `typer.models.OptionInfo`, which warns and silently drops
-    both `is_flag`/`flag_value`). Rewriting an exact bare `--remote` token to
-    `--remote=` before Click's own parser runs lets the rest of the command
-    stay a normal `Optional[str] = typer.Option(None, "--remote")`: absent →
-    `None` (local path unchanged), bare `--remote` → `""` (auto-resolve the
-    role), `--remote=role` → `"role"` (explicit role). Only that one exact
-    token is touched; `--remote=role`, `--remote foo` (space-separated, not
-    supported — same limitation as the underlying Click recipe) and every
-    other argument pass through untouched. (Duplicated from `cli/exec.py`'s
-    identical helper rather than shared, to keep each CLI module
-    self-contained.)"""
-
-    def parse_args(self, ctx, args):
-        args = ["--remote=" if a == "--remote" else a for a in args]
-        return super().parse_args(ctx, args)
-
-
 def _attach_evidence(
-    *, artifacts, evidence: str, container, output, worktree: Path, platform: str | None,
+    *,
+    artifacts,
+    evidence: str,
+    container,
+    output,
+    worktree: Path,
+    platform: str | None,
     provenance: str | None = None,
 ) -> None:
     """Promote captured artifacts into acceptance-criterion evidence.
@@ -70,7 +56,10 @@ def _attach_evidence(
                 output.warning(f"could not attach evidence: no spec {target.spec_id!r}")
                 return
             spec = artifact.spec
-            crit = next((c for c in spec.acceptance_criteria if c.id == target.criterion_id), None)
+            crit = next(
+                (c for c in spec.acceptance_criteria if c.id == target.criterion_id),
+                None,
+            )
             if crit is None:
                 output.warning(
                     f"could not attach evidence: {target.spec_id!r} has no criterion "
@@ -101,29 +90,62 @@ def _attach_evidence(
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(cls=_RemoteFlagCommand, rich_help_panel="Runtime")
+    @app.command(cls=RemoteFlagCommand, rich_help_panel="Runtime")
     def capture(
-        task: Optional[str] = typer.Option(None, "--task", help="Target task slug (defaults to cwd-resolved)."),
-        repo: Optional[str] = typer.Option(None, "--repo", help="Which repo to capture (required for an ad-hoc capture when the workspace has >1 repo)."),
-        platform: Optional[str] = typer.Option(None, "--platform", help="Platform to capture (required when the repo exposes more than one)."),
-        kind: str = typer.Option("all", "--kind", help="Artifact kind: image | layout | all."),
-        out: Optional[Path] = typer.Option(None, "--out", help="Output directory (default: .mothership/captures/<task-or-_adhoc>/<ts>-<platform>/)."),
+        task: Optional[str] = typer.Option(
+            None, "--task", help="Target task slug (defaults to cwd-resolved)."
+        ),
+        repo: Optional[str] = typer.Option(
+            None,
+            "--repo",
+            help="Which repo to capture (required for an ad-hoc capture when the workspace has >1 repo).",
+        ),
+        platform: Optional[str] = typer.Option(
+            None,
+            "--platform",
+            help="Platform to capture (required when the repo exposes more than one).",
+        ),
+        run_id: Optional[str] = typer.Option(
+            None,
+            "--run-id",
+            help="Capture one acknowledged profile run; never selects a device directly.",
+        ),
+        profile: Optional[str] = typer.Option(
+            None, "--profile", help="Filter recorded runs by profile."
+        ),
+        host: Optional[str] = typer.Option(
+            None, "--host", help="Filter recorded runs by their original host."
+        ),
+        target: Optional[str] = typer.Option(
+            None, "--target", help="Filter recorded runs by an attested friendly alias."
+        ),
+        kind: str = typer.Option(
+            "all", "--kind", help="Artifact kind: image | layout | all."
+        ),
+        out: Optional[Path] = typer.Option(
+            None,
+            "--out",
+            help="Output directory (default: .mothership/captures/<task-or-_adhoc>/<ts>-<platform>/).",
+        ),
         evidence: Optional[str] = typer.Option(
-            None, "--evidence", metavar="SPEC:AC",
+            None,
+            "--evidence",
+            metavar="SPEC:AC",
             help="Attach the captured artifact(s) to an acceptance criterion as "
-                 "kind=artifact evidence, e.g. --evidence my-spec:ac3. Without "
-                 "this flag the capture stays an ephemeral develop-verify-iterate "
-                 "artifact and nothing is stored or attached.",
+            "kind=artifact evidence, e.g. --evidence my-spec:ac3. Without "
+            "this flag the capture stays an ephemeral develop-verify-iterate "
+            "artifact and nothing is stored or attached.",
         ),
         remote: Optional[str] = typer.Option(
-            None, "--remote",
+            None,
+            "--remote",
             help="Execute the capture on a mapped run-host role instead of "
-                 "locally. Bare --remote auto-resolves the role (this repo's "
-                 "declared run_host, else the sole configured run_hosts "
-                 "entry); --remote=<role> picks one explicitly. Requires an "
-                 "active task (the remote materializes the task's branch — "
-                 "there's no ad-hoc remote capture). Without this flag, "
-                 "behavior is unchanged (local).",
+            "locally. Bare --remote auto-resolves the role (this repo's "
+            "declared run_host, else the sole configured run_hosts "
+            "entry); --remote=<role> picks one explicitly. Requires an "
+            "active task (the remote materializes the task's branch — "
+            "there's no ad-hoc remote capture). Without this flag, "
+            "behavior is unchanged (local).",
         ),
     ):
         """Capture the running UI (screenshot + layout) into files to read.
@@ -149,8 +171,10 @@ def register(app: typer.Typer, get_container):
         # clearly has tasks and should disambiguate rather than silently fall back.
         try:
             t, source = resolve_task(
-                state, cli_task=task,
-                env_task=os.environ.get("MSHIP_TASK"), cwd=Path.cwd(),
+                state,
+                cli_task=task,
+                env_task=os.environ.get("MSHIP_TASK"),
+                cwd=Path.cwd(),
             )
         except NoActiveTaskError:
             t, source = None, None
@@ -178,63 +202,145 @@ def register(app: typer.Typer, get_container):
             out_bucket = "_adhoc"
 
         repo_cfg = config.repos[resolved_repo]
-        platforms = repo_cfg.capture.platforms if repo_cfg.capture else []
-
+        session_observation = any(
+            value is not None for value in (run_id, profile, host, target)
+        ) or (t is not None and bool(repo_cfg.run_profiles))
+        if not session_observation and t is not None:
+            with container.state_manager().workspace_store.read() as transaction:
+                candidates = transaction.app_runs.list_candidates(
+                    transaction.connection, task_slug=t.slug, repo=resolved_repo
+                )
+            session_observation = bool(candidates)
+        selected = None
         resolved_platform = platform
-        if resolved_platform is None:
-            if len(platforms) == 1:
-                resolved_platform = platforms[0]
-            elif len(platforms) > 1:
+        if session_observation:
+            from mship.cli.run_target import choose_run
+            from mship.core.run_host import RunHostError
+            from mship.core.session_capture import (
+                SessionCaptureError,
+                select_session_capture,
+            )
+
+            if t is None:
+                output.error("recorded session capture requires an active task.")
+                raise typer.Exit(code=1)
+            try:
+                selected = select_session_capture(
+                    store=container.state_manager().workspace_store,
+                    config=config,
+                    task=t,
+                    repo_name=resolved_repo,
+                    run_id=run_id,
+                    platform=platform,
+                    profile_name=profile,
+                    host_name=host,
+                    target_alias=target,
+                    choose=lambda candidates: choose_run(
+                        candidates,
+                        interactive=output.is_tty and output.human_mode,
+                        input_fn=input,
+                        output=output,
+                    ),
+                )
+                if remote not in {None, ""} and remote not in selected.host.roles:
+                    raise SessionCaptureError(
+                        "specified remote role does not match the recorded run host"
+                    )
+                resolved_platform = selected.platform
+            except (RunHostError, ValueError) as error:
+                output.error(str(error))
+                raise typer.Exit(code=1)
+        else:
+            platforms = repo_cfg.capture.platforms if repo_cfg.capture else []
+            if resolved_platform is None:
+                if len(platforms) == 1:
+                    resolved_platform = platforms[0]
+                elif len(platforms) > 1:
+                    output.error(
+                        f"--platform is required for repo {resolved_repo!r}; "
+                        f"choose one of: {', '.join(platforms)}."
+                    )
+                    raise typer.Exit(code=2)
+            elif platforms and resolved_platform not in platforms:
                 output.error(
-                    f"--platform is required for repo {resolved_repo!r}; "
+                    f"unknown platform {resolved_platform!r} for repo {resolved_repo!r}; "
                     f"choose one of: {', '.join(platforms)}."
                 )
                 raise typer.Exit(code=2)
-        elif platforms and resolved_platform not in platforms:
-            output.error(
-                f"unknown platform {resolved_platform!r} for repo {resolved_repo!r}; "
-                f"choose one of: {', '.join(platforms)}."
-            )
-            raise typer.Exit(code=2)
 
         actual = repo_cfg.tasks.get("capture", "capture")
-
         if out is not None:
             out_dir = out
         else:
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             workspace_root = Path(container.config_path()).parent
             label = resolved_platform or "default"
-            out_dir = workspace_root / ".mothership" / "captures" / out_bucket / f"{ts}-{label}"
+            out_dir = (
+                workspace_root
+                / ".mothership"
+                / "captures"
+                / out_bucket
+                / f"{ts}-{label}"
+            )
 
-        if remote is not None:
-            from mship.cli.exec import _run_remote
+        if remote is not None or session_observation:
+            from mship.core.remote_client import (
+                RemoteExecError,
+                exec_session_capture,
+            )
+            from mship.core.run_host import RunHostError, RunHostResolver
             from mship.core.evidence_attach import remote_provenance_note
 
-            # Remote execution always materializes the task's branch on the
-            # remote — there's no ad-hoc remote capture (an ad-hoc capture
-            # has no task/branch for the remote to check out).
-            if t is None:
-                output.error(
-                    "--remote requires an active task: the remote "
-                    "materializes the task's branch, so there's no ad-hoc "
-                    "remote capture. Pass --task, or run capture from an "
-                    "active task's worktree."
+            if session_observation:
+                assert selected is not None
+                try:
+                    code = exec_session_capture(
+                        operation=selected.operation,
+                        kinds=kinds,
+                        platform=resolved_platform or "",
+                        host=selected.host,
+                        resolver=RunHostResolver(),
+                        captures_dir_for=out_dir,
+                        print_fn=output.progress,
+                    )
+                except (RemoteExecError, RunHostError, ValueError) as e:
+                    output.error(str(e))
+                    raise typer.Exit(code=1)
+                remote_note = remote_provenance_note("session observation")
+            else:
+                from mship.cli.exec import _run_remote
+
+                # Remote execution always materializes the task's branch on the
+                # remote — there's no ad-hoc remote capture (an ad-hoc capture
+                # has no task/branch for the remote to check out).
+                if t is None:
+                    output.error(
+                        "--remote requires an active task: the remote "
+                        "materializes the task's branch, so there's no ad-hoc "
+                        "remote capture. Pass --task, or run capture from an "
+                        "active task's worktree."
+                    )
+                    raise typer.Exit(code=1)
+
+                remote_note: str | None = None
+
+                def record_preparation(source_preparation: str) -> None:
+                    nonlocal remote_note
+                    remote_note = remote_provenance_note(source_preparation)
+
+                code = _run_remote(
+                    verb="capture",
+                    remote_role=remote or "",
+                    task_obj=t,
+                    target_repos=[resolved_repo],
+                    config=config,
+                    container=container,
+                    output=output,
+                    platform=resolved_platform,
+                    kind=kind,
+                    captures_dir_for=out_dir,
+                    on_prepared=record_preparation,
                 )
-                raise typer.Exit(code=1)
-
-            remote_note: str | None = None
-
-            def record_preparation(source_preparation: str) -> None:
-                nonlocal remote_note
-                remote_note = remote_provenance_note(source_preparation)
-
-            code = _run_remote(
-                verb="capture", remote_role=remote, task_obj=t,
-                target_repos=[resolved_repo], config=config, container=container,
-                output=output, platform=resolved_platform, kind=kind,
-                captures_dir_for=out_dir, on_prepared=record_preparation,
-            )
 
             # On success, emit the SAME confirmation a local capture does
             # (respecting --json), pointing at the local landing path where
@@ -258,18 +364,29 @@ def register(app: typer.Typer, get_container):
                     for a in landed:
                         output.success(f"captured {a.kind} → {a.path}")
                 else:
-                    output.json({
-                        "platform": resolved_platform,
-                        "repo": resolved_repo,
-                        "artifacts": [{"kind": a.kind, "path": str(a.path)} for a in landed],
-                        "resolved_task": t.slug if t is not None else None,
-                        "resolution_source": source.value if source is not None else None,
-                    })
+                    output.json(
+                        {
+                            "platform": resolved_platform,
+                            "repo": resolved_repo,
+                            "artifacts": [
+                                {"kind": a.kind, "path": str(a.path)} for a in landed
+                            ],
+                            "resolved_task": t.slug if t is not None else None,
+                            "resolution_source": source.value
+                            if source is not None
+                            else None,
+                        }
+                    )
                 if evidence:
                     _attach_evidence(
-                        artifacts=landed, evidence=evidence, container=container,
-                        output=output, worktree=worktree, platform=resolved_platform,
-                        provenance=remote_note or remote_provenance_note(
+                        artifacts=landed,
+                        evidence=evidence,
+                        container=container,
+                        output=output,
+                        worktree=worktree,
+                        platform=resolved_platform,
+                        provenance=remote_note
+                        or remote_provenance_note(
                             "source preparation was not recorded"
                         ),
                     )
@@ -293,16 +410,24 @@ def register(app: typer.Typer, get_container):
             for a in artifacts:
                 output.success(f"captured {a.kind} → {a.path}")
         else:
-            output.json({
-                "platform": resolved_platform,
-                "repo": resolved_repo,
-                "artifacts": [{"kind": a.kind, "path": str(a.path)} for a in artifacts],
-                "resolved_task": t.slug if t is not None else None,
-                "resolution_source": source.value if source is not None else None,
-            })
+            output.json(
+                {
+                    "platform": resolved_platform,
+                    "repo": resolved_repo,
+                    "artifacts": [
+                        {"kind": a.kind, "path": str(a.path)} for a in artifacts
+                    ],
+                    "resolved_task": t.slug if t is not None else None,
+                    "resolution_source": source.value if source is not None else None,
+                }
+            )
 
         if evidence:
             _attach_evidence(
-                artifacts=artifacts, evidence=evidence, container=container,
-                output=output, worktree=worktree, platform=resolved_platform,
+                artifacts=artifacts,
+                evidence=evidence,
+                container=container,
+                output=output,
+                worktree=worktree,
+                platform=resolved_platform,
             )

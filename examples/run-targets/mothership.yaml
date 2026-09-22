@@ -1,0 +1,78 @@
+# Runnable configuration examples for packaged and project-routed run backends.
+#
+# `pure-builtins` deliberately has no Taskfile: every action inherits the
+# installed adapter selected by `builtin`.
+workspace: run-target-backends
+run_hosts: [android-lab, ios-lab, browser-lab, embedded-lab]
+
+repos:
+  pure-builtins:
+    path: .
+    type: service
+    run_backends:
+      android-device:
+        builtin: android
+      flutter-device:
+        builtin: flutter
+      ios-simulator:
+        builtin: ios
+      configured-browser:
+        builtin: browser
+      prepared-platformio-board:
+        builtin: platformio
+    run_profiles:
+      android:
+        backend: android-device
+        hosts: {roles: [android-lab]}
+        options: {}
+      flutter:
+        backend: flutter-device
+        hosts: {roles: [android-lab]}
+        options: {}
+      ios:
+        backend: ios-simulator
+        hosts: {roles: [ios-lab]}
+        options: {}
+      browser:
+        backend: configured-browser
+        hosts: {roles: [browser-lab]}
+        options: {}
+      platformio:
+        backend: prepared-platformio-board
+        hosts: {roles: [embedded-lab]}
+        options: {}
+
+  flutter-extension:
+    path: flutter-extension
+    type: service
+    tasks:
+      discover-signed-flutter: discover-signed-flutter
+      capture-signed-flutter: capture-signed-flutter
+    run_backends:
+      signed-flutter:
+        builtin: flutter
+        discover_task: discover-signed-flutter
+        operations:
+          capture: capture-signed-flutter
+    run_profiles:
+      signed-flutter:
+        backend: signed-flutter
+        hosts: {roles: [android-lab]}
+        options: {}
+
+  custom-routing:
+    path: custom-routing
+    type: service
+    tasks:
+      discover-project-browser: discover-project-browser
+      run-project-browser: run-project-browser
+    run_backends:
+      project-browser:
+        discover_task: discover-project-browser
+        operations:
+          run: run-project-browser
+    run_profiles:
+      project-browser:
+        backend: project-browser
+        hosts: {roles: [browser-lab]}
+        options: {}

@@ -60,5 +60,25 @@ def parse_pair_link(link: str) -> dict:
     missing = required - params.keys()
     if missing:
         raise ValueError(f"Missing required keys: {missing}")
-
     return {k: params[k] for k in required}
+
+
+def parse_relay_account_link(link: str) -> dict[str, str]:
+    """Parse exactly the existing relay-account pairing link, never a direct link."""
+    parsed = urllib.parse.urlparse(link)
+    if parsed.scheme != "groundcontrol" or (parsed.netloc + parsed.path).strip("/") != "add-relay":
+        raise ValueError("expected a groundcontrol://add-relay link")
+    if parsed.fragment:
+        raise ValueError("relay account link must not contain a fragment")
+    pairs = []
+    for part in parsed.query.split("&"):
+        if not part or "=" not in part:
+            raise ValueError("relay account link has malformed query fields")
+        key, _, value = part.partition("=")
+        pairs.append((urllib.parse.unquote(key), urllib.parse.unquote(value)))
+    if {key for key, _ in pairs} != {"relay", "token"} or len(pairs) != 2:
+        raise ValueError("relay account link must contain exactly relay and token")
+    values = dict(pairs)
+    if not values["relay"] or not values["token"]:
+        raise ValueError("relay account link has empty fields")
+    return values

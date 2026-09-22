@@ -5,13 +5,24 @@ Real history goes to origin; throwaway state goes host to host and never touches
 origin. This module owns the second half of that rule. `core/remote_preflight.py`
 decides which repos take which path; this one carries them.
 """
+
 from __future__ import annotations
 
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None
+
+import hashlib
+import json
 import os
 import shlex
 import tempfile
+from datetime import datetime, timezone
+from urllib.parse import quote
 from pathlib import Path
 
+from mship.core.run_host import HostRegistration, RunHostError
 from mship.core.run_ref import RunRefNameError, run_ref
 
 # Pinned identity for synthesized commits. Deliberately NOT the operator's: this
@@ -94,9 +105,9 @@ def synthesize_commit(shell, repo_root: Path, *, base_sha: str) -> str:
         tree = _checked(shell, "git write-tree", repo_root, env).strip()
         sha = _checked(
             shell,
-            f"git commit-tree {shlex.quote(tree)} -p {base} "
-            f"-m {shlex.quote(_MESSAGE)}",
-            repo_root, env,
+            f"git commit-tree {shlex.quote(tree)} -p {base} -m {shlex.quote(_MESSAGE)}",
+            repo_root,
+            env,
         ).strip()
     return sha
 
@@ -150,28 +161,58 @@ def extra_header_env(token: str, url: str) -> dict[str, str]:
     return env
 
 
-def _receive_url(conn, repo: str) -> str:
-    """The run host's scoped receive endpoint for `repo`. git appends
-    `/info/refs?service=git-receive-pack` and `/git-receive-pack` itself.
-
-    The trailing slash is stripped because this string is both the remote git is
-    given AND the URL the auth header is scoped to; a `//` in the middle would
-    make the two disagree.
-    """
-    return f"{conn.url.rstrip('/')}/git/{repo}"
+def _receive_url(conn, repo: str, workspace_id: str | None = None) -> str:
+    """The authenticated Git endpoint, workspace-bound for relay identities."""
+    prefix = conn.url.rstrip("/")
+    if workspace_id:
+        prefix = f"{prefix}/workspaces/{quote(workspace_id, safe='')}"
+    return f"{prefix}/git/{repo}"
 
 
-def _push(shell, repo_root: Path, *, conn, refspec: str, url: str, failure: str) -> None:
+def _push(
+    shell,
+    repo_root: Path,
+    *,
+    conn,
+    refspec: str,
+    url: str,
+    failure: str,
+    expected_sha: str | None = None,
+    lease_ref: str | None = None,
+) -> None:
+    if expected_sha is None:
+        force_option = "--force"
+    else:
+        if (
+            not isinstance(lease_ref, str)
+            or not isinstance(expected_sha, str)
+            or len(expected_sha) not in (40, 64)
+            or any(
+                character not in "0123456789abcdefABCDEF" for character in expected_sha
+            )
+        ):
+            raise RunTransferError("could not safely delete a recorded run ref")
+        force_option = f"--force-with-lease={lease_ref}:{expected_sha}"
     result = shell.run(
-        f"git push --force {shlex.quote(url)} {refspec}",
-        cwd=repo_root, env=extra_header_env(conn.token, url),
+        f"git push {shlex.quote(force_option)} {shlex.quote(url)} {refspec}",
+        cwd=repo_root,
+        env=extra_header_env(conn.token, url),
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise RunTransferError(f"{failure}: {detail or f'exit {result.returncode}'}")
 
 
-def push_run_ref(shell, repo_root: Path, *, conn, repo: str, task: str, sha: str) -> str:
+def push_run_ref(
+    shell,
+    repo_root: Path,
+    *,
+    conn,
+    workspace_id: str | None = None,
+    repo: str,
+    task: str,
+    sha: str,
+) -> str:
     """Push `sha` straight to the run host's scratch ref, and return that ref.
 
     Origin is not in this path: uncommitted work — including untracked scratch
@@ -186,78 +227,808 @@ def push_run_ref(shell, repo_root: Path, *, conn, repo: str, task: str, sha: str
     `git_root` child, which has no git directory of its own.
     """
     ref = run_ref(task, repo)
-    url = _receive_url(conn, repo)
+    url = _receive_url(conn, repo, workspace_id)
     _push(
-        shell, repo_root, conn=conn, url=url,
+        shell,
+        repo_root,
+        conn=conn,
+        url=url,
         refspec=f"{shlex.quote(sha)}:{ref}",
-        failure=f"could not send {repo}'s working tree to the run host at {url}",
+        failure=f"could not send {repo}'s working tree to the selected run host",
     )
     return ref
 
 
-def delete_run_ref(shell, repo_root: Path, *, conn, repo: str, task: str) -> None:
+def delete_run_ref(
+    shell,
+    repo_root: Path,
+    *,
+    conn,
+    workspace_id: str | None = None,
+    repo: str,
+    task: str,
+    expected_sha: str | None = None,
+) -> None:
     """Delete this task's scratch ref from the run host.
 
-    Deleting a ref that is not there exits 0 with `remote: warning: deleting a
-    non-existent ref`, so `mship close` needs no "does it exist" probe. What
-    buys that is the ref being FULLY QUALIFIED, which `run_ref` guarantees: an
-    unqualified name has to be resolved against the remote's advertisement and
-    fails with `unable to delete 'api': remote ref does not exist` — in the
-    `:<ref>` form exactly as in `--delete <ref>` (git 2.43, verified in both
-    forms and both transports; the two forms are NOT the distinction, the
-    earlier note in this feature's tests notwithstanding).
-
-    The plain `:<ref>` refspec is used anyway so delete and push are the same
-    command shape through `_push`, with no option parsing after the URL.
+    ``expected_sha`` turns deletion into a force-with-lease operation.  It is
+    required for a recorded receipt so cleanup can never erase a newer transfer
+    that reused the same scratch ref after the receipt was written.
     """
     ref = run_ref(task, repo)
-    url = _receive_url(conn, repo)
+    url = _receive_url(conn, repo, workspace_id)
     _push(
-        shell, repo_root, conn=conn, url=url, refspec=f":{ref}",
-        failure=f"could not delete {ref} from the run host at {url}",
+        shell,
+        repo_root,
+        conn=conn,
+        url=url,
+        refspec=f":{ref}",
+        failure=f"could not delete {ref} from the selected run host",
+        expected_sha=expected_sha,
+        lease_ref=ref,
     )
 
 
-def cleanup_run_refs(task, *, config, store, shell, warn) -> list[str]:
-    """Delete this task's scratch refs from the run hosts that hold them.
+def cleanup_run_refs(
+    task,
+    *,
+    config,
+    store,
+    shell,
+    warn,
+    cleared_worktree_hosts: set[tuple[str, str, str]] | None = None,
+) -> list[str]:
+    """Delete only refs whose exact delivery was recorded.
 
-    Called by `mship close`. Without it the refs are a slow leak of objects
-    nothing deletes — on the operator's own machine, so a missed one costs disk
-    rather than disclosure, which is exactly why every failure here WARNS and
-    the close continues.
-
-    One delete per GIT repository: a `git_root` child shares its parent's ref
-    (spec ac7). Issued from the repo's MAIN CHECKOUT rather than a task worktree,
-    which is about to be torn down. A repo with no mapped run host is silently
-    skipped — a task that never ran remotely must not warn on every close.
+    When remote worktree teardown was attempted in the same close, an exact
+    scratch-ref lease is released only for hosts that proved their selected task
+    worktrees gone.  An uncertain remote removal retains the receipt and its
+    compare-and-delete authority for a later close.
     """
-    from mship.core.run_host import RunHostError, resolve_run_host
+    from mship.core.run_host import RunHostResolver
 
-    deleted: list[str] = []
-    seen: set[str] = set()
-    repos = getattr(config, "repos", {})
-    for repo in sorted(getattr(task, "affected_repos", None) or []):
-        repo_config = repos.get(repo)
-        if repo_config is None:
+    resolver = RunHostResolver()
+    try:
+        return _cleanup_recorded_run_refs(
+            task,
+            config=config,
+            store=store,
+            shell=shell,
+            warn=warn,
+            resolver=resolver,
+            cleared_worktree_hosts=cleared_worktree_hosts,
+        )
+    except RunTransferError:
+        warn("could not read recorded run refs; skipped remote ref cleanup")
+        return []
+
+
+class TaskRunCleanupBlocked(RuntimeError):
+    """Task teardown would discard a run whose owner outcome is not reconciled."""
+
+    def __init__(self, task_slug: str) -> None:
+        super().__init__(
+            f"cannot close task {task_slug!r} while recorded app runs are not "
+            "confirmed stopped; restore the recorded host and retry"
+        )
+
+
+def _recorded_run_host(run, *, host_store):
+    from mship.core.run_host.config import registration_identity
+    from mship.core.run_target.models import host_endpoint_fingerprint
+
+    host = host_store.effective_hosts().get(run.host_name)
+    if (
+        host is None
+        or host.scope != run.host_scope
+        or host_endpoint_fingerprint("|".join(registration_identity(host.connection)))
+        != run.host_endpoint_fingerprint
+    ):
+        return None
+    return host
+
+
+def _owner_proof(run) -> tuple[object, ...]:
+    return (
+        run.revision,
+        run.owner_ref,
+        run.owner_generation,
+        run.backend_revision,
+        run.host_name,
+        run.host_scope,
+        run.host_endpoint_fingerprint,
+    )
+
+
+def _close_safe_run(run, proven_failed: dict[str, tuple[object, ...]]) -> bool:
+    return (
+        run.status == "stopped"
+        or (
+            run.status == "failed"
+            and run.owner_ref is None
+            and run.owner_generation is None
+        )
+        or (run.status == "failed" and proven_failed.get(run.id) == _owner_proof(run))
+    )
+
+
+def cleanup_task_runs(
+    task,
+    *,
+    workspace_store,
+    host_store,
+    warn,
+    stop_session=None,
+) -> tuple[str, ...]:
+    """Reconcile exact AppRun owners before task metadata is removed.
+
+    A failed row without an owner is removable because no launch was
+    acknowledged. Owner-bearing failed or unknown rows are removable only in
+    this close transaction after their exact recorded owner returns proven
+    clean; every unavailable, mismatched, or unknown owner retains recovery
+    evidence and blocks teardown.
+    """
+    from mship.core.persistence.app_run_repository import AppRunConflict
+    from mship.core.remote_client import (
+        RemoteExecError,
+        stop_session as stop_remote_session,
+    )
+    from mship.core.run_host import RunHostError, RunHostResolver
+
+    task_slug = _task_slug(task)
+    stop = stop_remote_session if stop_session is None else stop_session
+    resolver = RunHostResolver()
+    with workspace_store.read() as transaction:
+        runs = transaction.app_runs.list_for_task(
+            transaction.connection, task_slug=task_slug
+        )
+
+    proven_failed: dict[str, tuple[object, ...]] = {}
+    for run in runs:
+        if _close_safe_run(run, proven_failed):
             continue
-        git_repo = repo_config.git_root or repo
-        if git_repo in seen:
-            continue
-        seen.add(git_repo)
-        root_config = repos.get(git_repo)
-        if root_config is None:
-            continue
-        try:
-            conn = resolve_run_host(None, repo=root_config, config=config, store=store)
-        except RunHostError:
-            continue
-        try:
-            delete_run_ref(
-                shell, Path(root_config.path), conn=conn,
-                repo=git_repo, task=task.slug,
+        if (
+            run.status not in {"starting", "active", "updating", "failed", "unknown"}
+            or run.owner_ref is None
+            or run.owner_generation is None
+        ):
+            warn(
+                f"recorded app run {run.id} is {run.status}; retaining recovery "
+                "metadata and its private binding"
             )
-        except (RunTransferError, RunRefNameError) as exc:
-            warn(f"could not delete {git_repo}'s run ref from the run host: {exc}")
             continue
-        deleted.append(git_repo)
-    return deleted
+        try:
+            host = _recorded_run_host(run, host_store=host_store)
+        except Exception:
+            host = None
+        if host is None:
+            warn(
+                f"recorded app run {run.id} host identity changed or is unavailable; "
+                "retaining owner recovery evidence"
+            )
+            continue
+        try:
+            outcome = stop(
+                task=run.task_slug,
+                repo=run.repo,
+                owner_ref=run.owner_ref,
+                generation=run.owner_generation,
+                source_revision=run.backend_revision,
+                host=host,
+                resolver=resolver,
+            )
+        except RemoteExecError, RunHostError:
+            outcome = "unknown"
+        if outcome != "stopped":
+            warn(
+                f"recorded app run {run.id} owner stop is {outcome}; retaining "
+                "owner recovery evidence"
+            )
+            continue
+        try:
+            with workspace_store.write(immediate=True) as transaction:
+                current = transaction.app_runs.get(transaction.connection, run.id)
+                if (
+                    current is None
+                    or current.revision != run.revision
+                    or current.status
+                    not in {"starting", "active", "updating", "failed", "unknown"}
+                    or current.owner_ref != run.owner_ref
+                    or current.owner_generation != run.owner_generation
+                    or current.host_name != run.host_name
+                    or current.host_scope != run.host_scope
+                    or current.host_endpoint_fingerprint
+                    != run.host_endpoint_fingerprint
+                ):
+                    raise AppRunConflict(run.id)
+                if current.status == "failed":
+                    proven_failed[current.id] = _owner_proof(current)
+                    continue
+                transaction.app_runs.transition(
+                    transaction.connection,
+                    run_id=current.id,
+                    expected_revision=current.revision,
+                    status="stopped",
+                    owner_ref=current.owner_ref,
+                    owner_generation=current.owner_generation,
+                    now=datetime.now(timezone.utc),
+                )
+        except AppRunConflict, KeyError:
+            warn(
+                f"recorded app run {run.id} changed while stopping; retaining "
+                "owner recovery evidence"
+            )
+
+    with workspace_store.read() as transaction:
+        remaining = transaction.app_runs.list_for_task(
+            transaction.connection, task_slug=task_slug
+        )
+    if any(not _close_safe_run(run, proven_failed) for run in remaining):
+        raise TaskRunCleanupBlocked(task_slug)
+
+    with workspace_store.write(immediate=True) as transaction:
+        # Recheck under the deletion transaction, because a run may be recorded
+        # after the reconciliation read but before task teardown.
+        if any(
+            not _close_safe_run(run, proven_failed)
+            for run in transaction.app_runs.list_for_task(
+                transaction.connection, task_slug=task_slug
+            )
+        ):
+            raise TaskRunCleanupBlocked(task_slug)
+        binding_refs = transaction.app_runs.delete_for_task(
+            transaction.connection, task_slug
+        )
+
+    # This is intentionally a second transaction: a rolled-back task deletion
+    # must retain both its rows and binding files.  The repository rechecks all
+    # surviving references while holding the workspace write lock.
+    with workspace_store.write(immediate=True) as transaction:
+        transaction.app_runs.remove_unreferenced_private_bindings(
+            transaction.connection, binding_refs
+        )
+    return binding_refs
+
+
+_RECEIPTS_VERSION = 2
+_RECEIPTS_FILE = "run-ref-receipts.json"
+_WORKTREE_RECEIPTS_FILE = "remote-worktree-receipts.json"
+
+_WORKTREE_RECEIPTS_VERSION = 1
+
+def _task_slug(task) -> str:
+    slug = getattr(task, "slug", task)
+    if not isinstance(slug, str) or not slug:
+        raise RunTransferError("could not record remote cleanup without a task slug")
+    return slug
+
+
+def _endpoint_fingerprint(connection) -> str:
+    """Stable safe registration identity; relay mode deliberately excludes route."""
+    from mship.core.run_host.config import RunHostConnection, registration_identity
+
+    if isinstance(connection, RunHostConnection):
+        payload = f"mship-run-host-endpoint-v1\0{connection.url.rstrip('/')}"
+    else:
+        payload = "mship-run-host-identity-v2\0" + "\0".join(
+            registration_identity(connection)
+        )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _receipt_path(state_dir: Path) -> Path:
+    return Path(state_dir) / _RECEIPTS_FILE
+
+
+def _receipt_lock(path: Path) -> int:
+    if fcntl is None:
+        raise RunTransferError("recorded remote cleanup requires POSIX file locking")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    fd = os.open(path.with_name(path.name + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    os.chmod(path.with_name(path.name + ".lock"), 0o600)
+    return fd
+
+
+def _load_receipts(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RunTransferError("could not read recorded run refs") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("version") not in {1, _RECEIPTS_VERSION}
+        or not isinstance(document.get("receipts"), list)
+    ):
+        raise RunTransferError("recorded run refs have an unsupported format")
+    receipts: list[dict[str, str]] = []
+    for receipt in document["receipts"]:
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt)
+            != {
+                "task",
+                "host_name",
+                "host_scope",
+                "host_endpoint_fingerprint",
+                "repo",
+                "ref",
+                "sha",
+            }
+            or not all(isinstance(value, str) for value in receipt.values())
+        ):
+            raise RunTransferError("recorded run refs have an unsupported format")
+        receipts.append(dict(receipt))
+    return receipts
+
+
+def _write_receipts(path: Path, receipts: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(
+                json.dumps(
+                    {"version": _RECEIPTS_VERSION, "receipts": receipts},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def record_run_ref_receipt(
+    state_dir: Path, *, task, host: "HostRegistration", repo: str, ref: str, sha: str
+) -> None:
+    """Durably record one successful scratch-ref delivery to an exact host.
+
+    The receipt is intentionally private and contains only safe registration
+    identity plus Git source identity; bearer credentials never leave the host
+    registry. Repeated delivery of the same ref to the same identity replaces
+    its SHA, while a changed endpoint is retained as a separate unresolved
+    receipt rather than silently retargeted.
+    """
+
+    if not isinstance(host, HostRegistration):
+        raise RunTransferError("could not record a run ref for an invalid host")
+    task_slug = _task_slug(task)
+    try:
+        expected_ref = run_ref(task_slug, repo)
+    except RunRefNameError as exc:
+        raise RunTransferError(str(exc)) from None
+    if (
+        ref != expected_ref
+        or not isinstance(sha, str)
+        or len(sha) not in (40, 64)
+        or any(character not in "0123456789abcdefABCDEF" for character in sha)
+    ):
+        raise RunTransferError("could not record an invalid run-ref receipt")
+
+    receipt = {
+        "task": task_slug,
+        "host_name": host.name,
+        "host_scope": host.scope,
+        "host_endpoint_fingerprint": _endpoint_fingerprint(host.connection),
+        "repo": repo,
+        "ref": ref,
+        "sha": sha,
+    }
+    path = _receipt_path(state_dir)
+    lock_fd = _receipt_lock(path)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        receipts = _load_receipts(path)
+        identity = (
+            receipt["task"],
+            receipt["host_name"],
+            receipt["host_scope"],
+            receipt["host_endpoint_fingerprint"],
+            receipt["repo"],
+            receipt["ref"],
+        )
+        receipts = [
+            item
+            for item in receipts
+            if (
+                item["task"],
+                item["host_name"],
+                item["host_scope"],
+                item["host_endpoint_fingerprint"],
+                item["repo"],
+                item["ref"],
+            )
+            != identity
+        ]
+        receipts.append(receipt)
+        _write_receipts(path, receipts)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _worktree_receipt_path(state_dir: Path) -> Path:
+    return Path(state_dir) / _WORKTREE_RECEIPTS_FILE
+
+
+def _load_worktree_receipts(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RunTransferError("could not read recorded remote worktrees") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("version") != _WORKTREE_RECEIPTS_VERSION
+        or not isinstance(document.get("receipts"), list)
+    ):
+        raise RunTransferError("recorded remote worktrees have an unsupported format")
+    receipts: list[dict[str, str]] = []
+    fields = {
+        "task", "host_name", "host_scope", "host_endpoint_fingerprint", "repo", "sha"
+    }
+    for receipt in document["receipts"]:
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != fields
+            or not all(isinstance(value, str) for value in receipt.values())
+        ):
+            raise RunTransferError("recorded remote worktrees have an unsupported format")
+        receipts.append(receipt)
+    return receipts
+
+
+def _write_worktree_receipts(path: Path, receipts: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(
+                json.dumps(
+                    {"version": _WORKTREE_RECEIPTS_VERSION, "receipts": receipts},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _host_receipt_identity(receipt: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        receipt["host_name"],
+        receipt["host_scope"],
+        receipt["host_endpoint_fingerprint"],
+    )
+
+
+def record_remote_worktree_receipt(
+    state_dir: Path, *, task, host: "HostRegistration", repo: str, sha: str
+) -> None:
+    """Record the exact revision whose remote worktree close may remove."""
+    if not isinstance(host, HostRegistration):
+        raise RunTransferError("could not record a remote worktree for an invalid host")
+    task_slug = _task_slug(task)
+    try:
+        run_ref(task_slug, repo)
+    except RunRefNameError as exc:
+        raise RunTransferError(str(exc)) from None
+    if (
+        not isinstance(sha, str)
+        or len(sha) not in (40, 64)
+        or any(character not in "0123456789abcdefABCDEF" for character in sha)
+    ):
+        raise RunTransferError("could not record an invalid remote worktree revision")
+    receipt = {
+        "task": task_slug,
+        "host_name": host.name,
+        "host_scope": host.scope,
+        "host_endpoint_fingerprint": _endpoint_fingerprint(host.connection),
+        "repo": repo,
+        "sha": sha,
+    }
+    path = _worktree_receipt_path(state_dir)
+    lock_fd = _receipt_lock(path)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        receipts = _load_worktree_receipts(path)
+        receipts = [
+            item
+            for item in receipts
+            if (
+                item["task"],
+                *_host_receipt_identity(item),
+                item["repo"],
+            )
+            != (
+                receipt["task"],
+                *_host_receipt_identity(receipt),
+                receipt["repo"],
+            )
+        ]
+        receipts.append(receipt)
+        _write_worktree_receipts(path, receipts)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _delete_recorded_ref(
+    shell,
+    repo_root: Path,
+    *,
+    conn,
+    workspace_id: str | None,
+    repo: str,
+    ref: str,
+    expected_sha: str,
+) -> None:
+    """Delete exactly an already-recorded ref with its recorded object lease."""
+    url = _receive_url(conn, repo, workspace_id)
+    _push(
+        shell,
+        repo_root,
+        conn=conn,
+        url=url,
+        refspec=f":{ref}",
+        failure=f"could not delete {ref} from the selected run host",
+        expected_sha=expected_sha,
+        lease_ref=ref,
+    )
+
+
+def cleanup_remote_task_worktrees(
+    task, *, config, store, warn, cleanup_worktrees=None
+) -> set[tuple[str, str, str]]:
+    """Request exact host-owned task-worktree removal before releasing run refs.
+
+    Recipients come only from durable receipts.  A changed, unavailable, busy,
+    or ambiguous recipient is retained: close never resolves a role again and
+    never lets successful scratch-ref deletion erase the only actionable
+    host-pinned evidence.
+    """
+    from mship.core.remote_client import RemoteExecError
+    from mship.core.run_host import RunHostError, RunHostResolver
+
+    if cleanup_worktrees is None:
+        from mship.core.remote_client import cleanup_task_worktrees
+
+        cleanup_worktrees = cleanup_task_worktrees
+    task_slug = _task_slug(task)
+    state_dir = store._project_path.parent
+    worktree_path = _worktree_receipt_path(state_dir)
+    ref_path = _receipt_path(state_dir)
+    lock_paths = sorted((worktree_path, ref_path), key=lambda path: str(path))
+    lock_fds: list[tuple[Path, int]] = []
+    try:
+        for path in lock_paths:
+            descriptor = _receipt_lock(path)
+            lock_fds.append((path, descriptor))
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        worktree_receipts = _load_worktree_receipts(worktree_path)
+        ref_receipts = _load_receipts(ref_path)
+        candidates = [
+            receipt
+            for receipt in worktree_receipts
+            if receipt["task"] == task_slug
+        ]
+        candidates.extend(
+            {
+                "task": receipt["task"],
+                "host_name": receipt["host_name"],
+                "host_scope": receipt["host_scope"],
+                "host_endpoint_fingerprint": receipt[
+                    "host_endpoint_fingerprint"
+                ],
+                "repo": receipt["repo"],
+                "sha": receipt["sha"],
+            }
+            for receipt in ref_receipts
+            if receipt["task"] == task_slug
+        )
+        if not candidates:
+            return set()
+        try:
+            current_hosts = store.effective_hosts()
+        except RunHostError:
+            for receipt in candidates:
+                warn(
+                    f"could not remove {receipt['repo']}'s remote task worktree: "
+                    "could not validate host identity"
+                )
+            return set()
+        grouped: dict[tuple[str, str, str], dict[str, set[str]]] = {}
+        known_repos = getattr(config, "repos", {})
+        for receipt in candidates:
+            if receipt["repo"] not in known_repos or not receipt["sha"]:
+                warn(
+                    f"could not remove {receipt['repo']}'s remote task worktree: "
+                    "recorded destination or revision is invalid"
+                )
+                continue
+            grouped.setdefault(_host_receipt_identity(receipt), {}).setdefault(
+                receipt["repo"], set()
+            ).add(receipt["sha"])
+        cleared: set[tuple[str, str, str]] = set()
+        for identity, repos in grouped.items():
+            if any(len(shas) != 1 for shas in repos.values()):
+                warn(
+                    f"could not remove remote task worktrees on {identity[0]}: "
+                    "recorded revision changed"
+                )
+                continue
+            expected_revisions = {
+                repo: next(iter(shas)) for repo, shas in repos.items()
+            }
+            host = current_hosts.get(identity[0])
+            if (
+                host is None
+                or host.scope != identity[1]
+                or _endpoint_fingerprint(host.connection) != identity[2]
+            ):
+                warn(
+                    f"could not remove remote task worktrees on {identity[0]}: "
+                    "host identity changed or is unavailable"
+                )
+                continue
+            try:
+                status = cleanup_worktrees(
+                    task=task_slug,
+                    repos=sorted(repos),
+                    host=host,
+                    resolver=RunHostResolver(),
+                    expected_revisions=expected_revisions,
+                )
+            except RemoteExecError, RunHostError, ValueError:
+                status = "unknown"
+            if status != "removed":
+                warn(
+                    f"could not prove remote task worktree cleanup on {identity[0]}; "
+                    "exact host cleanup receipts are retained"
+                )
+                continue
+            cleared.add(identity)
+        retained = [
+            receipt
+            for receipt in worktree_receipts
+            if receipt["task"] != task_slug
+            or _host_receipt_identity(receipt) not in cleared
+        ]
+        if retained != worktree_receipts:
+            try:
+                _write_worktree_receipts(worktree_path, retained)
+            except OSError:
+                warn(
+                    "could not update recorded remote worktrees after cleanup; "
+                    "exact cleanup receipts are retained"
+                )
+                return set()
+        return cleared
+    finally:
+        for _path, descriptor in reversed(lock_fds):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
+def _cleanup_recorded_run_refs(
+    task, *, config, store, shell, warn, resolver, cleared_worktree_hosts=None
+) -> list[str]:
+    """Clean only receipts whose current stable registration identity still matches."""
+    task_slug = _task_slug(task)
+    path = _receipt_path(store._project_path.parent)
+    lock_fd = _receipt_lock(path)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        receipts = _load_receipts(path)
+        try:
+            current_hosts = store.effective_hosts()
+        except RunHostError:
+            for receipt in receipts:
+                if receipt["task"] == task_slug:
+                    warn(
+                        f"could not delete {receipt['repo']}'s recorded run ref: could not validate host identity"
+                    )
+            return []
+        repos = getattr(config, "repos", {})
+        deleted: list[str] = []
+        retained: list[dict[str, str]] = []
+        for receipt in receipts:
+            if receipt["task"] != task_slug:
+                retained.append(receipt)
+                continue
+            if (
+                cleared_worktree_hosts is not None
+                and _host_receipt_identity(receipt) not in cleared_worktree_hosts
+            ):
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref; "
+                    "remote task worktree cleanup is not proven"
+                )
+                retained.append(receipt)
+                continue
+            host = current_hosts.get(receipt["host_name"])
+            if (
+                host is None
+                or host.scope != receipt["host_scope"]
+                or _endpoint_fingerprint(host.connection)
+                != receipt["host_endpoint_fingerprint"]
+            ):
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref on {receipt['host_name']}: host identity changed or is unavailable"
+                )
+                retained.append(receipt)
+                continue
+            repo_config = repos.get(receipt["repo"])
+            try:
+                expected_ref = run_ref(task_slug, receipt["repo"])
+            except RunRefNameError:
+                expected_ref = None
+            if repo_config is None or receipt["ref"] != expected_ref:
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref: recorded destination is invalid"
+                )
+                retained.append(receipt)
+                continue
+            try:
+                conn = resolver.resolve(host)
+                _delete_recorded_ref(
+                    shell,
+                    Path(repo_config.path),
+                    conn=conn,
+                    workspace_id=getattr(host.connection, "workspace_id", None),
+                    repo=receipt["repo"],
+                    ref=receipt["ref"],
+                    expected_sha=receipt["sha"],
+                )
+            except RunHostError, RunTransferError, RunRefNameError:
+                # A failed delete is ambiguous; never query/replay and retain the lease.
+                warn(
+                    f"could not delete {receipt['repo']}'s recorded run ref; the exact ref remains recorded"
+                )
+                retained.append(receipt)
+                continue
+            deleted.append(receipt["repo"])
+        if retained != receipts:
+            try:
+                _write_receipts(path, retained)
+            except OSError:
+                warn(
+                    "could not update recorded run refs after cleanup; exact receipt cleanup will retry"
+                )
+        return deleted
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def cleanup_recorded_run_refs(task, *, config, store, shell, warn) -> list[str]:
+    """Best-effort exact-receipt cleanup, retaining any uncertain deletion."""
+    from mship.core.run_host import RunHostResolver
+
+    return _cleanup_recorded_run_refs(
+        task,
+        config=config,
+        store=store,
+        shell=shell,
+        warn=warn,
+        resolver=RunHostResolver(),
+    )

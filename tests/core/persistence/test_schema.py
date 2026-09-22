@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.schema import (
+    app_runs,
     metadata,
     task_dependencies,
     task_repos,
@@ -64,10 +65,41 @@ def _task_row(slug: str = "task-a", **updates: object) -> dict[str, object]:
     return row
 
 
+def _app_run_row(**updates: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "run-a",
+        "task_slug": "task-a",
+        "repo": "api",
+        "profile": "ios-development",
+        "profile_revision": "a" * 64,
+        "backend": "flutter",
+        "backend_revision": "adapter-r2",
+        "host_name": "studio",
+        "host_scope": "project",
+        "host_endpoint_fingerprint": "b" * 64,
+        "safe_target_label": "iPhone 16",
+        "private_binding_ref": "c" * 43,
+        "operation": "run",
+        "protocol_version": 1,
+        "capabilities_json": '["run"]',
+        "owner_ref": None,
+        "owner_generation": None,
+        "status": "starting",
+        "revision": 0,
+        "created_at": "2026-09-12T22:30:00+00:00",
+        "updated_at": "2026-09-12T22:30:00+00:00",
+        "binary_provenance_json": None,
+    }
+    row.update(updates)
+    return row
+
+
 def test_one_task_slug_has_one_workitem_owner(connection: Connection) -> None:
     _seed_work_items(connection)
     connection.execute(
-        workitem_tasks.insert().values(work_item_id="wi-a", task_slug="task-a", ordinal=0)
+        workitem_tasks.insert().values(
+            work_item_id="wi-a", task_slug="task-a", ordinal=0
+        )
     )
 
     with pytest.raises(IntegrityError):
@@ -187,3 +219,49 @@ def test_task_cannot_depend_on_itself(connection: Connection) -> None:
                 created_at="2026-09-07T00:00:00+00:00",
             )
         )
+
+
+def test_app_run_requires_exact_task_repo_and_blocks_task_cascade(
+    connection: Connection,
+) -> None:
+    connection.execute(tasks.insert().values(**_task_row()))
+
+    with pytest.raises(IntegrityError):
+        connection.execute(app_runs.insert().values(**_app_run_row()))
+
+    connection.execute(
+        task_repos.insert().values(
+            task_slug="task-a",
+            repo_name="api",
+            affected_ordinal=0,
+            passive=False,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        connection.execute(app_runs.insert().values(**_app_run_row(status="active")))
+    connection.execute(
+        app_runs.insert().values(
+            **_app_run_row(
+                id="known-owner",
+                status="unknown",
+                owner_ref="operation-42",
+                owner_generation="generation-7",
+            )
+        )
+    )
+    with pytest.raises(IntegrityError):
+        connection.execute(
+            app_runs.insert().values(
+                **_app_run_row(
+                    id="untrusted-provenance",
+                    binary_provenance_json='{"source_revision":"not-proof"}',
+                )
+            )
+        )
+
+    with pytest.raises(IntegrityError):
+        connection.execute(app_runs.insert().values(**_app_run_row(status="running")))
+
+    connection.execute(app_runs.insert().values(**_app_run_row()))
+    with pytest.raises(IntegrityError):
+        connection.execute(tasks.delete().where(tasks.c.slug == "task-a"))

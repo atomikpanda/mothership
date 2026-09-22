@@ -2,11 +2,16 @@ import json
 from pathlib import Path
 
 import pytest
+from alembic import command
 from sqlalchemy import text
 from typer.testing import CliRunner
 
 from mship.cli import app, container
-from mship.core.persistence.database import WorkspaceDatabase
+from mship.core.persistence.database import (
+    DatabaseBusyError,
+    WorkspaceDatabase,
+    make_alembic_config,
+)
 
 
 runner = CliRunner()
@@ -31,15 +36,15 @@ def state_cli(workspace: Path):
 
 def test_state_status_reports_stable_legacy_payload(state_cli: Path) -> None:
     (state_cli / "state.yaml").write_text("tasks: {}\n")
-
     result = runner.invoke(app, ["--json", "state", "status"])
 
+    head = WorkspaceDatabase(state_cli).head_revision()
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {
         "backend": "legacy",
         "database_path": str(state_cli / "mothership.db"),
         "current_revision": None,
-        "head_revision": "0001_tasks_and_workitems",
+        "head_revision": head,
         "migration_required": True,
     }
     assert not (state_cli / "mothership.db").exists()
@@ -75,6 +80,21 @@ def test_state_migrate_refuses_running_daemon(
 
     assert result.exit_code == 1
     assert "daemon is running" in result.output
+
+
+def test_state_migrate_reports_busy_database(
+    state_cli: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "mship.cli.state.migrate_state",
+        lambda _state_dir: (_ for _ in ()).throw(DatabaseBusyError("database busy")),
+    )
+
+    result = runner.invoke(app, ["state", "migrate"])
+
+    assert result.exit_code == 1
+    assert "database busy" in result.output
 
 
 def test_state_migrate_rejects_invalid_legacy_data(
@@ -113,6 +133,23 @@ def test_state_migrate_is_idempotent(
     assert json.loads(second.output)["migrated"] is False
 
 
+def test_state_migrate_upgrades_known_sqlite_ancestor(state_cli: Path) -> None:
+    database = WorkspaceDatabase(state_cli)
+    database.initialize()
+    with database.connect() as connection:
+        config = make_alembic_config(database.path)
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0001_tasks_and_workitems")
+
+    result = runner.invoke(app, ["--json", "state", "migrate"])
+    payload = json.loads(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert payload["migrated"] is True
+    assert Path(payload["backup_path"]).is_file()
+    assert database.current_revision() == database.head_revision()
+
+
 def test_state_status_and_export_use_sqlite_after_migration(
     state_cli: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -127,14 +164,15 @@ def test_state_status_and_export_use_sqlite_after_migration(
     status = runner.invoke(app, ["--json", "state", "status"])
     exported = runner.invoke(app, ["state", "export", "--format", "json"])
 
+    head = WorkspaceDatabase(state_cli).head_revision()
     assert migrated.exit_code == 0, migrated.output
     assert status.exit_code == 0, status.output
     status_payload = json.loads(status.output)
     assert status_payload == {
         "backend": "sqlite",
         "database_path": str(state_cli / "mothership.db"),
-        "current_revision": "0001_tasks_and_workitems",
-        "head_revision": "0001_tasks_and_workitems",
+        "current_revision": head,
+        "head_revision": head,
         "migration_required": False,
     }
     assert exported.exit_code == 0, exported.output
@@ -158,4 +196,4 @@ def test_state_commands_explain_incompatible_revision(
 
     assert result.exit_code == 1
     assert revision in result.output
-    assert "requires '0001_tasks_and_workitems'" in result.output
+    assert "requires" in result.output

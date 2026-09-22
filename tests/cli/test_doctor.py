@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -5,7 +7,9 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellResult, ShellRunner
+
 
 runner = CliRunner()
 
@@ -134,3 +138,94 @@ def test_doctor_json_keys_are_additive(configured_doctor_app, monkeypatch):
     # Each check object keeps its stable schema:
     for c in data["checks"]:
         assert set(c.keys()) == {"name", "status", "message"}
+
+
+def test_doctor_bare_remote_with_following_options_reaches_task_validation(
+    workspace: Path,
+):
+    (workspace / "mothership.yaml").write_text(
+        """\
+workspace: test-platform
+repos:
+  app:
+    path: app
+    type: service
+"""
+    )
+    app_dir = workspace / "app"
+    app_dir.mkdir()
+    (app_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(workspace / ".mothership")
+    (workspace / ".mothership").mkdir(exist_ok=True)
+    try:
+        result = runner.invoke(
+            app,
+            ["doctor", "--remote", "--task", "no-such-task", "--repo", "app"],
+        )
+        assert result.exit_code == 1
+        assert "--task" in result.output and "active" in result.output.lower()
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_doctor_trailing_bare_remote_reaches_remote_validation(
+    configured_doctor_app: Path,
+):
+    result = runner.invoke(app, ["doctor", "--remote"])
+    assert result.exit_code == 1
+    assert "--repo" in result.output
+
+
+def test_doctor_explicit_remote_role_reaches_run_host_validation(workspace: Path):
+    (workspace / "mothership.yaml").write_text(
+        """\
+workspace: test-platform
+run_hosts: [default]
+repos:
+  app:
+    path: app
+    type: service
+"""
+    )
+    app_dir = workspace / "app"
+    app_dir.mkdir()
+    (app_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(workspace / ".mothership")
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    try:
+        StateManager(state_dir).save(
+            WorkspaceState(
+                tasks={
+                    "task-1": Task(
+                        slug="task-1",
+                        description="remote host validation",
+                        phase="dev",
+                        created_at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                        affected_repos=["app"],
+                        worktrees={"app": app_dir},
+                        branch="feat/task-1",
+                    )
+                }
+            )
+        )
+        result = runner.invoke(
+            app,
+            ["doctor", "--remote=studio", "--task", "task-1", "--repo", "app"],
+        )
+        assert result.exit_code == 1
+        assert "studio" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()

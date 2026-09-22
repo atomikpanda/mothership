@@ -769,6 +769,29 @@ def test_doctor_accepts_taskfile_yaml_only(tmp_path: Path):
     assert "Taskfile.yaml" in tf.message
 
 
+@pytest.mark.parametrize("project_tasks", [False, True])
+def test_doctor_taskfile_requirement_tracks_project_overrides(tmp_path, project_tasks):
+    repo = tmp_path / "app"
+    repo.mkdir()
+    path = tmp_path / "mothership.yaml"
+    path.write_text(
+        "workspace: integrated\nrepos:\n"
+        "  app:\n    path: app\n    type: service\n"
+        "    run_backends:\n      browser:\n        builtin: browser\n"
+        + (
+            "        operations: {logs: project-logs}\n"
+            "    tasks: {project-logs: logs}\n"
+            if project_tasks else ""
+        )
+    )
+    config = ConfigLoader.load(path, require_paths=False)
+    report = DoctorChecker(config, _doctor_shell(), probe_network=False).run()
+    checks = {check.name: check for check in report.checks}
+    assert checks["app/taskfile"].status == ("fail" if project_tasks else "pass")
+    if not project_tasks:
+        assert "app/taskfile_parse" not in checks
+
+
 # --- connectivity group (sourced from core.topology.probe_topology) ---
 
 def _shell_ok():

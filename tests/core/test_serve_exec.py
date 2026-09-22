@@ -11,6 +11,7 @@ Two layers are covered:
     (line-per-chunk task output + a trailing `__MSHIP_EXIT__ <code>` line —
     a non-zero task exit is conveyed as data, never an HTTP error).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,12 +19,15 @@ import errno
 import fcntl
 import hashlib
 import io
+import json
 import multiprocessing
 import os
 import signal
 import shlex
+import shutil
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -34,6 +38,7 @@ from starlette.requests import ClientDisconnect
 
 from mship.core import remote_exec
 from mship.core.config import RepoConfig, WorkspaceConfig
+from mship.core.remote_tool import ToolRequest, iter_tool_events
 from mship.core.serve import ExecBody, create_app
 from mship.core.state import StateManager
 from mship.util import shell as shell_module
@@ -43,82 +48,174 @@ from mship.util.shell import ShellResult
 # --- shared fakes -----------------------------------------------------------
 
 
-class _GatedStdout:
-    """Feeds canned lines one at a time. If `gate`/`gate_before` are set, the
-    line at index `gate_before` blocks (bounded by a 2s timeout, so a test
-    can never hang forever) until the test calls `gate.set()` — used to prove
-    a consumer received earlier lines before this one was even produced."""
+def _cwd_identity(cwd: int) -> tuple[int, int]:
+    """Record an execution directory before its owner closes the FD."""
+    assert isinstance(cwd, int), "task spawn must receive a directory FD"
+    stat = os.fstat(cwd)
+    return stat.st_dev, stat.st_ino
 
-    def __init__(self, lines, gate: threading.Event | None = None, gate_before: int | None = None):
-        self._lines = list(lines)
-        self._i = 0
-        self._gate = gate
-        self._gate_before = gate_before
 
-    def readline(self):
-        if self._i >= len(self._lines):
-            return ""
-        if self._gate is not None and self._i == self._gate_before:
-            self._gate.wait(timeout=2)
-        line = self._lines[self._i]
-        self._i += 1
-        return line
+def _path_identity(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino
 
-    def close(self):
-        pass
+
+def _assert_spawn_cwd(call: dict, expected: Path) -> None:
+    assert call["cwd_identity"] == _path_identity(expected)
 
 
 class _FakeProc:
-    """Popen-shaped fake: canned stdout lines + stderr text + a canned
-    returncode, standing in for `ShellRunner.run_streaming`'s real Popen."""
+    """Canned program specification; supervision always receives a real Popen."""
 
-    def __init__(self, stdout_lines=(), stderr_text="", returncode=0, gate=None, gate_before=None):
-        self.stdout = _GatedStdout(stdout_lines, gate=gate, gate_before=gate_before)
-        self.stderr = io.StringIO(stderr_text)
-        self._returncode = returncode
+    def __init__(
+        self, stdout_lines=(), stderr_text="", returncode=0, gate=None, gate_before=None
+    ):
+        self.stdout_lines = list(stdout_lines)
+        self.stderr_text = stderr_text
+        self.returncode = returncode
+        self.gate = gate
+        self.gate_before = gate_before
+        self.process = None
+        self.cwd_identity = None
 
-    def wait(self):
-        return self._returncode
+    def spawn(self, cwd, env):
+        self.cwd_identity = _cwd_identity(cwd)
+        gate_path = None
+        if self.gate is not None:
+            gate_fd, gate_path = tempfile.mkstemp()
+            os.close(gate_fd)
+            os.unlink(gate_path)
+        payload = json.dumps(
+            {
+                "stdout": self.stdout_lines,
+                "stderr": self.stderr_text,
+                "returncode": self.returncode,
+                "gate_before": self.gate_before if self.gate is not None else None,
+                "gate_path": gate_path,
+            }
+        )
+        program = (
+            "import json, os, sys, time\n"
+            "p = json.loads(sys.argv[1])\n"
+            "for i, line in enumerate(p['stdout']):\n"
+            "    if i == p['gate_before']:\n"
+            "        while not os.path.exists(p['gate_path']): time.sleep(0.01)\n"
+            "        os.unlink(p['gate_path'])\n"
+            "    os.write(1, line.encode())\n"
+            "os.write(2, p['stderr'].encode())\n"
+            "sys.exit(p['returncode'])\n"
+        )
+        self.process = shell_module.ShellRunner().spawn_argv(
+            [sys.executable, "-c", program, payload],
+            cwd,
+            env,
+        )
+        if self.gate is not None:
+
+            def release_gate():
+                if not self.gate.wait(timeout=2):
+                    return
+                try:
+                    Path(gate_path).touch()
+                except OSError:
+                    pass
+
+            threading.Thread(target=release_gate, daemon=True).start()
+        return self.process
+
+
+class _LiveProc:
+    """Real quiet/EOF process used to prove disconnect cleanup and reaping."""
+
+    def __init__(self, started, finished, *, output=False, close_pipes=False):
+        self.started = started
+        self.finished = finished
+        self.output = output
+        self.close_pipes = close_pipes
+        self.process = None
+        self.cwd_identity = None
+
+    def spawn(self, cwd, env):
+        self.cwd_identity = _cwd_identity(cwd)
+        program = "import os, time\n"
+        if self.output:
+            program += "os.write(1, b'owned\\n')\n"
+        if self.close_pipes:
+            program += "os.close(1)\nos.close(2)\n"
+        program += "time.sleep(30)\n"
+        self.process = shell_module.ShellRunner().spawn_argv(
+            [sys.executable, "-c", program],
+            cwd,
+            env,
+        )
+
+        def observe_exit():
+            while self.process.returncode is None:
+                try:
+                    if shell_module._owned_process_exited(self.process):
+                        break
+                except RuntimeError:
+                    break
+                time.sleep(0.01)
+            self.finished.set()
+
+        threading.Thread(target=observe_exit, daemon=True).start()
+        self.started.set()
+        return self.process
+
+    def cleanup(self):
+        if self.process is not None:
+            self.process.kill()
+            self.process.wait(timeout=3)
+            self.finished.wait(timeout=3)
 
 
 class _FakeShellRunner:
-    """Stands in for `mship.util.shell.ShellRunner`. `.run_argv()` records
-    each git command as display text plus cwd and returns a canned
-    `ShellResult` looked up by that text (`rev_responses` supports successive
-    responses for repeated commands). `.run_streaming()` returns the canned
-    `_FakeProc` and records what it was invoked with."""
+    """Fake git preparation with real binary children for tool supervision."""
 
     def __init__(self, *, streaming_proc=None, rev_responses=None):
         self.run_calls: list[tuple[str, Path]] = []
         self.streaming_calls: list[dict] = []
-        self._rev_responses = {
-            k: list(v) for k, v in (rev_responses or {}).items()
-        }
+        self._rev_responses = {k: list(v) for k, v in (rev_responses or {}).items()}
         self._streaming_proc = streaming_proc
-
-    def build_command(self, command, env_runner=None):
-        if env_runner:
-            return f"{env_runner} {command}"
-        return command
 
     def run(self, command, cwd, env=None, cancel_event=None):
         self.run_calls.append((command, Path(cwd)))
         seq = self._rev_responses.get(command)
         if seq:
             return seq.pop(0) if len(seq) > 1 else seq[0]
+        if command == "git rev-parse HEAD":
+            return ShellResult(returncode=0, stdout="a" * 40, stderr="")
         return ShellResult(returncode=0, stdout="", stderr="")
 
     def run_argv(self, args, cwd, env=None, cancel_event=None):
-        return self.run(
-            shlex.join(args),
-            cwd,
-            env=env,
-            cancel_event=cancel_event,
-        )
+        result = self.run(shlex.join(args), cwd, env=env, cancel_event=cancel_event)
+        if list(args[:3]) == ["git", "worktree", "add"] and result.returncode == 0:
+            destination = Path(args[-2])
+            destination.mkdir(parents=True, exist_ok=True)
+            if Path(cwd).is_dir():
+                shutil.copytree(
+                    cwd,
+                    destination,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".git"),
+                )
+            if not (destination / ".git").exists():
+                (destination / ".git").touch()
+        return result
 
-    def run_streaming(self, command, cwd, env=None):
-        self.streaming_calls.append({"command": command, "cwd": Path(cwd), "env": env})
-        return self._streaming_proc
+    def spawn_argv(self, args, cwd, env):
+        return self._process_for(args, cwd, env)
+
+    def _process_for(self, args, cwd, env=None):
+        self.streaming_calls.append(
+            {
+                "args": list(args),
+                "cwd_identity": _cwd_identity(cwd),
+                "env": env,
+            }
+        )
+        return self._streaming_proc.spawn(cwd, env)
 
 
 def _config(tmp_path: Path, *, base_branch: str | None = None) -> WorkspaceConfig:
@@ -128,7 +225,8 @@ def _config(tmp_path: Path, *, base_branch: str | None = None) -> WorkspaceConfi
         workspace="t",
         repos={
             "api": RepoConfig(
-                path=repo_dir, type="service",
+                path=repo_dir,
+                type="service",
                 tasks={"run": "start", "capture": "capture", "build": "build"},
                 base_branch=base_branch,
             ),
@@ -148,18 +246,26 @@ def _config_with_child(tmp_path: Path) -> WorkspaceConfig:
         workspace="t",
         repos={
             "app": RepoConfig(
-                path=parent_dir, type="service",
+                path=parent_dir,
+                type="service",
                 tasks={"run": "start", "capture": "capture", "build": "build"},
             ),
             "server": RepoConfig(
-                path=Path("server"), type="service", git_root="app",
+                path=Path("server"),
+                type="service",
+                git_root="app",
                 tasks={"run": "start", "capture": "capture", "build": "build"},
             ),
         },
     )
 
 
-def _app(tmp_path: Path, *, auth_token: str | None = None, config: WorkspaceConfig | None = None):
+def _app(
+    tmp_path: Path,
+    *,
+    auth_token: str | None = None,
+    config: WorkspaceConfig | None = None,
+):
     return create_app(
         specs_dir=tmp_path / "specs",
         state_manager=StateManager(tmp_path / ".mothership"),
@@ -176,22 +282,24 @@ def _patch_shell(monkeypatch, fake: _FakeShellRunner):
 
 
 class _ArtifactWritingShellRunner(_FakeShellRunner):
-    """Like `_FakeShellRunner`, but `.run_streaming()` first writes canned
-    files into `env["MSHIP_CAPTURE_DIR"]` before returning the canned proc —
-    standing in for the real go-task `capture:` target (adb/simctl/etc.)
-    actually producing `screen.png`/`layout.*` there."""
+    """Like `_FakeShellRunner`, but records and launches its structured argv
+    after writing canned files into `env["MSHIP_CAPTURE_DIR"]` — standing in
+    for the real go-task `capture:` target (adb/simctl/etc.) actually producing
+    `screen.png`/`layout.*` there."""
 
-    def __init__(self, *, streaming_proc, artifacts: dict[str, bytes] | None = None, **kw):
+    def __init__(
+        self, *, streaming_proc, artifacts: dict[str, bytes] | None = None, **kw
+    ):
         super().__init__(streaming_proc=streaming_proc, **kw)
         self._artifacts = artifacts or {}
 
-    def run_streaming(self, command, cwd, env=None):
+    def _process_for(self, args, cwd, env=None):
         if env and "MSHIP_CAPTURE_DIR" in env:
             out_dir = Path(env["MSHIP_CAPTURE_DIR"])
             out_dir.mkdir(parents=True, exist_ok=True)
             for name, content in self._artifacts.items():
                 (out_dir / name).write_bytes(content)
-        return super().run_streaming(command, cwd, env=env)
+        return super()._process_for(args, cwd, env=env)
 
 
 # A fixed nonce for direct `run_verb_stream` calls (the HTTP layer generates a
@@ -219,10 +327,17 @@ def _hold_remote_exec_stream(
     root = Path(workspace_root)
     fake = _FakeShellRunner()
     deps = remote_exec.RemoteExecDeps(
-        config=_config(root), shell=fake, workspace_root=root,
+        config=_config(root),
+        shell=fake,
+        workspace_root=root,
     )
     stream = remote_exec.run_verb_stream(
-        "run", "t1", ["unknown"], None, deps=deps, nonce="processholder",
+        "run",
+        "t1",
+        ["unknown"],
+        None,
+        deps=deps,
+        nonce="processholder",
     )
     try:
         first = next(stream)
@@ -230,7 +345,9 @@ def _hold_remote_exec_stream(
             raise AssertionError(first)
         ready.set()
         if not release.wait(timeout=10):
-            raise TimeoutError("parent did not release the held remote execution stream")
+            raise TimeoutError(
+                "parent did not release the held remote execution stream"
+            )
     finally:
         stream.close()
 
@@ -246,11 +363,20 @@ def _assert_task_lock_failure(
     nonce: str,
 ) -> None:
     deps = remote_exec.RemoteExecDeps(
-        config=_config(workspace_root), shell=fake, workspace_root=workspace_root,
+        config=_config(workspace_root),
+        shell=fake,
+        workspace_root=workspace_root,
     )
-    lines = list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=deps, nonce=nonce,
-    ))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce=nonce,
+        )
+    )
     assert b"remote-task locking" in lines[0]
     assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{nonce} 1\n".encode()
     assert not fake.run_calls
@@ -331,10 +457,16 @@ def _assert_same_task_replacement(workspace_root: Path) -> None:
         shell=replacement_fake,
         workspace_root=workspace_root,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None,
-        deps=replacement_deps, nonce="replacementnonce",
-    ))[-2:] == [
+    assert list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=replacement_deps,
+            nonce="replacementnonce",
+        )
+    )[-2:] == [
         b"replacement\n",
         b"__MSHIP_EXIT__:replacementnonce 0\n",
     ]
@@ -376,11 +508,17 @@ def test_run_verb_stream_yields_lines_as_produced_not_buffered(tmp_path):
     `next()` below would itself block on the gate — which isn't set yet —
     and this test would hang (bounded to ~2s by the gate's own timeout)."""
     gate = threading.Event()
-    proc = _FakeProc(stdout_lines=["first\n", "second\n"], returncode=0, gate=gate, gate_before=1)
+    proc = _FakeProc(
+        stdout_lines=["first\n", "second\n"], returncode=0, gate=gate, gate_before=1
+    )
     fake = _FakeShellRunner(streaming_proc=proc)
-    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path
+    )
 
-    gen = remote_exec.run_verb_stream("run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE)
+    gen = remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE
+    )
     first = next(gen)
     assert first == b"first\n"
     # Not released yet — proves the generator didn't need "second" to produce "first".
@@ -392,38 +530,25 @@ def test_run_verb_stream_yields_lines_as_produced_not_buffered(tmp_path):
 
 
 def test_run_verb_stream_client_disconnect_cleans_up_tempdir_and_proc(tmp_path):
-    """FIX 8: a client disconnect (the generator being `.close()`d while
-    suspended at a yield mid-stream) must not leak the capture temp dir OR the
-    still-running task subprocess. The per-repo `finally` removes the temp dir
-    and terminates the proc."""
-    gate = threading.Event()  # never set -> line 2 blocks; generator stays suspended
-
-    class _TerminableProc(_FakeProc):
-        pid = None  # not a real OS pid -> _terminate_proc falls back to .terminate()
-
-        def __init__(self, **kw):
-            super().__init__(**kw)
-            self.terminated = False
-
-        def poll(self):
-            return None  # still running
-
-        def terminate(self):
-            self.terminated = True
-
-    proc = _TerminableProc(stdout_lines=["line1\n", "line2\n"], returncode=0, gate=gate, gate_before=1)
+    started, finished = threading.Event(), threading.Event()
+    proc = _LiveProc(started, finished, output=True)
     fake = _FakeShellRunner(streaming_proc=proc)
-    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
-
-    gen = remote_exec.run_verb_stream("capture", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE)
-    assert next(gen) == b"line1\n"  # first line delivered; generator now suspended at the yield
-    capture_dir = Path(fake.streaming_calls[0]["env"]["MSHIP_CAPTURE_DIR"])
-    assert capture_dir.exists()
-
-    gen.close()  # simulate the client hanging up -> GeneratorExit at the suspended yield
-
-    assert proc.terminated, "the running task subprocess must be terminated on disconnect"
-    assert not capture_dir.exists(), "the capture temp dir must be removed on disconnect"
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path
+    )
+    gen = remote_exec.run_verb_stream(
+        "capture", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE
+    )
+    try:
+        assert next(gen) == b"owned\n"
+        capture_dir = Path(fake.streaming_calls[0]["env"]["MSHIP_CAPTURE_DIR"])
+        assert capture_dir.exists()
+        gen.close()
+        assert finished.wait(timeout=3), "disconnect must reap the real child"
+        assert not capture_dir.exists()
+    finally:
+        gen.close()
+        proc.cleanup()
 
 
 def test_exec_response_does_not_require_create_collapsing_task_group(
@@ -456,103 +581,29 @@ def test_exec_response_does_not_require_create_collapsing_task_group(
 
 
 def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
-    tmp_path,
-    monkeypatch,
+    tmp_path, monkeypatch
 ):
-    started = threading.Event()
-    terminated = threading.Event()
-    unblock = threading.Event()
-
-    class _BlockingStream:
-        def readline(self):
-            unblock.wait(timeout=5)
-            return ""
-
-        def close(self):
-            pass
-
-    class _QuietProc:
-        pid = None
-        stdout = _BlockingStream()
-        stderr = _BlockingStream()
-
-        def wait(self):
-            unblock.wait(timeout=5)
-            return 0
-
-        def poll(self):
-            return 0 if unblock.is_set() else None
-
-        def terminate(self):
-            terminated.set()
-            unblock.set()
-
-    class _SignalingShellRunner(_FakeShellRunner):
-        def run_streaming(self, command, cwd, env=None):
-            proc = super().run_streaming(command, cwd, env=env)
-            started.set()
-            return proc
-
-    fake = _SignalingShellRunner(streaming_proc=_QuietProc())
-    _patch_shell(monkeypatch, fake)
-    app = _app(tmp_path)
-    _disconnect_exec_request(app, started, terminated, unblock.set)
+    started, finished = threading.Event(), threading.Event()
+    proc = _LiveProc(started, finished)
+    _patch_shell(monkeypatch, _FakeShellRunner(streaming_proc=proc))
+    _disconnect_exec_request(_app(tmp_path), started, finished, proc.cleanup)
     _assert_same_task_replacement(tmp_path)
 
 
 def test_exec_asgi24_idle_disconnect_reaps_proc_and_releases_task_lock(
-    tmp_path,
-    monkeypatch,
+    tmp_path, monkeypatch
 ):
-    started = threading.Event()
-    terminated = threading.Event()
-    reaped = threading.Event()
-    unblock = threading.Event()
-
-    class _BlockingStream:
-        def readline(self):
-            unblock.wait(timeout=5)
-            return ""
-
-        def close(self):
-            pass
-
-    class _QuietProc:
-        pid = None
-        stdout = _BlockingStream()
-        stderr = _BlockingStream()
-
-        def wait(self):
-            unblock.wait(timeout=5)
-            reaped.set()
-            return 0
-
-        def poll(self):
-            return 0 if unblock.is_set() else None
-
-        def terminate(self):
-            terminated.set()
-            unblock.set()
-
-    class _SignalingShellRunner(_FakeShellRunner):
-        def run_streaming(self, command, cwd, env=None):
-            proc = super().run_streaming(command, cwd, env=env)
-            started.set()
-            return proc
-
-    fake = _SignalingShellRunner(streaming_proc=_QuietProc())
-    _patch_shell(monkeypatch, fake)
-    app = _app(tmp_path)
-
+    started, finished = threading.Event(), threading.Event()
+    proc = _LiveProc(started, finished)
+    _patch_shell(monkeypatch, _FakeShellRunner(streaming_proc=proc))
     messages = _disconnect_exec_request(
-        app,
+        _app(tmp_path),
         started,
-        terminated,
-        unblock.set,
+        finished,
+        proc.cleanup,
         spec_version="2.4",
     )
-
-    assert reaped.is_set()
+    assert proc.process.returncode is not None
     assert all(
         not message.get("body")
         for message in messages
@@ -565,40 +616,9 @@ def test_exec_asgi24_send_disconnect_reaps_proc_and_releases_task_lock(
     tmp_path,
     monkeypatch,
 ):
-    started = threading.Event()
-    terminated = threading.Event()
-    reaped = threading.Event()
-    unblock = threading.Event()
-
-    class _OneLineAliveProc:
-        pid = None
-        stdout = _GatedStdout(
-            ["owned\n", ""],
-            gate=unblock,
-            gate_before=1,
-        )
-        stderr = io.StringIO("")
-
-        def wait(self):
-            unblock.wait(timeout=5)
-            reaped.set()
-            return 0
-
-        def poll(self):
-            return 0 if unblock.is_set() else None
-
-        def terminate(self):
-            terminated.set()
-            unblock.set()
-
-    class _SignalingShellRunner(_FakeShellRunner):
-        def run_streaming(self, command, cwd, env=None):
-            proc = super().run_streaming(command, cwd, env=env)
-            started.set()
-            return proc
-
-    fake = _SignalingShellRunner(streaming_proc=_OneLineAliveProc())
-    _patch_shell(monkeypatch, fake)
+    started, finished = threading.Event(), threading.Event()
+    proc = _LiveProc(started, finished, output=True)
+    _patch_shell(monkeypatch, _FakeShellRunner(streaming_proc=proc))
     app = _app(tmp_path)
     scope = _exec_asgi_scope()
     scope["asgi"] = {"version": "3.0", "spec_version": "2.4"}
@@ -624,11 +644,10 @@ def test_exec_asgi24_send_disconnect_reaps_proc_and_releases_task_lock(
     try:
         with pytest.raises(ClientDisconnect):
             asyncio.run(app(scope, receive, send))
+        assert finished.wait(timeout=3), "send failure must reap the child"
     finally:
-        unblock.set()
+        proc.cleanup()
 
-    assert terminated.is_set()
-    assert reaped.is_set()
     assert receive_calls == 2
     _assert_same_task_replacement(tmp_path)
 
@@ -643,6 +662,8 @@ def test_exec_http_disconnect_cancels_blocked_materialization(
     real_popen = shell_module.subprocess.Popen
 
     def blocking_popen(_command, **kwargs):
+        if _command[0] != "git":
+            return real_popen(_command, **kwargs)
         proc = real_popen(
             [sys.executable, "-c", "import signal; signal.pause()"],
             cwd=kwargs.get("cwd"),
@@ -678,47 +699,16 @@ def test_exec_http_disconnect_cancels_blocked_materialization(
     )
 
     assert processes[0].returncode is not None
+    monkeypatch.setattr(shell_module.subprocess, "Popen", real_popen)
     _assert_same_task_replacement(tmp_path)
 
 
-def test_exec_http_disconnect_terminates_proc_after_pipe_eof(
-    tmp_path,
-    monkeypatch,
-):
-    started = threading.Event()
-    terminated = threading.Event()
-    reaped = threading.Event()
-    unblock = threading.Event()
-
-    class _EofAliveProc:
-        pid = None
-        stdout = io.StringIO("")
-        stderr = io.StringIO("")
-
-        def wait(self):
-            unblock.wait(timeout=5)
-            reaped.set()
-            return 0
-
-        def poll(self):
-            return 0 if unblock.is_set() else None
-
-        def terminate(self):
-            terminated.set()
-            unblock.set()
-
-    class _SignalingShellRunner(_FakeShellRunner):
-        def run_streaming(self, command, cwd, env=None):
-            proc = super().run_streaming(command, cwd, env=env)
-            started.set()
-            return proc
-
-    fake = _SignalingShellRunner(streaming_proc=_EofAliveProc())
-    _patch_shell(monkeypatch, fake)
-    app = _app(tmp_path)
-
-    _disconnect_exec_request(app, started, terminated, unblock.set)
-    assert reaped.is_set()
+def test_exec_http_disconnect_terminates_proc_after_pipe_eof(tmp_path, monkeypatch):
+    started, finished = threading.Event(), threading.Event()
+    proc = _LiveProc(started, finished, close_pipes=True)
+    _patch_shell(monkeypatch, _FakeShellRunner(streaming_proc=proc))
+    _disconnect_exec_request(_app(tmp_path), started, finished, proc.cleanup)
+    assert proc.process.returncode is not None
     _assert_same_task_replacement(tmp_path)
 
 
@@ -759,17 +749,22 @@ while True:
     processes = []
 
     class _ProcessTreeShellRunner(_FakeShellRunner):
-        def run_streaming(self, command, cwd, env=None):
-            proc = shell_module.subprocess.Popen(
+        def _process_for(self, args, cwd, env=None):
+            self.streaming_calls.append(
+                {
+                    "args": list(args),
+                    "cwd_identity": _cwd_identity(cwd),
+                    "env": env,
+                }
+            )
+            proc = shell_module.ShellRunner().spawn_argv(
                 [sys.executable, "-c", child_code, str(ready_path)],
-                cwd=tmp_path,
-                stdout=shell_module.subprocess.PIPE,
-                stderr=shell_module.subprocess.PIPE,
-                text=True,
-                start_new_session=True,
+                cwd,
+                env,
             )
             processes.append(proc)
             return proc
+
     signals: list[tuple[int, int]] = []
     real_killpg = os.killpg
 
@@ -790,14 +785,16 @@ while True:
 
     def consume_stream() -> None:
         try:
-            list(remote_exec.run_verb_stream(
-                "run",
-                "t1",
-                ["api"],
-                None,
-                deps=deps,
-                nonce="descendantnonce",
-            ))
+            list(
+                remote_exec.run_verb_stream(
+                    "run",
+                    "t1",
+                    ["api"],
+                    None,
+                    deps=deps,
+                    nonce="descendantnonce",
+                )
+            )
         except BaseException as exc:
             errors.append(exc)
 
@@ -835,53 +832,27 @@ while True:
             pass
 
 
-def test_normal_stream_does_not_signal_reaped_process_group(
-    tmp_path,
-    monkeypatch,
-):
-    signals = []
-
-    def record_killpg(process_group, signum):
-        signals.append((process_group, signum))
-
-    monkeypatch.setattr(shell_module.os, "killpg", record_killpg)
-
-    class _CompletedProc(_FakeProc):
-        pid = 424242
-
-        def poll(self):
-            return 0
-
-    fake = _FakeShellRunner(
-        streaming_proc=_CompletedProc(stdout_lines=["done\n"]),
+def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
+    gate = threading.Event()
+    first_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(
+            stdout_lines=["first\n", "second\n"],
+            gate=gate,
+            gate_before=1,
+        )
     )
-    deps = remote_exec.RemoteExecDeps(
+    first_deps = remote_exec.RemoteExecDeps(
         config=_config(tmp_path),
-        shell=fake,
+        shell=first_fake,
         workspace_root=tmp_path,
     )
-
-    assert list(remote_exec.run_verb_stream(
+    first = remote_exec.run_verb_stream(
         "run",
         "t1",
         ["api"],
         None,
-        deps=deps,
-        nonce="normalnonce",
-    ))[-1] == b"__MSHIP_EXIT__:normalnonce 0\n"
-    assert not signals
-
-
-def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
-    gate = threading.Event()
-    first_fake = _FakeShellRunner(streaming_proc=_FakeProc(
-        stdout_lines=["first\n", "second\n"], gate=gate, gate_before=1,
-    ))
-    first_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=first_fake, workspace_root=tmp_path,
-    )
-    first = remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=first_deps, nonce="firstnonce",
+        deps=first_deps,
+        nonce="firstnonce",
     )
     assert next(first) == b"first\n"
 
@@ -889,11 +860,20 @@ def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
         streaming_proc=_FakeProc(stdout_lines=["different\n"]),
     )
     different_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=different_fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=different_fake,
+        workspace_root=tmp_path,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t2", ["api"], None, deps=different_deps, nonce="differentnonce",
-    )) == [
+    assert list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t2",
+            ["api"],
+            None,
+            deps=different_deps,
+            nonce="differentnonce",
+        )
+    ) == [
         b"different\n",
         b"__MSHIP_EXIT__:differentnonce 0\n",
     ]
@@ -902,12 +882,20 @@ def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
         streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
     )
     contender_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=contender_fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=contender_fake,
+        workspace_root=tmp_path,
     )
-    contender = list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None,
-        deps=contender_deps, nonce="contendernonce",
-    ))
+    contender = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=contender_deps,
+            nonce="contendernonce",
+        )
+    )
     assert contender == [
         b"error: remote task 't1' is already running; try again after it finishes\n",
         b"__MSHIP_EXIT__:contendernonce 2\n",
@@ -922,12 +910,20 @@ def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
         streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
     )
     replacement_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=replacement_fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=replacement_fake,
+        workspace_root=tmp_path,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None,
-        deps=replacement_deps, nonce="replacementnonce",
-    ))[-2:] == [
+    assert list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=replacement_deps,
+            nonce="replacementnonce",
+        )
+    )[-2:] == [
         b"replacement\n",
         b"__MSHIP_EXIT__:replacementnonce 0\n",
     ]
@@ -939,22 +935,43 @@ def test_task_lock_releases_after_stream_exhaustion(tmp_path, returncode):
         streaming_proc=_FakeProc(stdout_lines=["finished\n"], returncode=returncode),
     )
     first_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=first_fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=first_fake,
+        workspace_root=tmp_path,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=first_deps, nonce="firstnonce",
-    ))[-1] == f"__MSHIP_EXIT__:firstnonce {returncode}\n".encode()
+    assert (
+        list(
+            remote_exec.run_verb_stream(
+                "run",
+                "t1",
+                ["api"],
+                None,
+                deps=first_deps,
+                nonce="firstnonce",
+            )
+        )[-1]
+        == f"__MSHIP_EXIT__:firstnonce {returncode}\n".encode()
+    )
     assert _task_lock_path(tmp_path, "t1").is_file()
 
     next_fake = _FakeShellRunner(
         streaming_proc=_FakeProc(stdout_lines=["next\n"]),
     )
     next_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=next_fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=next_fake,
+        workspace_root=tmp_path,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=next_deps, nonce="nextnonce",
-    ))[-2:] == [
+    assert list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=next_deps,
+            nonce="nextnonce",
+        )
+    )[-2:] == [
         b"next\n",
         b"__MSHIP_EXIT__:nextnonce 0\n",
     ]
@@ -962,9 +979,13 @@ def test_task_lock_releases_after_stream_exhaustion(tmp_path, returncode):
 
 def test_task_lock_releases_when_execution_raises(tmp_path):
     class _RaisingShellRunner(_FakeShellRunner):
-        def run_streaming(self, command, cwd, env=None):
+        def _process_for(self, args, cwd, env=None):
             self.streaming_calls.append(
-                {"command": command, "cwd": Path(cwd), "env": env},
+                {
+                    "args": list(args),
+                    "cwd_identity": _cwd_identity(cwd),
+                    "env": env,
+                }
             )
             raise RuntimeError("streaming exploded")
 
@@ -973,21 +994,38 @@ def test_task_lock_releases_when_execution_raises(tmp_path):
         shell=_RaisingShellRunner(),
         workspace_root=tmp_path,
     )
-    with pytest.raises(RuntimeError, match="streaming exploded"):
-        list(remote_exec.run_verb_stream(
-            "run", "t1", ["api"], None, deps=failing_deps, nonce="failingnonce",
-        ))
+    failed = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=failing_deps,
+            nonce="failingnonce",
+        )
+    )
+    assert failed[-1] == b"__MSHIP_EXIT__:failingnonce 1\n"
+    assert b"streaming exploded" not in b"".join(failed)
     assert _task_lock_path(tmp_path, "t1").is_file()
 
     next_fake = _FakeShellRunner(
         streaming_proc=_FakeProc(stdout_lines=["recovered\n"]),
     )
     next_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=next_fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=next_fake,
+        workspace_root=tmp_path,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=next_deps, nonce="nextnonce",
-    ))[-2:] == [
+    assert list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=next_deps,
+            nonce="nextnonce",
+        )
+    )[-2:] == [
         b"recovered\n",
         b"__MSHIP_EXIT__:nextnonce 0\n",
     ]
@@ -1006,12 +1044,20 @@ def test_concurrent_process_contends_for_same_task_lock(tmp_path):
         assert ready.wait(timeout=10)
         fake = _FakeShellRunner()
         deps = remote_exec.RemoteExecDeps(
-            config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+            config=_config(tmp_path),
+            shell=fake,
+            workspace_root=tmp_path,
         )
-        contender = list(remote_exec.run_verb_stream(
-            "run", "t1", ["unknown"], None,
-            deps=deps, nonce="processcontender",
-        ))
+        contender = list(
+            remote_exec.run_verb_stream(
+                "run",
+                "t1",
+                ["unknown"],
+                None,
+                deps=deps,
+                nonce="processcontender",
+            )
+        )
         assert contender == [
             b"error: remote task 't1' is already running; try again after it finishes\n",
             b"__MSHIP_EXIT__:processcontender 2\n",
@@ -1023,7 +1069,6 @@ def test_concurrent_process_contends_for_same_task_lock(tmp_path):
             proc.terminate()
             proc.join(timeout=10)
     assert proc.exitcode == 0
-
 
 
 def _make_linux_proc_unavailable(tmp_path, monkeypatch):
@@ -1052,14 +1097,16 @@ def test_cancellable_remote_preflight_fails_before_lock_or_shell_work(
         cancel_event=threading.Event(),
     )
 
-    lines = list(remote_exec.run_verb_stream(
-        "run",
-        "t1",
-        ["api"],
-        None,
-        deps=deps,
-        nonce="unsupportednonce",
-    ))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce="unsupportednonce",
+        )
+    )
 
     assert lines[0] == (
         b"error: remote execution unavailable; execution was not started\n"
@@ -1122,18 +1169,18 @@ def test_cancellation_infrastructure_detail_is_redacted_from_direct_and_http(
         workspace_root=tmp_path,
         cancel_event=threading.Event(),
     )
-    expected_error = (
-        b"error: remote execution unavailable; execution was not started\n"
-    )
+    expected_error = b"error: remote execution unavailable; execution was not started\n"
 
-    direct = list(remote_exec.run_verb_stream(
-        "run",
-        "t1",
-        ["api"],
-        None,
-        deps=deps,
-        nonce="redactednonce",
-    ))
+    direct = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce="redactednonce",
+        )
+    )
 
     assert direct == [
         expected_error,
@@ -1159,7 +1206,7 @@ def test_cancellation_infrastructure_detail_is_redacted_from_direct_and_http(
     assert not fake.streaming_calls
 
 
-def test_direct_remote_without_cancellation_does_not_require_linux_proc(
+def test_remote_without_external_cancellation_still_requires_ownership(
     tmp_path,
     monkeypatch,
 ):
@@ -1173,20 +1220,20 @@ def test_direct_remote_without_cancellation_does_not_require_linux_proc(
         workspace_root=tmp_path,
     )
 
-    lines = list(remote_exec.run_verb_stream(
-        "run",
-        "t1",
-        ["api"],
-        None,
-        deps=deps,
-        nonce="directnonce",
-    ))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce="directnonce",
+        )
+    )
 
-    assert lines[-2:] == [
-        b"ran\n",
-        b"__MSHIP_EXIT__:directnonce 0\n",
-    ]
-    assert fake.streaming_calls
+    assert lines[-1] == b"__MSHIP_EXIT__:directnonce 1\n"
+    assert b"ran\n" not in lines
+    assert not (tmp_path / ".worktrees" / "t1").exists()
 
 
 def test_remote_modules_import_when_fcntl_is_unavailable():
@@ -1230,14 +1277,16 @@ def test_remote_without_fcntl_fails_locking_before_shell_work(
         workspace_root=tmp_path,
     )
 
-    lines = list(remote_exec.run_verb_stream(
-        "run",
-        "t1",
-        ["api"],
-        None,
-        deps=deps,
-        nonce="nofcntlnonce",
-    ))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce="nofcntlnonce",
+        )
+    )
 
     assert lines == [
         b"error: remote-task locking failed; execution was not started\n",
@@ -1246,6 +1295,7 @@ def test_remote_without_fcntl_fails_locking_before_shell_work(
     assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
     assert not fake.run_calls
     assert not fake.streaming_calls
+
 
 def test_task_lock_failure_to_create_directory_fails_closed(tmp_path):
     (tmp_path / ".mothership").write_text("not a directory")
@@ -1284,11 +1334,20 @@ def test_task_lock_eacces_from_flock_is_contention(tmp_path, monkeypatch):
         streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
     )
     deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=deps, nonce="eaccesnonce",
-    )) == [
+    assert list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce="eaccesnonce",
+        )
+    ) == [
         b"error: remote task 't1' is already running; try again after it finishes\n",
         b"__MSHIP_EXIT__:eaccesnonce 2\n",
     ]
@@ -1297,9 +1356,15 @@ def test_task_lock_eacces_from_flock_is_contention(tmp_path, monkeypatch):
 
 
 def test_run_verb_stream_unknown_verb_raises(tmp_path):
-    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=_FakeShellRunner(), workspace_root=tmp_path)
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=_FakeShellRunner(), workspace_root=tmp_path
+    )
     try:
-        list(remote_exec.run_verb_stream("frobnicate", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE))
+        list(
+            remote_exec.run_verb_stream(
+                "frobnicate", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE
+            )
+        )
         assert False, "expected UnknownVerbError"
     except remote_exec.UnknownVerbError:
         pass
@@ -1313,106 +1378,91 @@ def test_run_verb_stream_unknown_repo_does_not_raise_keyerror(tmp_path):
     unknown repo name used to raise a raw KeyError mid-generator. It must
     instead fail cleanly: a clear error line + a non-zero __MSHIP_EXIT__,
     with NO task ever executed (checked upfront, before the per-repo loop)."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
-    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0)
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path
+    )
 
-    lines = list(remote_exec.run_verb_stream("run", "t1", ["ghost-repo"], None, deps=deps, nonce=_TEST_NONCE))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run", "t1", ["ghost-repo"], None, deps=deps, nonce=_TEST_NONCE
+        )
+    )
     text = [l.decode() for l in lines]
     assert text[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
     exit_code = int(text[-1].split(" ", 1)[1].strip())
     assert exit_code != 0
     assert any("ghost-repo" in l for l in text[:-1])
-    assert not fake.streaming_calls, "no task should run once an unknown repo is detected"
+    assert not fake.streaming_calls, (
+        "no task should run once an unknown repo is detected"
+    )
 
 
-def test_run_verb_stream_unknown_repo_among_known_ones_rejects_before_any_task_runs(tmp_path):
+def test_run_verb_stream_unknown_repo_among_known_ones_rejects_before_any_task_runs(
+    tmp_path,
+):
     """A mix of a known + unknown repo must fail before the known repo's task
     ever executes (fail fast on the whole request), not partway through."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
-    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path
+    )
 
-    lines = list(remote_exec.run_verb_stream("run", "t1", ["api", "ghost-repo"], None, deps=deps, nonce=_TEST_NONCE))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run", "t1", ["api", "ghost-repo"], None, deps=deps, nonce=_TEST_NONCE
+        )
+    )
     text = [l.decode() for l in lines]
     exit_code = int(text[-1].split(" ", 1)[1].strip())
     assert exit_code != 0
     assert not fake.streaming_calls
 
 
-def test_generator_selects_server_owned_repo_names_preserving_request_order(
-    tmp_path,
-    monkeypatch,
-):
+def test_generator_selects_server_owned_repo_names_preserving_request_order(tmp_path):
+    class CwdProgram:
+        def spawn(self, cwd, env):
+            return shell_module.ShellRunner().spawn_argv(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; print(Path.cwd().name)",
+                ],
+                cwd,
+                env,
+            )
+
     config = _config(tmp_path)
-    server_api = next(iter(config.repos))
-    server_web = "".join(["w", "eb"])
     web_path = tmp_path / "web"
     web_path.mkdir()
-    config.repos[server_web] = RepoConfig(path=web_path, type="service")
-
-    external_api = (" " + server_api)[1:]
-    external_web = (" " + server_web)[1:]
-    assert external_api == server_api and external_api is not server_api
-    assert external_web == server_web and external_web is not server_web
-
-    materialized_names = []
-    run_ref_names = []
-
-    def observe_materialize(
-        shell,
-        repo_path,
-        worktree_path,
-        branch,
-        *,
-        repo_name,
-        run_ref=None,
-        cancel_event=None,
-    ):
-        materialized_names.append(repo_name)
-
-    def observe_run_ref(task, repo):
-        run_ref_names.append(repo)
-        return f"refs/mship/run/{task}/{repo}"
-
-    monkeypatch.setattr(remote_exec, "materialize_worktree", observe_materialize)
-    monkeypatch.setattr(remote_exec, "build_run_ref", observe_run_ref)
-    fake = _FakeShellRunner(
-        streaming_proc=_FakeProc(stdout_lines=["ok\n"]),
-    )
+    config.repos["web"] = RepoConfig(path=web_path, type="service")
+    fake = _FakeShellRunner(streaming_proc=CwdProgram())
     deps = remote_exec.RemoteExecDeps(
-        config=config,
-        shell=fake,
-        workspace_root=tmp_path,
+        config=config, shell=fake, workspace_root=tmp_path
     )
-
-    lines = list(remote_exec.run_verb_stream(
+    stream = remote_exec.run_verb_stream(
         "run",
         "t1",
-        [external_web, external_api, external_web],
+        ["web", "api", "web"],
         None,
         deps=deps,
         nonce="canonicalrepos",
-        run_ref_repos=[external_web, external_api, external_web],
-    ))
-
-    assert lines[-1] == b"__MSHIP_EXIT__:canonicalrepos 0\n"
-    assert len(materialized_names) == 2
-    assert materialized_names[0] is server_web
-    assert materialized_names[1] is server_api
-    assert len(run_ref_names) == 2
-    assert any(name is server_api for name in run_ref_names)
-    assert any(name is server_web for name in run_ref_names)
-    assert [call["cwd"].name for call in fake.streaming_calls] == [
-        server_web,
-        server_api,
-        server_web,
-    ]
+        run_ref_repos=["web", "api", "web"],
+    )
+    assert b"".join(stream) == b"web\napi\nweb\n__MSHIP_EXIT__:canonicalrepos 0\n"
 
 
 def test_exec_unknown_repo_in_request_fails_cleanly_not_500(tmp_path, monkeypatch):
     """Through the HTTP layer: an unknown repo name is conveyed as DATA (200
     + an error line + non-zero exit sentinel), exactly like a failing task —
     never a 500 and never a truncated/broken stream."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
@@ -1429,17 +1479,23 @@ def test_exec_unknown_repo_in_request_fails_cleanly_not_500(tmp_path, monkeypatc
 # --- Task 6 hardening: a branch-materialize failure surfaces cleanly, named with the repo ---
 
 
-def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, monkeypatch):
+def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(
+    tmp_path, monkeypatch
+):
     """If `git fetch`/`git worktree add` fails while materializing a repo's
     task branch, run_verb_stream must not silently continue on to run the
     task against a missing/stale worktree — it should fail cleanly, naming
     the repo, via the same data-conveyed error-line + non-zero-exit pattern."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0)
+    )
 
     def _failing_run(command, cwd, env=None, cancel_event=None):
         fake.run_calls.append((command, Path(cwd)))
         if command.startswith("git worktree add"):
-            return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
+            return ShellResult(
+                returncode=128, stdout="", stderr="fatal: could not create worktree"
+            )
         return ShellResult(returncode=0, stdout="", stderr="")
 
     fake.run = _failing_run
@@ -1452,7 +1508,9 @@ def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, m
     lines = r.content.decode().splitlines()
     assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{nonce} ")
     assert lines[-1] != _exit_line(nonce, 0)
-    assert any("api" in ln and "fatal: could not create worktree" in ln for ln in lines[:-1])
+    assert any(
+        "api" in ln and "fatal: could not create worktree" in ln for ln in lines[:-1]
+    )
     assert not fake.streaming_calls, "the task must not run once materialize fails"
 
 
@@ -1460,17 +1518,20 @@ def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, m
 
 
 class _SnapshotShellRunner(_FakeShellRunner):
-    """Records a snapshot of the git commands issued SO FAR at the moment
-    each task launch (`run_streaming`) happens — lets a test prove ordering
-    (e.g. the parent's `git worktree add` ran BEFORE the child's task) from a
-    single synchronous generator drain, without wall-clock timing."""
+    """Records git commands issued before each task spawn so this test proves
+    parent materialization precedes the child's structured-argv launch without
+    wall-clock timing."""
 
-    def run_streaming(self, command, cwd, env=None):
-        self.streaming_calls.append({
-            "command": command, "cwd": Path(cwd), "env": env,
-            "git_at_launch": [c for c, _ in self.run_calls],
-        })
-        return self._streaming_proc
+    def _process_for(self, args, cwd, env=None):
+        self.streaming_calls.append(
+            {
+                "args": list(args),
+                "cwd_identity": _cwd_identity(cwd),
+                "env": env,
+                "git_at_launch": [c for c, _ in self.run_calls],
+            }
+        )
+        return self._streaming_proc.spawn(cwd, env)
 
 
 def test_run_verb_stream_git_root_child_only_materializes_parent(tmp_path):
@@ -1479,12 +1540,18 @@ def test_run_verb_stream_git_root_child_only_materializes_parent(tmp_path):
     IS the parent's worktree. Without parent-first materialization the parent
     hub worktree was never fetched/created, so the task ran against the serve
     host's stale/source tree."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ran\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ran\n"], returncode=0)
+    )
     deps = remote_exec.RemoteExecDeps(
         config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path
     )
 
-    lines = list(remote_exec.run_verb_stream("run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE
+        )
+    )
     text = [l.decode() for l in lines]
 
     commands = [c for c, _ in fake.run_calls]
@@ -1502,26 +1569,41 @@ def test_run_verb_stream_git_root_child_only_materializes_parent(tmp_path):
     # The child task ran UNDER the materialized parent hub worktree
     # (<hub>/app/server), not the serve host's source checkout (<tmp>/app/server).
     assert len(fake.streaming_calls) == 1
-    assert fake.streaming_calls[0]["cwd"] == tmp_path / ".worktrees" / "t1" / "app" / "server"
+    _assert_spawn_cwd(
+        fake.streaming_calls[0],
+        tmp_path / ".worktrees" / "t1" / "app" / "server",
+    )
     assert text[-1] == f"__MSHIP_EXIT__:{_TEST_NONCE} 0\n"
 
 
-def test_run_verb_stream_git_root_child_before_parent_materializes_parent_first(tmp_path):
+def test_run_verb_stream_git_root_child_before_parent_materializes_parent_first(
+    tmp_path,
+):
     """FIX A: even when the child is listed BEFORE its parent, the parent is
     materialized before the child's task runs (parent-first), and the parent
     is not re-fetched when the loop later reaches it (idempotent)."""
-    fake = _SnapshotShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    fake = _SnapshotShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
     deps = remote_exec.RemoteExecDeps(
         config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path
     )
 
-    list(remote_exec.run_verb_stream("run", "t1", ["server", "app"], None, deps=deps, nonce=_TEST_NONCE))
+    list(
+        remote_exec.run_verb_stream(
+            "run", "t1", ["server", "app"], None, deps=deps, nonce=_TEST_NONCE
+        )
+    )
 
     # Child ran first; at that instant the parent's worktree-add had already run.
     child_call = fake.streaming_calls[0]
-    assert child_call["cwd"] == tmp_path / ".worktrees" / "t1" / "app" / "server"
+    _assert_spawn_cwd(
+        child_call,
+        tmp_path / ".worktrees" / "t1" / "app" / "server",
+    )
     assert any(
-        c.startswith("git worktree add -B feat/t1 ") for c in child_call["git_at_launch"]
+        c.startswith("git worktree add -B feat/t1 ")
+        for c in child_call["git_at_launch"]
     ), child_call["git_at_launch"]
 
     # Parent materialized exactly once (idempotent): a single worktree-add total.
@@ -1529,17 +1611,23 @@ def test_run_verb_stream_git_root_child_before_parent_materializes_parent_first(
     assert sum(c.startswith("git worktree add") for c in all_cmds) == 1, all_cmds
 
 
-def test_run_verb_stream_git_root_child_parent_materialize_failure_stops_cleanly(tmp_path):
+def test_run_verb_stream_git_root_child_parent_materialize_failure_stops_cleanly(
+    tmp_path,
+):
     """FIX A: if materializing the PARENT (while resolving a git_root child)
     fails, the request fails the same clean way a top-level materialize
     failure does — an error line naming the parent + a non-zero exit — and no
     task runs."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0)
+    )
 
     def _failing_run(command, cwd, env=None, cancel_event=None):
         fake.run_calls.append((command, Path(cwd)))
         if command.startswith("git worktree add"):
-            return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
+            return ShellResult(
+                returncode=128, stdout="", stderr="fatal: could not create worktree"
+            )
         return ShellResult(returncode=0, stdout="", stderr="")
 
     fake.run = _failing_run
@@ -1547,15 +1635,23 @@ def test_run_verb_stream_git_root_child_parent_materialize_failure_stops_cleanly
         config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path
     )
 
-    lines = list(remote_exec.run_verb_stream("run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE))
+    lines = list(
+        remote_exec.run_verb_stream(
+            "run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE
+        )
+    )
     text = [l.decode() for l in lines]
 
     assert text[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
     exit_code = int(text[-1].split(" ", 1)[1].strip())
     assert exit_code != 0
     # Error names the PARENT repo (the one whose materialize failed).
-    assert any("app" in l and "fatal: could not create worktree" in l for l in text[:-1])
-    assert not fake.streaming_calls, "no task must run once the parent materialize fails"
+    assert any(
+        "app" in l and "fatal: could not create worktree" in l for l in text[:-1]
+    )
+    assert not fake.streaming_calls, (
+        "no task must run once the parent materialize fails"
+    )
 
 
 # --- POST /exec/{verb} -------------------------------------------------------
@@ -1577,8 +1673,11 @@ def test_exec_unknown_verb_is_404(tmp_path, monkeypatch):
 def test_exec_without_config_is_503(tmp_path, monkeypatch):
     _patch_shell(monkeypatch, _FakeShellRunner(streaming_proc=_FakeProc()))
     app = create_app(
-        specs_dir=tmp_path / "specs", state_manager=StateManager(tmp_path / ".mothership"),
-        log_manager=None, workspace_root=tmp_path, workspace_name="test-ws",
+        specs_dir=tmp_path / "specs",
+        state_manager=StateManager(tmp_path / ".mothership"),
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
         # config omitted entirely
     )
     r = TestClient(app).post("/exec/run", json={"task": "t1", "repos": ["api"]})
@@ -1668,7 +1767,9 @@ def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeyp
     lines = r.content.decode().splitlines()
     assert "hello" in lines
     assert "world" in lines
-    assert lines[-1] == _exit_line(_nonce_of(r), 0)  # trailing exit-code sentinel, conveyed as data
+    assert lines[-1] == _exit_line(
+        _nonce_of(r), 0
+    )  # trailing exit-code sentinel, conveyed as data
 
     commands = [c for c, _ in fake.run_calls]
     # Branch materialize: fetch the task's branch, then (no prior worktree at
@@ -1683,8 +1784,8 @@ def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeyp
     # The go-task run target ran in the freshly materialized worktree.
     assert len(fake.streaming_calls) == 1
     call = fake.streaming_calls[0]
-    assert call["command"] == "task start"
-    assert call["cwd"] == tmp_path / ".worktrees" / "t1" / "api"
+    assert call["args"] == ["task", "start"]
+    _assert_spawn_cwd(call, tmp_path / ".worktrees" / "t1" / "api")
 
 
 def test_exec_run_resets_existing_worktree_to_latest_branch(tmp_path, monkeypatch):
@@ -1692,7 +1793,9 @@ def test_exec_run_resets_existing_worktree_to_latest_branch(tmp_path, monkeypatc
     + hard-reset it to the branch's new tip, not try to `worktree add` again."""
     wt = tmp_path / ".worktrees" / "t1" / "api"
     (wt / ".git").mkdir(parents=True)  # simulate a worktree already materialized here
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
@@ -1705,7 +1808,9 @@ def test_exec_run_resets_existing_worktree_to_latest_branch(tmp_path, monkeypatc
 
 
 def test_exec_nonzero_task_exit_conveyed_not_500(tmp_path, monkeypatch):
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["oops\n"], returncode=2))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["oops\n"], returncode=2)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
     r = client.post("/exec/run", json={"task": "t1", "repos": ["api"]})
@@ -1716,7 +1821,9 @@ def test_exec_nonzero_task_exit_conveyed_not_500(tmp_path, monkeypatch):
 
 
 def test_exec_capture_sets_capture_env_contract(tmp_path, monkeypatch):
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["captured\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["captured\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
@@ -1726,7 +1833,7 @@ def test_exec_capture_sets_capture_env_contract(tmp_path, monkeypatch):
     )
     assert r.status_code == 200
     call = fake.streaming_calls[0]
-    assert call["command"] == "task capture"
+    assert call["args"] == ["task", "capture"]
     env = call["env"]
     assert env["MSHIP_CAPTURE_PLATFORM"] == "ios"
     assert env["MSHIP_CAPTURE_KINDS"] == "image,layout"
@@ -1734,21 +1841,17 @@ def test_exec_capture_sets_capture_env_contract(tmp_path, monkeypatch):
     assert Path(env["MSHIP_CAPTURE_DIR"]).is_absolute()
 
 
-def test_exec_run_has_no_capture_env(tmp_path, monkeypatch):
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
-    _patch_shell(monkeypatch, fake)
-    client = TestClient(_app(tmp_path))
-    client.post("/exec/run", json={"task": "t1", "repos": ["api"]})
-    assert fake.streaming_calls[0]["env"] is None
-
-
 def test_exec_mos203_warns_when_base_behind_origin(tmp_path, monkeypatch):
     """MOS-203: before materializing, the remote auto-fetches the task's base
     branch; if origin had moved, a warning line surfaces into the stream."""
     rev_responses = {
         "git rev-parse origin/main": [
-            ShellResult(returncode=0, stdout="a" * 40 + "\n", stderr=""),  # before the fetch
-            ShellResult(returncode=0, stdout="b" * 40 + "\n", stderr=""),  # after the fetch
+            ShellResult(
+                returncode=0, stdout="a" * 40 + "\n", stderr=""
+            ),  # before the fetch
+            ShellResult(
+                returncode=0, stdout="b" * 40 + "\n", stderr=""
+            ),  # after the fetch
         ],
     }
     fake = _FakeShellRunner(
@@ -1790,7 +1893,9 @@ def test_exec_response_streams_over_http_in_multiple_chunks(tmp_path, monkeypatc
     exit-code sentinel — the true incremental-yield proof lives in
     test_run_verb_stream_yields_lines_as_produced_not_buffered above, which
     exercises the same generator without depending on TestClient/ASGI timing."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["a\n", "b\n", "c\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["a\n", "b\n", "c\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
@@ -1833,13 +1938,17 @@ def test_exec_capture_streams_artifact_tar_before_exit_sentinel(tmp_path, monkey
         assert tar.extractfile("layout.json").read() == b'{"a": 1}'
 
 
-def test_exec_capture_no_artifacts_is_an_error_not_silent_success(tmp_path, monkeypatch):
+def test_exec_capture_no_artifacts_is_an_error_not_silent_success(
+    tmp_path, monkeypatch
+):
     """FIX 7 (parity with local `capture.run_capture`): a capture whose task
     exits 0 but produces NO recognized artifact (empty MSHIP_CAPTURE_DIR) is a
     HARD error, not a silent success — the remote emits a "no recognized
     artifact" error line and a NON-ZERO exit sentinel, and never an artifact
     block."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["nothing here\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["nothing here\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
@@ -1874,10 +1983,10 @@ def test_exec_capture_task_failure_emits_no_artifact_block(tmp_path, monkeypatch
 
 
 def test_exec_run_and_build_never_emit_artifact_block(tmp_path, monkeypatch):
-    """run/build stay stream-only regardless of what MSHIP_CAPTURE_DIR would
-    hold — that env var isn't even set for them (see
-    test_exec_run_has_no_capture_env), so there's nothing to discover."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    """run/build remain stream-only; artifacts belong to capture requests."""
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
@@ -1892,20 +2001,25 @@ def test_exec_body_accepts_run_ref_repos(tmp_path, monkeypatch):
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
     r = client.post(
-        "/exec/run", json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
     )
     assert r.status_code == 200
     # A 200 alone doesn't prove the field was captured — pydantic silently
     # drops unrecognized keys by default, so a body without the field would
     # also 200. Assert directly on the model to catch that.
-    assert ExecBody(task="t1", repos=["api"], run_ref_repos=["api"]).run_ref_repos == ["api"]
+    assert ExecBody(task="t1", repos=["api"], run_ref_repos=["api"]).run_ref_repos == [
+        "api"
+    ]
 
 
 def test_exec_body_defaults_run_ref_repos_to_empty(tmp_path, monkeypatch):
     """An older client omits the key; the host must behave exactly as before."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     _patch_shell(monkeypatch, fake)
-    r = TestClient(_app(tmp_path)).post("/exec/run", json={"task": "t1", "repos": ["api"]})
+    r = TestClient(_app(tmp_path)).post(
+        "/exec/run", json={"task": "t1", "repos": ["api"]}
+    )
     assert r.status_code == 200
     assert any("fetch origin feat/t1" in cmd for cmd, _cwd in fake.run_calls)
 
@@ -1919,15 +2033,22 @@ from mship.util.shell import ShellRunner
 
 _REAL_GIT_ENV = {
     **os.environ,
-    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
 }
 
 
 def _real_git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
         env=_REAL_GIT_ENV,
     ).stdout.strip()
 
@@ -1958,7 +2079,7 @@ def _host_repo_with_run_ref(tmp_path: Path) -> tuple[Path, str, str]:
     _real_git("update-ref", "refs/mship/run/t1/api", scratch, cwd=repo)
 
     _real_git("reset", "-q", "--hard", tip, cwd=repo)
-    assert _real_git("remote", cwd=repo) == ""      # nothing to fetch from
+    assert _real_git("remote", cwd=repo) == ""  # nothing to fetch from
     return repo, tip, scratch
 
 
@@ -2005,8 +2126,12 @@ def test_materialize_from_a_run_ref_creates_a_detached_worktree(tmp_path):
     worktree = tmp_path / "wt" / "api"
 
     remote_exec.materialize_worktree(
-        ShellRunner(), repo, worktree, "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        ShellRunner(),
+        repo,
+        worktree,
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
 
     assert _real_git("rev-parse", "HEAD", cwd=worktree) == scratch
@@ -2020,14 +2145,21 @@ def test_the_run_ref_worktree_is_detached_not_a_branch(tmp_path):
     repo, _tip, _scratch = _host_repo_with_run_ref(tmp_path)
     worktree = tmp_path / "wt" / "api"
     remote_exec.materialize_worktree(
-        ShellRunner(), repo, worktree, "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        ShellRunner(),
+        repo,
+        worktree,
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
     head_ref = subprocess.run(
-        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=worktree,
-        capture_output=True, text=True, env=_REAL_GIT_ENV,
+        ["git", "symbolic-ref", "--quiet", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        env=_REAL_GIT_ENV,
     )
-    assert head_ref.returncode != 0          # detached: no symbolic HEAD
+    assert head_ref.returncode != 0  # detached: no symbolic HEAD
 
 
 def test_a_stale_worktree_lands_on_the_pushed_tree_not_the_branch_tip(tmp_path):
@@ -2038,19 +2170,26 @@ def test_a_stale_worktree_lands_on_the_pushed_tree_not_the_branch_tip(tmp_path):
     worktree.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "worktree", "add", "-q", str(worktree), "feat/t1"],
-        cwd=repo, capture_output=True, check=True, env=_REAL_GIT_ENV,
+        cwd=repo,
+        capture_output=True,
+        check=True,
+        env=_REAL_GIT_ENV,
     )
     (worktree / "a.txt").write_text("stale local edit\n")
     (worktree / "leftover.txt").write_text("from the last run\n")
 
     remote_exec.materialize_worktree(
-        ShellRunner(), repo, worktree, "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        ShellRunner(),
+        repo,
+        worktree,
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
 
     assert _real_git("rev-parse", "HEAD", cwd=worktree) == scratch != tip
     assert (worktree / "a.txt").read_text() == "what the operator is editing\n"
-    assert not (worktree / "leftover.txt").exists()   # cleaned, so the copy is exact
+    assert not (worktree / "leftover.txt").exists()  # cleaned, so the copy is exact
     assert _real_git("status", "--porcelain", cwd=worktree) == ""
 
 
@@ -2063,21 +2202,31 @@ def test_re_materializing_never_moves_the_task_branch(tmp_path):
     worktree.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "worktree", "add", "-q", str(worktree), "feat/t1"],
-        cwd=repo, capture_output=True, check=True, env=_REAL_GIT_ENV,
+        cwd=repo,
+        capture_output=True,
+        check=True,
+        env=_REAL_GIT_ENV,
     )
 
     remote_exec.materialize_worktree(
-        ShellRunner(), repo, worktree, "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        ShellRunner(),
+        repo,
+        worktree,
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
 
     assert _real_git("rev-parse", "feat/t1", cwd=repo) == tip != scratch
     assert _real_git("rev-parse", "HEAD", cwd=repo) == tip
     head_ref = subprocess.run(
-        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=worktree,
-        capture_output=True, text=True, env=_REAL_GIT_ENV,
+        ["git", "symbolic-ref", "--quiet", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        env=_REAL_GIT_ENV,
     )
-    assert head_ref.returncode != 0          # detached, so nothing to drag
+    assert head_ref.returncode != 0  # detached, so nothing to drag
 
 
 def test_materializing_leaves_the_run_hosts_own_checkout_alone(tmp_path):
@@ -2087,8 +2236,12 @@ def test_materializing_leaves_the_run_hosts_own_checkout_alone(tmp_path):
     branches_before = _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo)
 
     remote_exec.materialize_worktree(
-        ShellRunner(), repo, tmp_path / "wt" / "api", "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        ShellRunner(),
+        repo,
+        tmp_path / "wt" / "api",
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
 
     assert _real_git("rev-parse", "HEAD", cwd=repo) == tip
@@ -2096,15 +2249,22 @@ def test_materializing_leaves_the_run_hosts_own_checkout_alone(tmp_path):
     assert _real_git("rev-parse", "refs/mship/run/t1/api", cwd=repo) == scratch
     assert _real_git("status", "--porcelain", cwd=repo) == ""
     # ac14: no branch was created pointing at the synthesized commit.
-    assert _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo) == branches_before
+    assert (
+        _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo)
+        == branches_before
+    )
 
 
 def test_materializing_from_a_run_ref_issues_no_fetch(tmp_path):
     """ac10 as a command-level invariant: origin is not consulted, at all."""
     fake = _FakeShellRunner()
     remote_exec.materialize_worktree(
-        fake, tmp_path / "api", tmp_path / "wt" / "api", "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        fake,
+        tmp_path / "api",
+        tmp_path / "wt" / "api",
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
     assert not any("fetch" in cmd for cmd, _cwd in fake.run_calls)
     assert not any("origin" in cmd for cmd, _cwd in fake.run_calls)
@@ -2119,11 +2279,15 @@ def test_re_materializing_an_existing_worktree_issues_no_fetch(tmp_path):
     (worktree / ".git").write_text("gitdir: elsewhere\n")
 
     remote_exec.materialize_worktree(
-        fake, tmp_path / "api", worktree, "feat/t1",
-        repo_name="api", run_ref="refs/mship/run/t1/api",
+        fake,
+        tmp_path / "api",
+        worktree,
+        "feat/t1",
+        repo_name="api",
+        run_ref="refs/mship/run/t1/api",
     )
 
-    assert fake.run_calls                            # it did do something
+    assert fake.run_calls  # it did do something
     assert not any("fetch" in cmd for cmd, _cwd in fake.run_calls)
     assert not any("origin" in cmd for cmd, _cwd in fake.run_calls)
 
@@ -2133,7 +2297,11 @@ def test_without_a_run_ref_the_branch_path_is_unchanged(tmp_path):
     fake = _FakeShellRunner()
     worktree = tmp_path / "wt" / "api"
     remote_exec.materialize_worktree(
-        fake, tmp_path / "api", worktree, "feat/t1", repo_name="api",
+        fake,
+        tmp_path / "api",
+        worktree,
+        "feat/t1",
+        repo_name="api",
     )
     assert [cmd for cmd, _cwd in fake.run_calls] == [
         "git fetch origin feat/t1",
@@ -2147,12 +2315,22 @@ def test_without_a_run_ref_the_branch_path_is_unchanged(tmp_path):
 def test_run_verb_stream_uses_the_scratch_ref_for_named_repos(tmp_path):
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
-    list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["api"],
-    ))
+    list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce=_TEST_NONCE,
+            run_ref_repos=["api"],
+        )
+    )
 
     commands = [cmd for cmd, _cwd in fake.run_calls]
     assert any("refs/mship/run/t1/api" in c for c in commands)
@@ -2165,12 +2343,22 @@ def test_a_repo_not_named_still_comes_from_origin(tmp_path):
     """The mixed case: one repo transferred, another clean."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config_with_child(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
-    list(remote_exec.run_verb_stream(
-        "run", "t1", ["app"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=[],
-    ))
+    list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["app"],
+            None,
+            deps=deps,
+            nonce=_TEST_NONCE,
+            run_ref_repos=[],
+        )
+    )
 
     commands = [cmd for cmd, _cwd in fake.run_calls]
     assert any("fetch origin feat/t1" in c for c in commands)
@@ -2182,12 +2370,22 @@ def test_a_git_root_child_is_materialized_from_its_parents_scratch_ref(tmp_path)
     PARENT's name even when only the child was requested."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config_with_child(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
-    list(remote_exec.run_verb_stream(
-        "run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["app"],
-    ))
+    list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["server"],
+            None,
+            deps=deps,
+            nonce=_TEST_NONCE,
+            run_ref_repos=["app"],
+        )
+    )
 
     commands = [cmd for cmd, _cwd in fake.run_calls]
     assert any("refs/mship/run/t1/app" in c for c in commands)
@@ -2201,21 +2399,28 @@ def test_a_task_name_that_cannot_form_a_ref_fails_cleanly(tmp_path):
     """
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
     lines = [
-        l.decode() for l in remote_exec.run_verb_stream(
-            "run", "a/b", ["api"], None, deps=deps, nonce=_TEST_NONCE,
+        l.decode()
+        for l in remote_exec.run_verb_stream(
+            "run",
+            "a/b",
+            ["api"],
+            None,
+            deps=deps,
+            nonce=_TEST_NONCE,
             run_ref_repos=["api"],
         )
     ]
 
     assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
     assert int(lines[-1].split(" ", 1)[1].strip()) != 0
-    assert any("run ref" in l for l in lines[:-1])
-    assert fake.streaming_calls == []       # the task never started
-    assert fake.run_calls == []             # nor did any git command
+    assert fake.streaming_calls == []  # the task never started
+    assert fake.run_calls == []  # nor did any git command
 
 
 def test_the_base_freshness_probe_is_skipped_for_a_run_ref_repo(tmp_path):
@@ -2227,12 +2432,22 @@ def test_the_base_freshness_probe_is_skipped_for_a_run_ref_repo(tmp_path):
     consults origin. So: no fetch, and no origin probe either."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path, base_branch="main"), shell=fake, workspace_root=tmp_path,
+        config=_config(tmp_path, base_branch="main"),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
-    list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["api"],
-    ))
+    list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api"],
+            None,
+            deps=deps,
+            nonce=_TEST_NONCE,
+            run_ref_repos=["api"],
+        )
+    )
 
     commands = [cmd for cmd, _cwd in fake.run_calls]
     assert any("refs/mship/run/t1/api" in c for c in commands)
@@ -2248,7 +2463,9 @@ def _config_two_repos(tmp_path: Path) -> WorkspaceConfig:
         repo_dir = tmp_path / name
         repo_dir.mkdir(exist_ok=True)
         repos[name] = RepoConfig(
-            path=repo_dir, type="service", base_branch="main",
+            path=repo_dir,
+            type="service",
+            base_branch="main",
             tasks={"run": "start", "capture": "capture", "build": "build"},
         )
     return WorkspaceConfig(workspace="t", repos=repos)
@@ -2261,13 +2478,22 @@ def test_a_mixed_run_routes_each_repo_by_its_own_source(tmp_path):
     repo must still get the full branch path including the MOS-203 probe."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config_two_repos(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config_two_repos(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
-    list(remote_exec.run_verb_stream(
-        "run", "t1", ["api", "web"], None, deps=deps, nonce=_TEST_NONCE,
-        run_ref_repos=["api"],
-    ))
+    list(
+        remote_exec.run_verb_stream(
+            "run",
+            "t1",
+            ["api", "web"],
+            None,
+            deps=deps,
+            nonce=_TEST_NONCE,
+            run_ref_repos=["api"],
+        )
+    )
 
     in_api = [cmd for cmd, cwd in fake.run_calls if cwd == tmp_path / "api"]
     in_web = [cmd for cmd, cwd in fake.run_calls if cwd == tmp_path / "web"]
@@ -2276,26 +2502,29 @@ def test_a_mixed_run_routes_each_repo_by_its_own_source(tmp_path):
     assert not any("fetch" in c for c in in_api)
     assert not any("origin" in c for c in in_api)
 
-    assert "git fetch origin main" in in_web           # MOS-203 probe, still there
-    assert "git fetch origin feat/t1" in in_web        # branch path, unchanged
+    assert "git fetch origin main" in in_web  # MOS-203 probe, still there
+    assert "git fetch origin feat/t1" in in_web  # branch path, unchanged
     assert not any("refs/mship/run" in c for c in in_web)
 
     # Both tasks ran, each in its own worktree.
-    assert [c["cwd"] for c in fake.streaming_calls] == [
-        tmp_path / ".worktrees" / "t1" / "api",
-        tmp_path / ".worktrees" / "t1" / "web",
+    assert [c["cwd_identity"] for c in fake.streaming_calls] == [
+        _path_identity(tmp_path / ".worktrees" / "t1" / "api"),
+        _path_identity(tmp_path / ".worktrees" / "t1" / "web"),
     ]
 
 
 def test_exec_endpoint_forwards_run_ref_repos_to_the_run(tmp_path, monkeypatch):
     """End to end over HTTP: the field `ExecBody` already accepts has to reach
     `run_verb_stream`, or the whole transfer is pushed and then ignored."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path, config=_config(tmp_path, base_branch="main")))
 
     r = client.post(
-        "/exec/run", json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
     )
 
     assert r.status_code == 200
@@ -2306,6 +2535,7 @@ def test_exec_endpoint_forwards_run_ref_repos_to_the_run(tmp_path, monkeypatch):
 
 
 # --- setup on the run host, keyed --------------------------------------------
+
 
 def _config_with_setup(tmp_path: Path, *, setup_inputs=None) -> WorkspaceConfig:
     """A repo whose MATERIALIZED WORKTREE really has a Taskfile declaring
@@ -2324,7 +2554,8 @@ def _config_with_setup(tmp_path: Path, *, setup_inputs=None) -> WorkspaceConfig:
         workspace="t",
         repos={
             "api": RepoConfig(
-                path=repo_dir, type="service",
+                path=repo_dir,
+                type="service",
                 tasks={"run": "start"},
                 setup_inputs=setup_inputs or [],
             ),
@@ -2334,7 +2565,8 @@ def _config_with_setup(tmp_path: Path, *, setup_inputs=None) -> WorkspaceConfig:
 
 def _stream_run(deps, **kw) -> list[str]:
     return [
-        l.decode() for l in remote_exec.run_verb_stream(
+        l.decode()
+        for l in remote_exec.run_verb_stream(
             "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, **kw
         )
     ]
@@ -2345,12 +2577,17 @@ def test_setup_runs_the_first_time_a_worktree_is_materialized(tmp_path):
     instead of failing on missing ones."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
-        config=_config_with_setup(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config_with_setup(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
     _stream_run(deps)
 
-    assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]
+    assert [c["args"] for c in fake.streaming_calls] == [
+        ["task", "setup"],
+        ["task", "start"],
+    ]
     # WHERE setup ran, not just that it ran: "from the delivered source" is the
     # whole of ac15. Run in the repo's own checkout instead of the materialized
     # worktree, setup would derive dependencies for the run host's stale tree
@@ -2358,51 +2595,67 @@ def test_setup_runs_the_first_time_a_worktree_is_materialized(tmp_path):
     # exact-source-with-stale-deps trap this feature exists to close. Every
     # other setup test here asserts only the command, which cannot see that.
     worktree = tmp_path / ".worktrees" / "t1" / "api"
-    assert [c["cwd"] for c in fake.streaming_calls] == [worktree, worktree]
+    assert [c["cwd_identity"] for c in fake.streaming_calls] == [
+        _path_identity(worktree),
+        _path_identity(worktree),
+    ]
 
 
 def test_setup_is_skipped_on_the_next_run(tmp_path):
     """ac16: a source-only iteration pays no setup cost."""
     config = _config_with_setup(tmp_path)
     first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=first, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=first, workspace_root=tmp_path)
+    )
 
     second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=second, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=second, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in second.streaming_calls] == ["task start"]
+    assert [c["args"] for c in second.streaming_calls] == [["task", "start"]]
 
 
 def test_setup_re_runs_when_a_declared_input_changes(tmp_path):
     """ac16: a dependency change pays once."""
     config = _config_with_setup(tmp_path, setup_inputs=["package.json"])
     first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=first, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=first, workspace_root=tmp_path)
+    )
 
-    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text('{"deps": 2}\n')
+    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text(
+        '{"deps": 2}\n'
+    )
     second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=second, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=second, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in second.streaming_calls] == ["task setup", "task start"]
+    assert [c["args"] for c in second.streaming_calls] == [
+        ["task", "setup"],
+        ["task", "start"],
+    ]
 
 
 def test_declaring_no_inputs_means_setup_runs_once_only(tmp_path):
     """ac17: nothing to invalidate against, even when a manifest changes."""
     config = _config_with_setup(tmp_path)
     first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=first, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=first, workspace_root=tmp_path)
+    )
 
-    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text('{"deps": 9}\n')
+    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text(
+        '{"deps": 9}\n'
+    )
     second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=second, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=second, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in second.streaming_calls] == ["task start"]
+    assert [c["args"] for c in second.streaming_calls] == [["task", "start"]]
 
 
 def test_a_failing_setup_fails_the_run_with_its_own_output(tmp_path):
@@ -2411,29 +2664,37 @@ def test_a_failing_setup_fails_the_run_with_its_own_output(tmp_path):
         streaming_proc=_FakeProc(stdout_lines=["npm ERR! ENOENT\n"], returncode=3),
     )
     deps = remote_exec.RemoteExecDeps(
-        config=_config_with_setup(tmp_path), shell=fake, workspace_root=tmp_path,
+        config=_config_with_setup(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
     )
 
     lines = _stream_run(deps)
 
-    assert "npm ERR! ENOENT\n" in lines                       # setup's own output
+    assert "npm ERR! ENOENT\n" in lines  # setup's own output
     assert any(l.startswith("error:") and "setup" in l and "api" in l for l in lines)
     assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} 3\n"
-    assert [c["command"] for c in fake.streaming_calls] == ["task setup"]  # run never started
+    assert [c["args"] for c in fake.streaming_calls] == [
+        ["task", "setup"]
+    ]  # run never started
 
 
 def test_a_failed_setup_is_not_recorded_as_done(tmp_path):
     """Caching a failure would skip the retry."""
     config = _config_with_setup(tmp_path)
     failing = _FakeShellRunner(streaming_proc=_FakeProc(returncode=1))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=failing, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(
+            config=config, shell=failing, workspace_root=tmp_path
+        )
+    )
 
     second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=second, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=second, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in second.streaming_calls][0] == "task setup"
+    assert second.streaming_calls[0]["args"] == ["task", "setup"]
 
 
 def test_a_repo_with_no_setup_target_is_not_failed_over_it(tmp_path):
@@ -2445,10 +2706,11 @@ def test_a_repo_with_no_setup_target_is_not_failed_over_it(tmp_path):
     )
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
 
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=fake, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=fake, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in fake.streaming_calls] == ["task start"]
+    assert [c["args"] for c in fake.streaming_calls] == [["task", "start"]]
 
 
 def test_a_repo_declaring_setup_not_applicable_skips_it(tmp_path):
@@ -2456,10 +2718,11 @@ def test_a_repo_declaring_setup_not_applicable_skips_it(tmp_path):
     config.repos["api"].not_applicable = ["setup"]
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
 
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=fake, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=fake, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in fake.streaming_calls] == ["task start"]
+    assert [c["args"] for c in fake.streaming_calls] == [["task", "start"]]
 
 
 def test_setup_honours_an_aliased_target_name(tmp_path):
@@ -2472,10 +2735,14 @@ def test_setup_honours_an_aliased_target_name(tmp_path):
     )
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
 
-    _stream_run(remote_exec.RemoteExecDeps(
-        config=config, shell=fake, workspace_root=tmp_path))
+    _stream_run(
+        remote_exec.RemoteExecDeps(config=config, shell=fake, workspace_root=tmp_path)
+    )
 
-    assert [c["command"] for c in fake.streaming_calls] == ["task bootstrap", "task start"]
+    assert [c["args"] for c in fake.streaming_calls] == [
+        ["task", "bootstrap"],
+        ["task", "start"],
+    ]
 
 
 class _MaterializingShellRunner(_FakeShellRunner):
@@ -2525,14 +2792,451 @@ def test_setup_runs_only_after_materialization_creates_the_worktree(tmp_path):
         workspace="t",
         repos={
             "api": RepoConfig(
-                path=repo_dir, type="service",
+                path=repo_dir,
+                type="service",
                 tasks={"run": "start"},
             ),
         },
     )
     fake = _MaterializingShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
-    deps = remote_exec.RemoteExecDeps(config=config, shell=fake, workspace_root=tmp_path)
+    deps = remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path
+    )
 
     _stream_run(deps)
 
-    assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]
+    assert [c["args"] for c in fake.streaming_calls] == [
+        ["task", "setup"],
+        ["task", "start"],
+    ]
+
+
+def _tool_app(tmp_path, monkeypatch, *, repo_config=None):
+    class RealToolShell(_FakeShellRunner):
+        def spawn_argv(self, args, cwd, env):
+            return shell_module.ShellRunner().spawn_argv(args, cwd, env)
+
+    config = _config(tmp_path)
+    if repo_config is not None:
+        config.repos["api"] = repo_config
+    worktree = tmp_path / ".worktrees" / "t1" / "api"
+    worktree.mkdir(parents=True)
+    sentinel = tmp_path / "setup-ran"
+    setup_command = shlex.join(
+        [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(sentinel)!r}).write_text('ran')",
+        ]
+    )
+    (worktree / "Taskfile.yml").write_text(
+        json.dumps(
+            {
+                "version": "3",
+                "tasks": {"setup": {"cmds": [setup_command]}},
+            }
+        )
+    )
+    _patch_shell(monkeypatch, RealToolShell())
+    app = create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=StateManager(tmp_path / ".mothership"),
+        log_manager=None,
+        workspace_root=tmp_path,
+        config=config,
+        auth_token="tool-test-token",
+    )
+    return TestClient(app), sentinel, worktree
+
+
+def _discovery_request(*, source_revision=None):
+    return ToolRequest(
+        task="t1",
+        repo="api",
+        argv=(
+            sys.executable,
+            "-c",
+            "import json, os, sys; print(json.dumps({'args': sys.argv[1:], "
+            "'secret': os.environ.get('MSHIP_DAEMON_SECRET'), 'cwd': os.getcwd()}))",
+            "literal ; $(false)",
+        ),
+        preparation="discover",
+        source_revision=source_revision,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=128,
+        timeout_seconds=3,
+    )
+
+
+def test_tool_discovery_authenticates_and_never_runs_setup(tmp_path, monkeypatch):
+    monkeypatch.setenv("MSHIP_DAEMON_SECRET", "must-not-reach-the-child")
+    client, sentinel, worktree = _tool_app(tmp_path, monkeypatch)
+    request = _discovery_request(source_revision="a" * 40)
+    payload = request.to_dict()
+    payload.pop("task_key")
+    payload.pop("input_files")
+    denied = client.post("/exec/tool", json=payload)
+    assert denied.status_code == 401
+    assert not sentinel.exists()
+    response = client.post(
+        "/exec/tool",
+        json=payload,
+        headers={"Authorization": "Bearer tool-test-token"},
+    )
+    assert response.status_code == 200
+    events = list(
+        iter_tool_events([response.content], response.headers["X-Mship-Exec-Nonce"])
+    )
+    result = events[-1].result
+    assert result.status == "completed" and result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "args": ["literal ; $(false)"],
+        "secret": None,
+        "cwd": str(worktree),
+    }
+    assert not any(event.kind in {"stdout", "stderr"} for event in events)
+    assert not sentinel.exists()
+
+
+def test_integrated_discovery_ignores_checkout_code_and_requires_sealed_authority(
+    tmp_path, monkeypatch
+):
+    from mship.core.run_target.models import profile_revision
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "isolated-config"))
+    repo = RepoConfig.model_validate(
+        {
+            "path": "api",
+            "type": "service",
+            "run_backends": {"configured": {"builtin": "browser"}},
+            "run_profiles": {
+                "web": {
+                    "backend": "configured",
+                    "hosts": {"roles": ["browser-lab"]},
+                    "options": {},
+                }
+            },
+        }
+    )
+    client, sentinel, worktree = _tool_app(tmp_path, monkeypatch, repo_config=repo)
+    (worktree / "Taskfile.yml").unlink()
+    (worktree / "mship").mkdir()
+    (worktree / "mship" / "__init__.py").write_text(
+        "raise RuntimeError('untrusted checkout package executed')\n"
+    )
+    backend = repo.run_backends["configured"]
+    profile = repo.run_profiles["web"]
+    request = ToolRequest(
+        task="t1",
+        repo="api",
+        argv=(),
+        task_key=backend.discover_task,
+        preparation="discover",
+        source_revision="a" * 40,
+        timeout_seconds=10,
+        max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=1024,
+        input_files={
+            "MSHIP_TARGET_REQUEST_FILE": json.dumps(
+                {
+                    "protocol_version": 1,
+                    "task": "t1",
+                    "repo": "api",
+                    "backend": "configured",
+                    "profile": "web",
+                    "operation": "run",
+                    "options": {},
+                    "target_alias": None,
+                    "backend_revision": "a" * 40,
+                    "profile_revision": profile_revision(
+                        profile, backend, prepared_source_revision="a" * 40
+                    ),
+                }
+            )
+        },
+    )
+    for changes in (
+        {},
+        {"task_key": "mship-builtin-flutter-discover"},
+        {"input_files": {}},
+    ):
+        response = client.post(
+            "/exec/tool",
+            json={**request.to_dict(), **changes},
+            headers={"Authorization": "Bearer tool-test-token"},
+        )
+        assert response.status_code == 200
+        events = list(
+            iter_tool_events([response.content], response.headers["X-Mship-Exec-Nonce"])
+        )
+        result = events[-1].result
+        if changes:
+            assert result.status == "invalid"
+        else:
+            assert result.status == "completed" and result.exit_code == 0
+            inventory = json.loads(result.stdout)
+            assert inventory["candidates"] == []
+            assert inventory["errors"][0]["code"] == "browser_unavailable"
+    assert not sentinel.exists()
+
+
+def test_tool_source_mismatch_fails_before_setup_or_execution(tmp_path, monkeypatch):
+    client, sentinel, _ = _tool_app(tmp_path, monkeypatch)
+    request = _discovery_request(source_revision="b" * 40).to_dict()
+    request.update(preparation="launch", max_stdout_bytes=None, max_stderr_bytes=None)
+    response = client.post(
+        "/exec/tool",
+        json=request,
+        headers={"Authorization": "Bearer tool-test-token"},
+    )
+    events = list(
+        iter_tool_events([response.content], response.headers["X-Mship-Exec-Nonce"])
+    )
+    assert [event.kind for event in events] == ["result"]
+    assert events[0].result.status == "materialization_error"
+    assert not sentinel.exists()
+
+
+def test_tool_request_bounds_duplicates_and_private_validation_errors(
+    tmp_path, monkeypatch
+):
+    client, sentinel, _ = _tool_app(tmp_path, monkeypatch)
+    headers = {
+        "Authorization": "Bearer tool-test-token",
+        "Content-Type": "application/json",
+    }
+    oversized = client.post(
+        "/exec/tool", content=b"x" * (128 * 1024 + 1), headers=headers
+    )
+    assert oversized.status_code == 413
+    duplicate = client.post(
+        "/exec/tool",
+        content=b'{"task":"t1","repo":"api","argv":["first"],"argv":["second"]}',
+        headers=headers,
+    )
+    assert duplicate.status_code == 400
+    invalid = _discovery_request().to_dict()
+    invalid["env"] = {"BAD-NAME": "private-environment-sentinel"}
+    rejected = client.post("/exec/tool", json=invalid, headers=headers)
+    assert rejected.status_code == 400
+    assert "private-environment-sentinel" not in rejected.text
+    assert not sentinel.exists()
+
+
+class _CleanupShell:
+    def __init__(
+        self,
+        target: Path,
+        *,
+        branch: str = "feat/task-1",
+        head: str = "a" * 40,
+        dirty: str = "",
+    ) -> None:
+        self.target = target
+        self.branch = branch
+        self.head = head
+        self.dirty = dirty
+        self.calls: list[tuple[str, ...]] = []
+
+    def run_argv(self, args, cwd, env=None, *, cancel_event=None):
+        _ = cwd, env, cancel_event
+        command = tuple(args)
+        self.calls.append(command)
+        if command[:4] == ("git", "worktree", "list", "--porcelain"):
+            return ShellResult(
+                returncode=0,
+                stdout=(
+                    f"worktree {self.target}\n"
+                    f"branch refs/heads/{self.branch}\n\n"
+                ),
+                stderr="",
+            )
+        if command[:3] == ("git", "rev-parse", "HEAD"):
+            return ShellResult(returncode=0, stdout=self.head, stderr="")
+        if command[:3] == ("git", "status", "--porcelain"):
+            return ShellResult(returncode=0, stdout=self.dirty, stderr="")
+        if command[:4] == ("git", "worktree", "remove", "--force"):
+            shutil.rmtree(self.target)
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+
+class _CleanupAdmission:
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def admission_status(self, task: str, *, repo=None):
+        _ = task, repo
+        return self.status
+
+
+def test_remote_task_worktree_cleanup_removes_only_the_selected_registered_task(
+    tmp_path,
+):
+    config = _config(tmp_path)
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.mkdir(parents=True)
+    shell = _CleanupShell(target)
+    deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=shell,
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=deps
+        )
+        == "removed"
+    )
+    assert not target.exists()
+    assert shell.calls == [
+        ("git", "worktree", "list", "--porcelain"),
+        ("git", "rev-parse", "HEAD"),
+        ("git", "status", "--porcelain", "--untracked-files=normal"),
+        ("git", "worktree", "remove", "--force", str(target)),
+    ]
+
+
+def test_remote_task_worktree_cleanup_preserves_foreign_or_active_state(tmp_path):
+    config = _config(tmp_path)
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.mkdir(parents=True)
+    foreign = _CleanupShell(target, branch="feat/another-task")
+    foreign_deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=foreign,
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=foreign_deps
+        )
+        == "unknown"
+    )
+    assert target.exists()
+    assert foreign.calls == [("git", "worktree", "list", "--porcelain")]
+
+    active = _CleanupShell(target)
+    active_deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=active,
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("busy"),
+    )
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=active_deps
+        )
+        == "busy"
+    )
+    assert active.calls == []
+    assert target.exists()
+
+
+@pytest.mark.parametrize(
+    ("head", "dirty"),
+    [("b" * 40, ""), ("a" * 40, " M user-edit.txt\n")],
+)
+def test_remote_task_worktree_cleanup_retains_newer_or_dirty_user_state(
+    tmp_path, head, dirty
+):
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.mkdir(parents=True)
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_CleanupShell(target, head=head, dirty=dirty),
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=deps
+        )
+        == "unknown"
+    )
+    assert target.exists()
+
+
+def test_remote_task_worktree_cleanup_rejects_symlinked_target(tmp_path):
+    target = tmp_path / ".worktrees" / "task-1" / "api"
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target.symlink_to(outside, target_is_directory=True)
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_CleanupShell(target),
+        workspace_root=tmp_path,
+        operations=_CleanupAdmission("available"),
+    )
+
+    assert (
+        remote_exec.cleanup_task_worktrees(
+            "task-1", ["api"], {"api": "a" * 40}, deps=deps
+        )
+        == "invalid"
+    )
+    assert outside.exists()
+
+
+def test_authenticated_task_cleanup_preserves_changed_state_and_removes_owned_worktree(
+    tmp_path,
+):
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    target = tmp_path / ".worktrees" / "t1" / "api"
+    other = tmp_path / ".worktrees" / "other" / "api"
+    target.parent.mkdir(parents=True)
+    other.parent.mkdir(parents=True)
+    _real_git("worktree", "add", "--detach", str(target), scratch, cwd=repo)
+    _real_git("worktree", "add", "--detach", str(other), tip, cwd=repo)
+    config = WorkspaceConfig(
+        workspace="cleanup",
+        repos={"api": RepoConfig(path=repo, type="service")},
+    )
+    body = {
+        "task": "t1",
+        "repos": ["api"],
+        "expected_revisions": {"api": scratch},
+    }
+    headers = {"Authorization": "Bearer cleanup-test-token"}
+    with TestClient(_app(tmp_path, auth_token="cleanup-test-token", config=config)) as client:
+        denied = client.post("/exec/task-worktrees-cleanup", json=body)
+        assert denied.status_code == 401
+        assert target.is_dir()
+
+        stale = client.post(
+            "/exec/task-worktrees-cleanup",
+            json={**body, "expected_revisions": {"api": tip}},
+            headers=headers,
+        )
+        assert stale.json() == {"status": "unknown"}
+        assert _real_git("rev-parse", "HEAD", cwd=target) == scratch
+
+        user_file = target / "unsaved.txt"
+        user_file.write_text("retain untracked user work\n")
+        dirty = client.post(
+            "/exec/task-worktrees-cleanup", json=body, headers=headers
+        )
+        assert dirty.json() == {"status": "unknown"}
+        assert user_file.read_text() == "retain untracked user work\n"
+        user_file.unlink()
+
+        common_dir = Path(_real_git("rev-parse", "--git-common-dir", cwd=target))
+        with (common_dir / "info" / "exclude").open("a") as excluded:
+            excluded.write("\n/build/\n")
+        build = target / "build"
+        build.mkdir()
+        (build / "output.bin").write_bytes(b"generated build output")
+        removed = client.post(
+            "/exec/task-worktrees-cleanup", json=body, headers=headers
+        )
+        assert removed.status_code == 200
+        assert removed.json() == {"status": "removed"}
+
+    assert not target.exists()
+    assert _real_git("rev-parse", "HEAD", cwd=other) == tip
+    assert _real_git("rev-parse", "refs/mship/run/t1/api", cwd=repo) == scratch

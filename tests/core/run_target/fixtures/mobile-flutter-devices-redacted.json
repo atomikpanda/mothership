@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Redacted Android hardware",
+    "id": "R58MREDACTED",
+    "isSupported": true,
+    "targetPlatform": "android",
+    "emulator": false,
+    "sdk": "Android 15 (API 35)",
+    "capabilities": {"hotReload": true, "hotRestart": true}
+  },
+  {
+    "name": "Redacted Android emulator",
+    "id": "emulator-5554",
+    "isSupported": true,
+    "targetPlatform": "android",
+    "emulator": true,
+    "sdk": "Android 15 (API 35)",
+    "capabilities": {"hotReload": true, "hotRestart": true}
+  },
+  {
+    "name": "Redacted iOS simulator",
+    "id": "AAAAAAAA-1111-2222-3333-AAAAAAAAAAAA",
+    "isSupported": true,
+    "targetPlatform": "ios",
+    "emulator": true,
+    "sdk": "iOS 18.2",
+    "capabilities": {"hotReload": true, "hotRestart": true}
+  },
+  {
+    "name": "Redacted iPhone USB",
+    "id": "00008110-001E110E0A11001E",
+    "isSupported": true,
+    "targetPlatform": "ios",
+    "emulator": false,
+    "sdk": "iOS 18.2",
+    "capabilities": {"hotReload": false, "hotRestart": false}
+  }
+]

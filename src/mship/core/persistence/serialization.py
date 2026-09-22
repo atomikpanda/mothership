@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 
 from pydantic_core import to_jsonable_python
 
@@ -74,6 +75,29 @@ def encode_json(value: object) -> str:
 
 def decode_json(value: str) -> object:
     return json.loads(value)
+
+
+def encode_source_update_receipt(
+    receipt: Mapping[str, object] | None,
+) -> str | None:
+    """Encode optional receipt data without changing legacy AppRun rows."""
+    if receipt is None:
+        return None
+    if not isinstance(receipt, Mapping):
+        raise TypeError("source update receipt must be a mapping")
+    return encode_json(dict(receipt))
+
+
+def decode_source_update_receipt(value: str | None) -> dict[str, object] | None:
+    """Decode one persisted receipt before AppRun performs its strict validation."""
+    if value is None:
+        return None
+    decoded = decode_json(value)
+    if not isinstance(decoded, dict) or not all(
+        isinstance(key, str) for key in decoded
+    ):
+        raise ValueError("invalid source update receipt")
+    return decoded
 
 
 def workitem_extras(item: WorkItem) -> dict[str, object]:

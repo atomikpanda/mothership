@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     MetaData,
     PrimaryKeyConstraint,
@@ -81,6 +82,132 @@ task_repos = Table(
         "affected_ordinal IS NULL OR affected_ordinal >= 0",
         name="affected_ordinal_non_negative",
     ),
+)
+
+app_runs = Table(
+    "app_runs",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("task_slug", Text, nullable=False),
+    Column("repo", Text, nullable=False),
+    Column("profile", Text, nullable=False),
+    Column("profile_revision", Text, nullable=False),
+    Column("backend", Text, nullable=False),
+    Column("backend_revision", Text, nullable=False),
+    Column("host_name", Text, nullable=False),
+    Column("host_scope", Text, nullable=False),
+    Column("host_endpoint_fingerprint", Text, nullable=False),
+    Column("safe_target_label", Text, nullable=False),
+    Column("private_binding_ref", Text, nullable=False),
+    Column("operation", Text, nullable=False),
+    Column("protocol_version", Integer, nullable=False),
+    Column("capabilities_json", Text, nullable=False),
+    Column("target_aliases_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("owner_ref", Text),
+    Column("owner_generation", Text),
+    Column("status", Text, nullable=False),
+    Column("revision", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("binary_provenance_json", Text),
+    Column("source_update_receipt_json", Text),
+    ForeignKeyConstraint(["task_slug"], ["tasks.slug"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(
+        ["task_slug", "repo"],
+        ["task_repos.task_slug", "task_repos.repo_name"],
+        ondelete="RESTRICT",
+    ),
+    CheckConstraint("host_scope IN ('user', 'project')", name="host_scope"),
+    CheckConstraint("protocol_version = 1", name="protocol_version"),
+    CheckConstraint(
+        "status IN ('starting', 'active', 'updating', 'stopped', 'failed', 'unknown')",
+        name="status",
+    ),
+    CheckConstraint(
+        "(owner_ref IS NULL AND owner_generation IS NULL) "
+        "OR (owner_ref IS NOT NULL AND owner_generation IS NOT NULL)",
+        name="owner_pair",
+    ),
+    CheckConstraint(
+        "status NOT IN ('active', 'updating') OR owner_ref IS NOT NULL",
+        name="active_owner_acknowledgement",
+    ),
+    CheckConstraint(
+        "binary_provenance_json IS NULL",
+        name="binary_provenance_unavailable",
+    ),
+    CheckConstraint("revision >= 0", name="revision_non_negative"),
+    Index("ix_app_runs_task_repo_status", "task_slug", "repo", "status"),
+)
+
+task_results = Table(
+    "task_results",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("workspace_id", Text, nullable=False),
+    Column("task_slug", Text, nullable=False),
+    Column("work_item_id", Text),
+    Column("repo", Text, nullable=False),
+    Column("logical_task", Text, nullable=False),
+    Column("task_key", Text, nullable=False),
+    Column("host_name", Text),
+    Column("host_role", Text),
+    Column("host_endpoint_fingerprint", Text),
+    Column("worktree_identity", Text, nullable=False),
+    Column("source_revision", Text),
+    Column("snapshot_identity", Text),
+    Column("env_runner_identity", Text),
+    Column("outcome_status", Text, nullable=False),
+    Column("exit_code", Integer),
+    Column("finished_at", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("expires_at", Text, nullable=False),
+    CheckConstraint(
+        "outcome_status IN ('completed', 'failed', 'cancelled', 'infrastructure_error')",
+        name="outcome_status",
+    ),
+    CheckConstraint(
+        "(outcome_status = 'completed' AND exit_code = 0) OR "
+        "(outcome_status = 'failed' AND exit_code IS NOT NULL AND exit_code <> 0) OR "
+        "(outcome_status IN ('cancelled', 'infrastructure_error') AND exit_code IS NULL)",
+        name="outcome_exit_code",
+    ),
+    Index("ix_task_results_workspace_task", "workspace_id", "task_slug", "created_at"),
+    Index(
+        "ix_task_results_workspace_item", "workspace_id", "work_item_id", "created_at"
+    ),
+)
+
+task_result_artifacts = Table(
+    "task_result_artifacts",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column(
+        "result_id",
+        Text,
+        ForeignKey("task_results.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("ordinal", Integer, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("media_type", Text, nullable=False),
+    Column("byte_size", Integer),
+    Column("sha256", Text),
+    Column("availability", Text, nullable=False),
+    Column("safe_reason", Text),
+    Column("blob_locator", Text),
+    UniqueConstraint("result_id", "ordinal"),
+    CheckConstraint("ordinal >= 0", name="ordinal_non_negative"),
+    CheckConstraint(
+        "availability IN ('published', 'missing', 'rejected', 'expired')",
+        name="availability",
+    ),
+    CheckConstraint(
+        "(availability = 'published' AND byte_size IS NOT NULL AND sha256 IS NOT NULL "
+        "AND blob_locator IS NOT NULL) OR availability <> 'published'",
+        name="published_fields",
+    ),
+    Index("ix_task_result_artifacts_blob", "blob_locator"),
 )
 
 task_test_results = Table(

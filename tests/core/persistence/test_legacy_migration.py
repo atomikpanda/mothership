@@ -5,16 +5,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from alembic import command
 import yaml
 from sqlalchemy import select
 
-from mship.core.persistence.database import WorkspaceDatabase
+from mship.core.persistence.database import WorkspaceDatabase, make_alembic_config
 from mship.core.persistence.migration import (
     MigrationPreflightError,
     MigrationVerificationError,
     _backup_legacy,
     _legacy_fingerprints,
-    migrate_legacy_state,
+    migrate_state,
 )
 from mship.core.persistence.schema import storage_metadata, tasks
 from mship.core.state import (
@@ -26,6 +27,8 @@ from mship.core.state import (
 )
 from mship.core.workitem import ExternalLink, WorkItem
 from mship.core.workitem_store import WorkItemStore
+from mship.core.persistence.task_repository import TaskRepository
+from mship.core.persistence.workitem_repository import WorkItemRepository
 
 NOW = datetime(2026, 9, 7, 20, 0, tzinfo=timezone.utc)
 
@@ -41,7 +44,7 @@ class LegacyWorkspace:
 
 @pytest.fixture
 def legacy_workspace(tmp_path: Path) -> LegacyWorkspace:
-    state_dir = tmp_path / ".mothership"
+    state_dir = tmp_path / "workspace#owned" / ".mothership"
     workitems_dir = state_dir / "workitems"
     workitems_dir.mkdir(parents=True)
 
@@ -133,10 +136,116 @@ def legacy_workspace(tmp_path: Path) -> LegacyWorkspace:
     )
 
 
+def _known_ancestor_database(workspace: LegacyWorkspace) -> WorkspaceDatabase:
+    database = WorkspaceDatabase(workspace.state_dir)
+    database.initialize()
+    with database.write(immediate=True) as connection:
+        tasks = TaskRepository()
+        items = WorkItemRepository()
+        for slug in StateManager._dependency_order(workspace.expected_state.tasks):
+            tasks.insert(connection, workspace.expected_state.tasks[slug])
+        for item in workspace.expected_items:
+            items.insert(connection, item)
+    with database.connect() as connection:
+        config = make_alembic_config(database.path)
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0001_tasks_and_workitems")
+    assert database.current_revision() == "0001_tasks_and_workitems"
+    return database
+
+
+def test_explicit_migration_upgrades_known_ancestor_and_retains_backup(
+    legacy_workspace: LegacyWorkspace,
+) -> None:
+    database = _known_ancestor_database(legacy_workspace)
+
+    report = migrate_state(
+        legacy_workspace.state_dir,
+        daemon_probe=lambda: None,
+        now=NOW,
+    )
+
+    assert report.migrated is True
+    assert report.backup_path is not None
+    backup = WorkspaceDatabase(
+        legacy_workspace.state_dir,
+        database_path=report.backup_path,
+    )
+    assert backup.current_revision() == "0001_tasks_and_workitems"
+    with backup.read() as connection:
+        assert (
+            TaskRepository().list(connection) == legacy_workspace.expected_state.tasks
+        )
+        assert {
+            item.id: item
+            for item in WorkItemRepository().list(connection, include_archived=True)
+        } == {item.id: item for item in legacy_workspace.expected_items}
+    assert (
+        StateManager(legacy_workspace.state_dir).load()
+        == legacy_workspace.expected_state
+    )
+    assert {
+        item.id: item
+        for item in WorkItemStore(legacy_workspace.state_dir / "workitems").list(
+            include_archived=True
+        )
+    } == {item.id: item for item in legacy_workspace.expected_items}
+
+    repeated = migrate_state(
+        legacy_workspace.state_dir,
+        daemon_probe=lambda: None,
+        now=NOW,
+    )
+    assert repeated.migrated is False
+
+
+def test_known_ancestor_upgrade_failure_rolls_back_schema_and_state(
+    legacy_workspace: LegacyWorkspace,
+) -> None:
+    database = _known_ancestor_database(legacy_workspace)
+
+    def fail_after_alembic(stage: str) -> None:
+        if stage == "upgrade_verify":
+            raise RuntimeError("injected upgrade verification failure")
+
+    with pytest.raises(RuntimeError, match="injected upgrade verification failure"):
+        migrate_state(
+            legacy_workspace.state_dir,
+            daemon_probe=lambda: None,
+            now=NOW,
+            stage_hook=fail_after_alembic,
+        )
+
+    assert database.current_revision() == "0001_tasks_and_workitems"
+    with database.read() as connection:
+        assert (
+            TaskRepository().list(connection) == legacy_workspace.expected_state.tasks
+        )
+        assert {
+            item.id: item
+            for item in WorkItemRepository().list(connection, include_archived=True)
+        } == {item.id: item for item in legacy_workspace.expected_items}
+
+
+def test_known_ancestor_upgrade_refuses_running_daemon_without_mutation(
+    legacy_workspace: LegacyWorkspace,
+) -> None:
+    database = _known_ancestor_database(legacy_workspace)
+
+    with pytest.raises(MigrationPreflightError, match="daemon"):
+        migrate_state(
+            legacy_workspace.state_dir,
+            daemon_probe=lambda: {"pid": 42},
+            now=NOW,
+        )
+
+    assert database.current_revision() == "0001_tasks_and_workitems"
+
+
 def test_migration_activates_only_after_verified_import(
     legacy_workspace: LegacyWorkspace,
 ) -> None:
-    report = migrate_legacy_state(
+    report = migrate_state(
         legacy_workspace.state_dir,
         daemon_probe=lambda: None,
         now=NOW,
@@ -194,7 +303,7 @@ def test_migration_preserves_switch_source_without_dependencies(
         yaml.safe_dump(expected.model_dump(mode="json"))
     )
 
-    report = migrate_legacy_state(
+    report = migrate_state(
         state_dir,
         daemon_probe=lambda: None,
         now=NOW,
@@ -227,7 +336,7 @@ def test_migration_deduplicates_same_owner_task_links(
     original = item.model_dump_json(indent=2)
     item_path.write_text(original)
 
-    report = migrate_legacy_state(
+    report = migrate_state(
         legacy_workspace.state_dir, daemon_probe=lambda: None, now=NOW
     )
 
@@ -243,7 +352,7 @@ def test_migration_deduplicates_same_owner_task_links(
         == legacy_workspace.expected_state
     )
 
-    repeated = migrate_legacy_state(
+    repeated = migrate_state(
         legacy_workspace.state_dir, daemon_probe=lambda: None, now=NOW
     )
     assert repeated.migrated is False
@@ -288,7 +397,7 @@ def test_migration_rejects_conflicting_task_owners_before_import(
     }
 
     with pytest.raises(MigrationPreflightError) as error:
-        migrate_legacy_state(state_dir, daemon_probe=lambda: None, now=NOW)
+        migrate_state(state_dir, daemon_probe=lambda: None, now=NOW)
 
     for identifier in (slug, "wi-active", "wi-archived"):
         assert identifier in str(error.value)
@@ -298,7 +407,7 @@ def test_migration_rejects_conflicting_task_owners_before_import(
     assert not (state_dir / "backups").exists()
 
     source.write_bytes(valid)
-    report = migrate_legacy_state(state_dir, daemon_probe=lambda: None, now=NOW)
+    report = migrate_state(state_dir, daemon_probe=lambda: None, now=NOW)
     assert report.migrated is True
     assert StateManager(state_dir).load() == legacy_workspace.expected_state
     assert {
@@ -339,7 +448,7 @@ def test_migration_accepts_semantically_equivalent_naive_timestamps(
     )
     (workitems_dir / f"{item.id}.json").write_text(item.model_dump_json(indent=2))
 
-    report = migrate_legacy_state(
+    report = migrate_state(
         state_dir,
         daemon_probe=lambda: None,
         now=NOW,
@@ -376,7 +485,7 @@ def test_migration_rejects_non_timestamp_candidate_mismatch(
             )
 
     with pytest.raises(MigrationVerificationError, match="does not match"):
-        migrate_legacy_state(
+        migrate_state(
             legacy_workspace.state_dir,
             daemon_probe=lambda: None,
             now=NOW,
@@ -401,7 +510,7 @@ def test_migration_fault_leaves_legacy_live_and_retryable(
             raise RuntimeError(f"injected {stage} failure")
 
     with pytest.raises(RuntimeError, match=f"injected {stage} failure"):
-        migrate_legacy_state(
+        migrate_state(
             legacy_workspace.state_dir,
             daemon_probe=lambda: None,
             now=NOW,
@@ -415,7 +524,7 @@ def test_migration_fault_leaves_legacy_live_and_retryable(
     assert legacy_workspace.message_sentinel.read_text() == ('{"unchanged": true}\n')
     assert legacy_workspace.spec_sentinel.read_text() == "# unchanged\n"
 
-    report = migrate_legacy_state(
+    report = migrate_state(
         legacy_workspace.state_dir,
         daemon_probe=lambda: None,
         now=NOW,
@@ -428,7 +537,7 @@ def test_migration_refuses_while_daemon_is_running(
     legacy_workspace: LegacyWorkspace,
 ) -> None:
     with pytest.raises(MigrationPreflightError, match="daemon"):
-        migrate_legacy_state(
+        migrate_state(
             legacy_workspace.state_dir,
             daemon_probe=lambda: {"pid": 42},
             now=NOW,
@@ -444,7 +553,7 @@ def test_migration_rejects_invalid_legacy_data(
     (legacy_workspace.state_dir / "workitems" / "wi-active.json").write_text("{")
 
     with pytest.raises(Exception):
-        migrate_legacy_state(
+        migrate_state(
             legacy_workspace.state_dir,
             daemon_probe=lambda: None,
             now=NOW,
@@ -523,7 +632,7 @@ def test_migration_rejects_external_workitem_symlink_before_loading(
     )
 
     with pytest.raises(ValueError, match="unsafe work item id"):
-        migrate_legacy_state(
+        migrate_state(
             state_dir,
             daemon_probe=lambda: None,
             now=NOW,
@@ -550,7 +659,7 @@ def test_retirement_failure_restores_legacy_authority_and_is_retryable(
     monkeypatch.setattr(Path, "rename", fail_workitems_retirement)
 
     with pytest.raises(OSError, match="retirement failure"):
-        migrate_legacy_state(
+        migrate_state(
             legacy_workspace.state_dir,
             daemon_probe=lambda: None,
             now=NOW,
@@ -562,7 +671,7 @@ def test_retirement_failure_restores_legacy_authority_and_is_retryable(
     assert not list(legacy_workspace.state_dir.glob("state.yaml.migrated-*"))
     assert not list(legacy_workspace.state_dir.glob("workitems.migrated-*"))
 
-    report = migrate_legacy_state(
+    report = migrate_state(
         legacy_workspace.state_dir,
         daemon_probe=lambda: None,
         now=NOW,

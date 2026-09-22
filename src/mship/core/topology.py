@@ -338,40 +338,31 @@ def _run_host_edges(
     """One edge per role — declared, mapped, reachable — plus aggregate edges
     for "nothing declared" and "a bare --remote would be ambiguous".
 
-    Fix hints intentionally mirror `run_host.store.RunHostError` and
-    `remote_client._http_status_message`, so the CLI error an operator hits and
-    the topology hint they read say the same thing.
+    Fix hints use the same safe run-host error categories as execution.
     """
-    from mship.core.run_host.store import RunHostStore, _env_key
+    from mship.core.run_host.store import RunHostError, RunHostStore, _env_key
 
     declared = list(getattr(config, "run_hosts", ()) or ())
     repos = getattr(config, "repos", {}) or {}
     store = RunHostStore(state_dir)
     edges: list[Edge] = []
-    # Private read: `redacted_list()` drops the token entirely, but this edge
-    # must report `token_configured` (a boolean) AND whether the effective value
-    # came from the file or an env override — neither is derivable from it.
-    #
-    # A hand-edited run-hosts.yaml is a realistic broken input, and `_read_all`
-    # does not guard it: malformed YAML raises, and a non-mapping document
-    # returns a str whose `.get` would blow up. Neither may break a report whose
-    # whole job is to run when things are broken.
+    # The canonical store owns complete-entry validation and keeps credentials
+    # private. Topology consumes only its safe effective summaries.
     store_error: str | None = None
     try:
-        raw = store._read_all()
-        mapped = dict(raw) if isinstance(raw, dict) else {}
-        if not isinstance(raw, dict):
-            store_error = "run-hosts.yaml is not a mapping of role -> {url, token}"
+        safe_hosts = store.safe_hosts()
+        policy = store.role_hosts()
     except Exception as exc:
-        mapped, store_error = {}, str(exc).splitlines()[0][:200]
+        safe_hosts, policy = {}, {}
+        store_error = str(exc).splitlines()[0][:200]
 
     if store_error is not None:
         return [Edge(
             kind="run_host", name="run_hosts", status="warn",
             code=RUN_HOSTS_STORE_UNREADABLE,
             detail=f"could not read the run-host store ({store_error})",
-            fix=(f"fix or remove `run-hosts.yaml` in {state_dir}, then re-map "
-                 f"roles with `mship run-host add <role>`"),
+            fix=(f"fix or migrate `run-hosts.yaml` in {state_dir}, then re-map "
+                 f"hosts with `mship run-host add <name>`"),
             facts={"declared": declared, "store_path": str(state_dir / "run-hosts.yaml")},
         )]
 
@@ -425,21 +416,84 @@ def _run_host_edges(
         ))
 
     # --- per declared role -------------------------------------------------
+    advertised_roles: set[str] = set()
     for role in declared:
-        entry = mapped.get(role, {})
+        candidates = [
+            host for host in safe_hosts.values()
+            if role in host["roles"] and (role not in policy or host["name"] in policy[role])
+        ]
+        advertised_roles.update(host_role for host in safe_hosts.values() for host_role in host["roles"])
         url_env, token_env = _env_key(role, "URL"), _env_key(role, "TOKEN")
-        url = env.get(url_env) or entry.get("url")
-        token = env.get(token_env) or entry.get("token")
+        env_url, env_token = env.get(url_env), env.get(token_env)
+        resolution_error = None
+        try:
+            connection = (
+                store.connection_for_role(role, environ=env)
+                if len(candidates) <= 1
+                else None
+            )
+        except RunHostError:
+            # Doctor must expose an incomplete/invalid override as a safe
+            # diagnostic; execution still requires a complete credential pair.
+            connection = None
+            resolution_error = True
+        if len(candidates) == 1 and connection is not None:
+            entry = candidates[0]
+            url = connection.url
+            token = connection.token
+            file_url = entry.get("url")
+        elif not candidates and role not in policy and connection is not None:
+            # Preserve the documented explicit environment-only registration.
+            url = connection.url
+            token = connection.token
+            file_url = None
+        elif resolution_error and (env_url or env_token):
+            url = env_url
+            token = None
+            file_url = candidates[0].get("url") if len(candidates) == 1 else None
+        else:
+            url = None
+            token = None
+            file_url = None
         facts = {
             "role": role,
             "url": url,
             "url_source": (f"env:{url_env}" if env.get(url_env)
-                           else "file" if entry.get("url") else None),
+                           else "file" if file_url else None),
             "token_configured": bool(token),
-            "token_source": (f"env:{token_env}" if env.get(token_env)
-                             else "file" if entry.get("token") else None),
+            "token_source": (
+                f"env:{token_env}" if token and env_token
+                else "file" if token and file_url
+                else None
+            ),
         }
+        if len(candidates) == 1 and candidates[0].get("mode") == "relay":
+            entry = candidates[0]
+            edges.append(Edge(
+                kind="run_host", name=f"run_host:{role}", status="warn",
+                code=PROBE_SKIPPED,
+                detail="relay identity is configured; credential and route resolve only at operation time",
+                fix=("if resolution fails, re-pair with `mship run-host pair-relay` "
+                     "or re-enrol the selected host"),
+                facts={
+                    "role": role,
+                    "mode": "relay",
+                    "relay": entry["relay"],
+                    "host_id": entry["host_id"],
+                    "workspace_id": entry["workspace_id"],
+                },
+            ))
+            continue
 
+        if len(candidates) > 1:
+            edges.append(Edge(
+                kind="run_host", name=f"run_host:{role}", status="warn",
+                code=RUN_HOSTS_AMBIGUOUS_DEFAULT,
+                detail=f"role {role!r} has multiple eligible hosts; select an exact host/profile",
+                fix="restrict it with `mship run-host allow-role <role> --host <name>`",
+                facts=facts,
+            ))
+            continue
         if not url or not token:
             edges.append(Edge(
                 kind="run_host", name=f"run_host:{role}", status="fail",
@@ -498,15 +552,15 @@ def _run_host_edges(
                 facts=facts,
             ))
 
-    # --- orphan mappings: mapped here, not declared anywhere ---------------
-    for role in sorted(set(mapped) - set(declared)):
+    # --- orphan advertised roles: nothing declared can select them ---------
+    for role in sorted(advertised_roles - set(declared)):
         edges.append(Edge(
             kind="run_host", name=f"run_host:{role}", status="warn",
             code=RUN_HOST_ORPHAN_MAPPING,
-            detail=(f"role {role!r} is mapped on this machine but not declared in "
+            detail=(f"role {role!r} is advertised on this machine but not declared in "
                     f"mothership.yaml, so nothing can select it"),
-            fix=(f"add {role!r} to `run_hosts:` in mothership.yaml, or drop the "
-                 f"mapping with `mship run-host remove {role}`"),
+            fix=(f"add {role!r} to `run_hosts:` in mothership.yaml, or remove it "
+                 f"from the host registration"),
             facts={"role": role},
         ))
 

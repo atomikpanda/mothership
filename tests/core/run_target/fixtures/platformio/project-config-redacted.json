@@ -1,0 +1,11 @@
+{
+  "env:lab": {
+    "platform": "espressif32",
+    "board": "esp32dev",
+    "monitor_speed": "115200"
+  },
+  "env:release": {
+    "platform": "atmelavr",
+    "board": "uno"
+  }
+}

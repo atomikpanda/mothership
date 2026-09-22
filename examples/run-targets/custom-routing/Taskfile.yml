@@ -1,0 +1,13 @@
+version: '3'
+
+tasks:
+  # This custom-form backend routes through ordinary project tasks. It uses the
+  # installed browser protocol implementation, while a wholly project-owned
+  # backend would replace these commands with its own implementation.
+  discover-project-browser:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends browser discover'
+
+  run-project-browser:
+    cmds:
+      - '"{{.MSHIP_SESSION_PYTHON}}" -I -m mship.backends browser'

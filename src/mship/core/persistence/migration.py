@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import os
 import shutil
+import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -11,6 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from alembic import command
+from alembic.script import ScriptDirectory
+from sqlalchemy import Connection, text
 from mship.core.daemon.status import daemon_is_running
 from mship.core.persistence.backend import (
     StorageBackend,
@@ -19,7 +23,11 @@ from mship.core.persistence.backend import (
     list_legacy_workitems,
     load_legacy_state,
 )
-from mship.core.persistence.database import WorkspaceDatabase
+from mship.core.persistence.database import (
+    DatabaseRevisionError,
+    WorkspaceDatabase,
+    make_alembic_config,
+)
 from mship.core.persistence.schema import storage_metadata
 from mship.core.persistence.serialization import encode_datetime
 from mship.core.persistence.task_repository import TaskRepository
@@ -220,14 +228,166 @@ def _existing_report(database: WorkspaceDatabase) -> MigrationReport:
     )
 
 
-def migrate_legacy_state(
+def _revision_error(
+    database: WorkspaceDatabase,
+    *,
+    current: str | None,
+    head: str,
+) -> DatabaseRevisionError:
+    return DatabaseRevisionError(
+        f"workspace database {database.path} is at revision {current!r}; "
+        f"this binary requires {head!r}. Stop active writers and run "
+        "mship state migrate with a compatible binary"
+    )
+
+
+def _known_packaged_revision(database: WorkspaceDatabase, revision: str) -> bool:
+    scripts = ScriptDirectory.from_config(make_alembic_config(database.path))
+    return revision in {
+        script.revision
+        for script in scripts.walk_revisions(base="base", head="heads")
+        if script.revision is not None
+    }
+
+
+def _backup_existing_database(
+    database: WorkspaceDatabase,
+    *,
+    revision: str,
+    now: datetime,
+) -> Path:
+    """Create a SQLite-consistent, owner-private backup under writer exclusion."""
+    backup = _unique_path(
+        database.path.parent,
+        f"{database.path.name}.before-{revision}-{_timestamp(now)}",
+    )
+    temporary = backup.with_name(f".{backup.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
+    source: sqlite3.Connection | None = None
+    destination: sqlite3.Connection | None = None
+    try:
+        source = sqlite3.connect(
+            f"{database.path.absolute().as_uri()}?mode=ro",
+            uri=True,
+        )
+        destination = sqlite3.connect(temporary)
+        source.backup(destination)
+        destination.commit()
+        destination.close()
+        destination = None
+        source.close()
+        source = None
+        temporary.chmod(0o600)
+        descriptor = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, backup)
+        parent_fd = os.open(backup.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        if destination is not None:
+            destination.close()
+        if source is not None:
+            source.close()
+    return backup
+
+
+def _upgrade_known_ancestor(
+    database: WorkspaceDatabase,
+    *,
+    now: datetime,
+    stage_hook: Callable[[str], None] | None,
+) -> MigrationReport:
+    """Explicitly advance one known packaged database revision under one writer lock."""
+    head = database.head_revision()
+    with database.write(immediate=True) as connection:
+        current = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one_or_none()
+        if current == head:
+            return MigrationReport(
+                migrated=False,
+                database_path=database.path,
+                backup_path=None,
+                revision=head,
+                tasks=len(TaskRepository().list(connection)),
+                work_items=len(
+                    WorkItemRepository().list(connection, include_archived=True)
+                ),
+            )
+        if not isinstance(current, str) or not _known_packaged_revision(
+            database, current
+        ):
+            raise _revision_error(database, current=current, head=head)
+
+        tasks_repo = TaskRepository()
+        items_repo = WorkItemRepository()
+        before_tasks = tasks_repo.list(connection)
+        before_items = {
+            item.id: item for item in items_repo.list(connection, include_archived=True)
+        }
+
+        _call_stage(stage_hook, "upgrade_backup")
+        backup_path = _backup_existing_database(database, revision=current, now=now)
+        _call_stage(stage_hook, "upgrade_alembic")
+        config = make_alembic_config(database.path)
+        config.attributes["connection"] = connection
+        command.upgrade(config, "head")
+        _call_stage(stage_hook, "upgrade_verify")
+
+        upgraded = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one_or_none()
+        if upgraded != head:
+            raise MigrationVerificationError(
+                f"database upgrade ended at revision {upgraded!r}, expected {head!r}"
+            )
+        foreign_key_errors = connection.exec_driver_sql(
+            "PRAGMA foreign_key_check"
+        ).all()
+        if foreign_key_errors:
+            raise MigrationVerificationError(
+                "database upgrade produced foreign-key integrity errors"
+            )
+        if (
+            tasks_repo.list(connection) != before_tasks
+            or {
+                item.id: item
+                for item in items_repo.list(connection, include_archived=True)
+            }
+            != before_items
+        ):
+            raise MigrationVerificationError(
+                "database upgrade does not preserve existing workspace state"
+            )
+
+    return MigrationReport(
+        migrated=True,
+        database_path=database.path,
+        backup_path=backup_path,
+        revision=head,
+        tasks=len(before_tasks),
+        work_items=len(before_items),
+    )
+
+
+def migrate_state(
     state_dir: Path,
     *,
     daemon_probe: Callable[[], object | None] | None = None,
     now: datetime | None = None,
     stage_hook: Callable[[str], None] | None = None,
 ) -> MigrationReport:
-    """Validate, back up, import, verify, and atomically activate legacy state."""
+    """Explicitly migrate legacy storage or a known packaged SQLite ancestor."""
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     final_database = WorkspaceDatabase(state_dir)
@@ -236,7 +396,21 @@ def migrate_legacy_state(
 
     with _exclusive_lock(state_dir / "state-migration.lock"):
         if final_database.path.is_file():
-            return _existing_report(final_database)
+            current = final_database.current_revision()
+            head = final_database.head_revision()
+            if current == head:
+                return _existing_report(final_database)
+            if probe():
+                raise MigrationPreflightError(
+                    "the Mothership daemon is running; stop it before migration"
+                )
+            if current is None:
+                raise _revision_error(final_database, current=current, head=head)
+            return _upgrade_known_ancestor(
+                final_database,
+                now=migration_time,
+                stage_hook=stage_hook,
+            )
         if probe():
             raise MigrationPreflightError(
                 "the Mothership daemon is running; stop it before migration"

@@ -6,12 +6,12 @@ import typer
 from pydantic import ValidationError
 
 from mship.cli.output import Output
-from mship.core.persistence.database import DatabaseRevisionError
+from mship.core.persistence.database import DatabaseBusyError, DatabaseRevisionError
 from mship.core.persistence.export import export_state, storage_status
 from mship.core.persistence.migration import (
     MigrationPreflightError,
     MigrationVerificationError,
-    migrate_legacy_state,
+    migrate_state,
 )
 
 
@@ -57,11 +57,12 @@ def register(parent: typer.Typer, get_container) -> None:
 
     @state_app.command("migrate")
     def migrate() -> None:
-        """Explicitly replace validated legacy files with transactional SQLite."""
+        """Explicitly migrate legacy storage or a known packaged SQLite revision."""
         out = Output()
         try:
-            report = migrate_legacy_state(_state_dir(get_container))
+            report = migrate_state(_state_dir(get_container))
         except (
+            DatabaseBusyError,
             DatabaseRevisionError,
             MigrationPreflightError,
             MigrationVerificationError,

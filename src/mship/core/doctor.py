@@ -206,8 +206,13 @@ class DoctorChecker:
             go_task_files = resolve_go_task_files(effective_path)
             if not go_task_files:
                 report.checks.append(CheckResult(
-                    name=f"{name}/taskfile", status="fail",
-                    message=f"no go-task file found (looked for one of: {', '.join(GO_TASK_FILENAMES)})",
+                    name=f"{name}/taskfile",
+                    status="fail" if repo.requires_taskfile else "pass",
+                    message=(
+                        f"no go-task file found (looked for one of: {', '.join(GO_TASK_FILENAMES)})"
+                        if repo.requires_taskfile
+                        else "installed backends do not require a go-task file"
+                    ),
                 ))
             elif len(go_task_files) > 1:
                 listed = ", ".join(f.name for f in go_task_files)
@@ -231,6 +236,9 @@ class DoctorChecker:
                 report.checks.append(CheckResult(name=f"{name}/git", status="pass", message="git initialized"))
             else:
                 report.checks.append(CheckResult(name=f"{name}/git", status="warn", message="not a git repository"))
+
+            if not go_task_files and not repo.requires_taskfile:
+                continue
 
             # Standard tasks (resolved through tasks mapping)
             result = self._shell.run("task --list", cwd=effective_path)

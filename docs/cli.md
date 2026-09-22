@@ -123,7 +123,7 @@ mship item link-plan <id> <path>                    # attach an implementation p
 mship item archive|unarchive <id>                   # soft-hide / restore
 
 mship state status                                  # inspect legacy/SQLite backend and schema revision
-mship state migrate                                 # explicitly cut legacy Task/WorkItem files over to SQLite
+mship state migrate                                 # explicit legacy cutover or known SQLite schema upgrade
 mship state export --format json|yaml               # deterministic Task/WorkItem records on stdout
 
 mship spec new --title "title"                      # create a spec (lands in needs_review)
@@ -170,7 +170,7 @@ mship view status|journal|diff|spec [--watch]
 mship view spec --web                               # serve rendered spec on localhost
 mship graph
 mship worktrees
-mship doctor [--no-network]                         # workspace health; --no-network skips connectivity probes
+mship doctor [--no-network] [--remote[=role] --task TASK --repo REPO] # local health or read-only selected-host tools report
 mship net status [--no-network]                     # connectivity topology: serve, relay, run hosts, gh auth, egress
 mship ui [--no-browser] [--host h] [--port p]       # open the serve-host console (opens a browser, else prints a copyable link)
 ```
@@ -193,7 +193,7 @@ mship sync [--repos r]                              # fast-forward behind-only c
 mship prune [--force]                               # remove orphaned worktrees
 mship export [--redacted] [--format dir|zip]        # bundle a task's journal/plan/spec/state/diffs (opt-in secret redaction)
 mship state status                                  # read-only storage backend/revision inspection
-mship state migrate                                 # validated legacy -> SQLite cutover
+mship state migrate                                 # validated legacy cutover or known SQLite schema upgrade
 mship state export --format json|yaml               # full Task/WorkItem data only
 ```
 
@@ -208,13 +208,21 @@ SQLite.
 `database_path`, `current_revision`, `head_revision`, and
 `migration_required`, so operators can check compatibility before maintenance.
 
-Stop the per-user daemon before running `mship state migrate`. Migration takes
-exclusive state locks, validates every legacy Task and WorkItem, and copies the
-live legacy files to `.mothership/backups/<UTC timestamp>/`. It builds and
-verifies a candidate database before atomically activating `mothership.db`; a
-failure leaves the legacy files live and can be retried. Successful legacy
-paths are retained beside the database with a `.migrated-<UTC timestamp>`
-suffix.
+Stop the per-user daemon before running `mship state migrate`. For legacy
+Task/WorkItem files, migration takes exclusive state locks, validates every
+record, and copies the live inputs to `.mothership/backups/<UTC timestamp>/`.
+It builds and verifies a candidate database before atomically activating
+`mothership.db`; a failure leaves the legacy files live and can be retried.
+Successful legacy paths are retained beside the database with a
+`.migrated-<UTC timestamp>` suffix.
+
+For an existing SQLite database at a known older packaged revision, the same
+command reserves the writer, creates a consistent owner-private backup, and
+reports its location. It applies the packaged upgrade transactionally and
+verifies the resulting revision, foreign keys, and preserved Task/WorkItem
+data before committing. A failed upgrade rolls back; unknown or future
+revisions are not guessed or overwritten. Repeating a successful migration
+is a no-op.
 
 The cutover has no dual-write period. Once `mothership.db` is active, the
 SQLite database is authoritative and older Mothership binaries that only write
@@ -224,22 +232,67 @@ revisions rather than being changed implicitly.
 
 `mship state export --format json` and `--format yaml` emit the same stable,
 sorted Task and WorkItem payload, including archived WorkItems. The export does
-not traverse mailbox messages, secrets, specs, journals, or artifact bytes. It
+not include app-run metadata or traverse private target bindings, mailbox
+messages, secrets, specs, journals, or artifact bytes. This is not a full
+database backup. It
 is distinct from `mship export`, which builds a task review bundle.
 
 ## Long-running services
 
 ```bash
-mship run [--repos a,b] [--tag t]                   # start services per dependency tier
+mship run [--repos a,b] [--tag t] [--remote[=role]] # start services per dependency tier
 mship logs <service>                                # tail logs for a service
-mship run-host add|list|remove                      # manage per-machine run-host connections (role -> {url, token})
+mship run-host add|list|remove|pair-relay|migrate # private direct or relay run-host identities
 mship build [--all] [--repos a,b] [--tag t] [--remote[=role]]  # `task build` across repos in dependency order
 mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [--remote[=role]]
                                                     # screenshot + layout of the running UI into files;
                                                     # task-aware but not required (ad-hoc against a repo's main checkout)
 ```
 
-`mship build` and `mship capture` accept `--remote` to execute on a mapped run-host role (an iOS-sim / Android-emu machine): bare `--remote` auto-resolves the repo's `run_host` (or the sole configured `run_hosts` entry), `--remote=<role>` picks one explicitly.
+`mship run`, `mship build`, and `mship capture` keep their existing
+`--remote[=role]` entry points: bare `--remote` auto-resolves the repo's
+`run_host` (or the sole configured `run_hosts` entry), while `--remote=<role>`
+picks one explicitly.
+
+`run-host add` has two mutually exclusive forms. Direct setup retains
+`--url/--token` or the direct `--pair-link`. Relay setup uses only
+`--relay`, `--host-id`, and `--workspace-id` after the coordinator has consumed
+the relay owner's existing account link using the echo-hidden
+`mship run-host pair-relay` prompt. `run-host migrate NAME --relay ...` previews
+that selected directory identity until `--apply` writes a private backup and
+replaces the named direct mapping. No relay command accepts, prints, or stores a
+fleet credential, refresh credential, bearer, standing token, or mutable public
+relay URL.
+For a repository that declares `host_tools`, inspect only its selected remote
+worktree with `mship doctor --remote[=role] --task TASK --repo REPO`. Provision
+that exact reviewed mise declaration only with
+`mship bootstrap --host-tools --remote[=role] --task TASK --repo REPO`.
+Neither command probes the caller's toolchain, runs application setup/tasks, or
+accepts SDK licenses. Ordinary `doctor` and `bootstrap` retain their existing
+local workspace behavior.
+
+Repositories with configured `run_profiles` support task-bound launches through
+`mship run --profile NAME`, optionally constrained by `--host NAME` and
+`--target ALIAS`. Packaged Flutter, Android, iOS, browser, and PlatformIO
+backends are opt-in through configuration and require prepared host prerequisites.
+
+`capture` and `logs` can observe an existing acknowledged profile run using
+`--run-id`, or narrow recorded runs with `--profile`, `--host`, and `--target`.
+Recorded-run selectors require a resolvable active task (`--task`, `MSHIP_TASK`,
+or cwd); they do not launch a replacement session. Ordinary service log tailing
+remains available without a task when no recorded-run selector is supplied.
+
+```bash
+mship run --task feature-a --repos app --profile android-usb --host lab-android --target pixel-8
+mship capture --task feature-a --repo app --run-id <run-id>
+mship logs app --task feature-a --run-id <run-id>
+```
+
+The shared typed runner and `POST /exec/tool` remain internal adapter APIs, not
+a separate public CLI command. See [`remote-run.md`](remote-run.md) for profile
+configuration, relay credential handling, source/binary provenance, and
+platform-specific verification limits. Command availability alone does not
+establish hardware, binary, or device readiness.
 
 ## `mship finish`
 

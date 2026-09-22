@@ -330,10 +330,9 @@ def test_forced_group_cleanup_reaps_leader_before_absence_wait(
     class _KilledLeader:
         pid = 424242
 
-        def poll(self):
-            return None
+        returncode = None
 
-        def wait(self):
+        def wait(self, timeout=None):
             events.append("reap")
             reaped.set()
             return -signal.SIGKILL
@@ -353,6 +352,7 @@ def test_forced_group_cleanup_reaps_leader_before_absence_wait(
 
     monkeypatch.setattr(shell_module.sys, "platform", platform)
     monkeypatch.setattr(shell_module.os, "killpg", fake_killpg)
+    monkeypatch.setattr(shell_module.os, "waitid", lambda *_args: None)
     if platform == "linux":
         monkeypatch.setattr(
             shell_module,
@@ -416,3 +416,115 @@ def test_linux_group_scan_accepts_zombie_with_unreadable_unrelated_stat(
     monkeypatch.setattr(shell_module.os, "killpg", lambda group, signum: None)
 
     assert not shell_module._linux_group_has_executable_member(424242)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process ownership")
+def test_darwin_cleanup_reaps_zombie_group_without_signalling(monkeypatch):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 3
+        while not shell_module._owned_process_exited(proc):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        monkeypatch.setattr(shell_module.sys, "platform", "darwin")
+
+        def reject_zombie_signal(_group, _signal):
+            raise PermissionError("Darwin refuses signalling zombie-only groups")
+
+        monkeypatch.setattr(shell_module.os, "killpg", reject_zombie_signal)
+        shell_module._terminate_owned_process_group(proc)
+        assert proc.returncode == 0
+    finally:
+        proc.wait(timeout=3)
+
+
+def test_darwin_group_scan_does_not_hide_live_descendant(monkeypatch):
+    monkeypatch.setattr(
+        shell_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=b"424242 Z\n424242 S+\n999999 Z\n"
+        ),
+    )
+    assert shell_module._darwin_group_has_executable_member(424242)
+
+
+def test_darwin_group_scan_rejects_unverifiable_inventory(monkeypatch):
+    monkeypatch.setattr(
+        shell_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=b"unparseable\n"
+        ),
+    )
+    with pytest.raises(ValueError):
+        shell_module._darwin_group_has_executable_member(424242)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process ownership")
+def test_cleanup_never_signals_a_group_after_its_leader_was_reaped(monkeypatch):
+    proc = shell_module.subprocess.Popen(
+        [shell_module.sys.executable, "-c", "pass"],
+        start_new_session=True,
+    )
+    proc.wait(timeout=3)
+    signals = []
+
+    def group_signal(_pid, signum):
+        if signum:
+            signals.append(signum)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(shell_module.os, "killpg", group_signal)
+    with pytest.raises(RuntimeError):
+        shell_module._terminate_owned_process_group(proc)
+    assert signals == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process ownership")
+def test_exit_observation_keeps_the_leader_waitable_until_cleanup(tmp_path):
+    proc = ShellRunner().spawn_argv(
+        [shell_module.sys.executable, "-c", "pass"],
+        tmp_path,
+        {},
+    )
+    try:
+        deadline = time.monotonic() + 3
+        while not shell_module._owned_process_exited(proc):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert proc.returncode is None
+        shell_module._terminate_owned_process_group(proc)
+        assert proc.returncode == 0
+    finally:
+        if proc.returncode is None:
+            shell_module._terminate_owned_process_group(proc, force=True)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor cwd")
+def test_descriptor_spawn_preserves_exact_environment_and_exec_failures(tmp_path):
+    import json
+
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    environment = {"LC_ALL": "C", "LANG": "C", "SENTINEL": "literal;value"}
+    try:
+        proc = ShellRunner().spawn_argv(
+            [
+                shell_module.sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                "import json,os; print(json.dumps(dict(os.environ)))",
+            ],
+            fd,
+            environment,
+        )
+        stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 0, stderr
+        assert json.loads(stdout) == environment
+        with pytest.raises(FileNotFoundError):
+            ShellRunner().spawn_argv(
+                [str(tmp_path / "missing-executable")], fd, environment
+            )
+    finally:
+        os.close(fd)

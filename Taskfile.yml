@@ -52,28 +52,41 @@ tasks:
         "$tmp/venv/bin/python" -c "import mship.cli"
         "$tmp/venv/bin/python" - "$tmp" <<'PY'
         import json
+        import os
         import subprocess
         import sys
         from datetime import datetime, timezone
         from pathlib import Path
 
         import yaml
+        from alembic import command
         from sqlalchemy import inspect
 
-        from mship.core.persistence.database import WorkspaceDatabase
-        from mship.core.persistence.migration import migrate_legacy_state
+        from mship.core.persistence.database import WorkspaceDatabase, make_alembic_config
+        from mship.core.persistence.migration import migrate_state
         from mship.core.state import StateManager, Task, WorkspaceState
         from mship.core.workitem import WorkItem
         from mship.core.workitem_store import WorkItemStore
 
         root = Path(sys.argv[1])
+        cli_env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith("MSHIP_") and key != "PYTHONPATH"
+        }
+        for variable, directory in (
+            ("HOME", "home"), ("XDG_CONFIG_HOME", "config"),
+            ("XDG_RUNTIME_DIR", "runtime"),
+        ):
+            path = root / directory
+            path.mkdir(mode=0o700)
+            cli_env[variable] = str(path)
         expected_tables = {
             "storage_metadata", "tasks", "task_repos", "task_test_results",
             "task_pr_urls", "task_switch_sources", "task_switch_anchors",
             "task_dependencies",
             "work_items", "workitem_tasks", "workitem_threads",
             "workitem_external_links", "workitem_affected_repos",
-            "workitem_pr_urls",
+            "workitem_pr_urls", "app_runs",
         }
 
         fresh = root / "fresh"
@@ -87,6 +100,7 @@ tasks:
         status = subprocess.run(
             [str(Path(sys.executable).with_name("mship")), "--json", "state", "status"],
             cwd=fresh, check=True, capture_output=True, text=True,
+            env={**cli_env, "MSHIP_WORKSPACE": str(fresh)},
         )
         status_payload = json.loads(status.stdout)
         assert status_payload["backend"] == "sqlite"
@@ -112,12 +126,55 @@ tasks:
             task_slugs=[task.slug],
         )
         (legacy_items_dir / "wi-legacy.json").write_text(item.model_dump_json())
-        report = migrate_legacy_state(
+        report = migrate_state(
             legacy_state_dir, daemon_probe=lambda: None, now=now,
         )
         assert report.migrated is True
         assert StateManager(legacy_state_dir).load().tasks[task.slug] == task
         assert WorkItemStore(legacy_items_dir).get(item.id) == item
+
+        ancestor = root / "ancestor"
+        ancestor.mkdir()
+        (ancestor / "mothership.yaml").write_text("workspace: installed-wheel-ancestor\n")
+        ancestor_state_dir = ancestor / ".mothership"
+        ancestor_database = WorkspaceDatabase(ancestor_state_dir)
+        ancestor_database.initialize()
+        ancestor_task = Task(
+            slug="ancestor-task", description="preserve", phase="dev",
+            created_at=now, affected_repos=[], branch="feat/ancestor-task",
+            work_item_id="wi-ancestor",
+        )
+        ancestor_item = WorkItem(
+            id="wi-ancestor", title="Ancestor", workspace="installed-wheel-ancestor",
+            kind="chore", created_at=now, updated_at=now,
+            task_slugs=[ancestor_task.slug],
+        )
+        StateManager(ancestor_state_dir).save(
+            WorkspaceState(tasks={ancestor_task.slug: ancestor_task})
+        )
+        WorkItemStore(ancestor_state_dir / "workitems").save(ancestor_item)
+        with ancestor_database.connect() as connection:
+            config = make_alembic_config(ancestor_database.path)
+            config.attributes["connection"] = connection
+            command.downgrade(config, "0001_tasks_and_workitems")
+        assert ancestor_database.current_revision() == "0001_tasks_and_workitems"
+        upgraded = subprocess.run(
+            [str(Path(sys.executable).with_name("mship")), "--json", "state", "migrate"],
+            cwd=ancestor, check=True, capture_output=True, text=True,
+            env={**cli_env, "MSHIP_WORKSPACE": str(ancestor)},
+        )
+        upgrade_payload = json.loads(upgraded.stdout)
+        assert upgrade_payload["migrated"] is True
+        backup_path = Path(upgrade_payload["backup_path"])
+        assert backup_path.is_file()
+        backup_database = WorkspaceDatabase(
+            ancestor_state_dir, database_path=backup_path
+        )
+        assert backup_database.current_revision() == "0001_tasks_and_workitems"
+        assert StateManager(ancestor_state_dir).load().tasks[ancestor_task.slug] == ancestor_task
+        assert WorkItemStore(ancestor_state_dir / "workitems").get(
+            ancestor_item.id
+        ) == ancestor_item
         PY
 
   lint:
