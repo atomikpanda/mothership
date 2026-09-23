@@ -124,6 +124,8 @@ mship item archive|unarchive <id>                   # soft-hide / restore
 
 mship state status                                  # inspect legacy/SQLite backend and schema revision
 mship state migrate                                 # explicit legacy cutover or known SQLite schema upgrade
+mship state migrate --preview                       # read-only ownership plan, including all conflicts
+mship state migrate --resolve-owners owners.json     # explicit resolutions for ambiguous legacy task links
 mship state export --format json|yaml               # deterministic Task/WorkItem records on stdout
 
 mship spec new --title "title"                      # create a spec (lands in needs_review)
@@ -194,6 +196,8 @@ mship prune [--force]                               # remove orphaned worktrees
 mship export [--redacted] [--format dir|zip]        # bundle a task's journal/plan/spec/state/diffs (opt-in secret redaction)
 mship state status                                  # read-only storage backend/revision inspection
 mship state migrate                                 # validated legacy cutover or known SQLite schema upgrade
+mship state migrate --preview                       # inspect all ownership corrections/conflicts without writes
+mship state migrate --resolve-owners owners.json     # apply a JSON task-slug -> WorkItem-ID resolution map
 mship state export --format json|yaml               # full Task/WorkItem data only
 ```
 
@@ -216,6 +220,41 @@ It builds and verifies a candidate database before atomically activating
 Successful legacy paths are retained beside the database with a
 `.migrated-<UTC timestamp>` suffix.
 
+Before legacy cutover, `mship state migrate --preview` lists every proposed
+ownership resolution, changed WorkItem task-link list, and unresolved conflict.
+Use `mship --json state migrate --preview` for structured output. Preview is
+read-only and returns a nonzero exit status if conflicts remain; apply recomputes
+the plan while holding the migration and legacy writer locks.
+
+A current Task's valid explicit `work_item_id` wins over competing WorkItem
+backreferences. Only stale backreferences and repeated links are removed; no
+WorkItem is deleted or merged, and titles, timestamps, spec/plan links, threads,
+archive flags, and unrelated associations are preserved. A missing explicit
+owner is reported rather than silently rewriting the Task.
+
+For removed tasks with competing claimants, automatic resolution requires
+agreement among explicit owners in retained application-native Task snapshots:
+`.mothership/backups/*/state.yaml` and `.mothership/state.yaml.migrated-*`.
+Snapshot age, WorkItem order, titles, and shared spec IDs do not break ties.
+Missing, unreadable, or contradictory evidence requires an operator decision;
+agent transcripts and session-history tools are not migration dependencies.
+
+Supply ambiguous choices as a JSON object, for example
+`{"closed-task": "wi-canonical"}`, using `--resolve-owners owners.json`.
+Preview that map first with
+`mship state migrate --preview --resolve-owners owners.json`, then apply without
+`--preview`. Each choice must name an existing claimant; it cannot override a
+current Task's valid explicit owner. Unknown task slugs, missing owners, duplicate
+JSON keys, and invalid values are rejected.
+
+The backup retains the exact original input bytes and any historical snapshots
+used as evidence. Its `migration-report.json` records ownership decisions,
+removed links, rules, and input/evidence fingerprints; the verified database
+stores the plan and the report path/hash. Corrections exist only in the candidate
+database until activation. Repeating a completed migration with the same recorded
+owner choices is also a no-op; a different map cannot rewrite existing SQLite
+ownership.
+
 For an existing SQLite database at a known older packaged revision, the same
 command reserves the writer, creates a consistent owner-private backup, and
 reports its location. It applies the packaged upgrade transactionally and
@@ -223,6 +262,9 @@ verifies the resulting revision, foreign keys, and preserved Task/WorkItem
 data before committing. A failed upgrade rolls back; unknown or future
 revisions are not guessed or overwritten. Repeating a successful migration
 is a no-op.
+SQLite preview refuses while WAL/shared-memory sidecars exist rather than
+modifying them or reading stale data. Close active database users and let SQLite
+checkpoint before retrying.
 
 The cutover has no dual-write period. Once `mothership.db` is active, the
 SQLite database is authoritative and older Mothership binaries that only write

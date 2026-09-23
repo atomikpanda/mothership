@@ -1,7 +1,9 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 from alembic import command
 from sqlalchemy import text
 from typer.testing import CliRunner
@@ -12,6 +14,8 @@ from mship.core.persistence.database import (
     WorkspaceDatabase,
     make_alembic_config,
 )
+from mship.core.state import Task, WorkspaceState
+from mship.core.workitem import WorkItem
 
 
 runner = CliRunner()
@@ -32,6 +36,45 @@ def state_cli(workspace: Path):
         container.state_manager.reset()
         container.workspace_store.reset()
         container.workspace_database.reset()
+
+
+def _legacy_files(state_dir: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(state_dir).as_posix(): path.read_bytes()
+        for path in sorted(state_dir.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _seed_ambiguous_owners(state_dir: Path) -> None:
+    now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    tasks = {
+        slug: Task(
+            slug=slug,
+            description=f"legacy {slug}",
+            phase="dev",
+            created_at=now,
+            affected_repos=[],
+            branch=f"feat/{slug}",
+        )
+        for slug in ("task-a", "task-b")
+    }
+    (state_dir / "state.yaml").write_text(
+        yaml.safe_dump(WorkspaceState(tasks=tasks).model_dump(mode="json"))
+    )
+    workitems_dir = state_dir / "workitems"
+    workitems_dir.mkdir()
+    for item_id in ("wi-first", "wi-second"):
+        item = WorkItem(
+            id=item_id,
+            title=item_id,
+            workspace="test",
+            kind="chore",
+            created_at=now,
+            updated_at=now,
+            task_slugs=["task-a", "task-b"],
+        )
+        (workitems_dir / f"{item_id}.json").write_text(item.model_dump_json())
 
 
 def test_state_status_reports_stable_legacy_payload(state_cli: Path) -> None:
@@ -88,7 +131,9 @@ def test_state_migrate_reports_busy_database(
 ) -> None:
     monkeypatch.setattr(
         "mship.cli.state.migrate_state",
-        lambda _state_dir: (_ for _ in ()).throw(DatabaseBusyError("database busy")),
+        lambda _state_dir, **_kwargs: (_ for _ in ()).throw(
+            DatabaseBusyError("database busy")
+        ),
     )
 
     result = runner.invoke(app, ["state", "migrate"])
@@ -197,3 +242,122 @@ def test_state_commands_explain_incompatible_revision(
     assert result.exit_code == 1
     assert revision in result.output
     assert "requires" in result.output
+
+
+def test_state_migrate_preview_aggregates_conflicts_without_mutation(
+    state_cli: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_ambiguous_owners(state_cli)
+    before = _legacy_files(state_cli)
+    monkeypatch.setattr(
+        "mship.core.persistence.migration.daemon_is_running",
+        lambda: False,
+    )
+
+    result = runner.invoke(app, ["--json", "state", "migrate", "--preview"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert {
+        conflict["task_slug"] for conflict in payload["ownership"]["conflicts"]
+    } == {"task-a", "task-b"}
+    assert _legacy_files(state_cli) == before
+    assert not (state_cli / "mothership.db").exists()
+    blocked = runner.invoke(app, ["--json", "state", "migrate"])
+    assert blocked.exit_code == 1, blocked.output
+    assert {
+        conflict["task_slug"] for conflict in json.loads(blocked.output)["conflicts"]
+    } == {"task-a", "task-b"}
+    assert not (state_cli / "mothership.db").exists()
+
+
+def test_state_migrate_retries_ownership_preview_with_operator_map(
+    state_cli: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_ambiguous_owners(state_cli)
+    initial = runner.invoke(app, ["--json", "state", "migrate", "--preview"])
+    owner_map = state_cli / "owners.json"
+    owner_map.write_text(json.dumps({"task-a": "wi-first", "task-b": "wi-second"}))
+    monkeypatch.setattr(
+        "mship.core.persistence.migration.daemon_is_running",
+        lambda: False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "state",
+            "migrate",
+            "--resolve-owners",
+            str(owner_map),
+        ],
+    )
+
+    assert initial.exit_code == 1, initial.output
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ownership"]["conflicts"] == []
+    assert {
+        resolution["task_slug"]: resolution["owner_id"]
+        for resolution in payload["ownership"]["resolutions"]
+    } == {"task-a": "wi-first", "task-b": "wi-second"}
+    assert Path(payload["report_path"]).is_file()
+    assert (state_cli / "mothership.db").is_file()
+    exported = runner.invoke(app, ["state", "export", "--format", "json"])
+    assert exported.exit_code == 0, exported.output
+    task_slugs = {
+        item["id"]: item["task_slugs"]
+        for item in json.loads(exported.output)["work_items"]
+    }
+    assert task_slugs == {
+        "wi-first": ["task-a"],
+        "wi-second": ["task-b"],
+    }
+    repeated = runner.invoke(
+        app,
+        ["--json", "state", "migrate", "--resolve-owners", str(owner_map)],
+    )
+    assert repeated.exit_code == 0, repeated.output
+    assert json.loads(repeated.output)["migrated"] is False
+    assert json.loads(repeated.output)["backup_path"] is None
+    owner_map.write_text(json.dumps({"task-a": "wi-second"}))
+    changed = runner.invoke(
+        app,
+        ["--json", "state", "migrate", "--resolve-owners", str(owner_map)],
+    )
+    assert changed.exit_code == 1, changed.output
+    assert [c["task_slug"] for c in json.loads(changed.output)["conflicts"]] == [
+        "task-a"
+    ]
+    after = runner.invoke(app, ["state", "export", "--format", "json"])
+    assert json.loads(after.output) == json.loads(exported.output)
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[]",
+        '{"task-a": ""}',
+        '{"task-a": "wi-first", "task-a": "wi-second"}',
+    ],
+)
+def test_state_migrate_rejects_invalid_owner_resolution_map(
+    state_cli: Path,
+    contents: str,
+) -> None:
+    _seed_ambiguous_owners(state_cli)
+    owner_map = state_cli / "owners.json"
+    owner_map.write_text(contents)
+    before = _legacy_files(state_cli)
+
+    result = runner.invoke(
+        app,
+        ["state", "migrate", "--resolve-owners", str(owner_map)],
+    )
+
+    assert result.exit_code == 1
+    assert _legacy_files(state_cli) == before
+    assert not (state_cli / "mothership.db").exists()
