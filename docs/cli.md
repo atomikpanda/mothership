@@ -221,7 +221,8 @@ Successful legacy paths are retained beside the database with a
 `.migrated-<UTC timestamp>` suffix.
 
 Before legacy cutover, `mship state migrate --preview` lists every proposed
-ownership resolution, changed WorkItem task-link list, and unresolved conflict.
+ownership resolution, changed WorkItem task-link list, missing Task owner
+correction, and unresolved conflict.
 Use `mship --json state migrate --preview` for structured output. Preview is
 read-only and returns a nonzero exit status if conflicts remain; apply recomputes
 the plan while holding the migration and legacy writer locks.
@@ -229,8 +230,11 @@ the plan while holding the migration and legacy writer locks.
 A current Task's valid explicit `work_item_id` wins over competing WorkItem
 backreferences. Only stale backreferences and repeated links are removed; no
 WorkItem is deleted or merged, and titles, timestamps, spec/plan links, threads,
-archive flags, and unrelated associations are preserved. A missing explicit
-owner is reported rather than silently rewriting the Task.
+archive flags, and unrelated associations are preserved. If a current Task has
+no `work_item_id`, a sole claimant or explicit operator choice fills that missing
+forward link. This correction is shown in the preview and recorded in the audit
+report; an existing explicit owner is never overwritten. An explicit owner ID
+that references a missing WorkItem remains a conflict.
 
 For removed tasks with competing claimants, automatic resolution requires
 agreement among explicit owners in retained application-native Task snapshots:
@@ -249,7 +253,7 @@ JSON keys, and invalid values are rejected.
 
 The backup retains the exact original input bytes and any historical snapshots
 used as evidence. Its `migration-report.json` records ownership decisions,
-removed links, rules, and input/evidence fingerprints; the verified database
+removed links, Task owner before/after values, rules, and input/evidence fingerprints; the verified database
 stores the plan and the report path/hash. Corrections exist only in the candidate
 database until activation. Repeating a completed migration with the same recorded
 owner choices is also a no-op; a different map cannot rewrite existing SQLite
@@ -262,6 +266,8 @@ verifies the resulting revision, foreign keys, and preserved Task/WorkItem
 data before committing. A failed upgrade rolls back; unknown or future
 revisions are not guessed or overwritten. Repeating a successful migration
 is a no-op.
+Preview enforces the same revision compatibility rules as apply: unversioned,
+unknown, and future SQLite revisions are rejected without modifying state.
 SQLite preview refuses while WAL/shared-memory sidecars exist rather than
 modifying them or reading stale data. Close active database users and let SQLite
 checkpoint before retrying.

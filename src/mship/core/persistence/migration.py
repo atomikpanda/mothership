@@ -626,6 +626,10 @@ def preview_migration(
         revision, task_count, work_item_count, completed_plan = (
             _readonly_sqlite_summary(database_path)
         )
+        if revision != head and (
+            revision is None or not _known_packaged_revision(database, revision)
+        ):
+            raise _revision_error(database, current=revision, head=head)
         return MigrationPreview(
             backend=backend.value,
             database_path=database_path,
@@ -757,7 +761,9 @@ def migrate_state(
             if ownership_plan.conflicts:
                 raise OwnershipConflictError(ownership_plan)
             evidence = _verify_ownership_evidence(state_dir, ownership_plan)
-            candidate_items = apply_ownership_plan(legacy_items, ownership_plan)
+            candidate_state, candidate_items = apply_ownership_plan(
+                legacy_state, legacy_items, ownership_plan
+            )
             state_fingerprint, items_fingerprint = _legacy_fingerprints(state_dir)
 
             _call_stage(stage_hook, "backup")
@@ -788,16 +794,16 @@ def migrate_state(
                 tasks_repo = TaskRepository()
                 items_repo = WorkItemRepository()
                 with candidate.write(immediate=True) as connection:
-                    for slug in StateManager._dependency_order(legacy_state.tasks):
+                    for slug in StateManager._dependency_order(candidate_state.tasks):
                         tasks_repo.insert(
                             connection,
-                            legacy_state.tasks[slug],
+                            candidate_state.tasks[slug],
                         )
                     for item in sorted(candidate_items, key=lambda value: value.id):
                         items_repo.insert(connection, item)
 
                 _call_stage(stage_hook, "verify")
-                _verify_candidate(candidate, legacy_state, candidate_items)
+                _verify_candidate(candidate, candidate_state, candidate_items)
                 _write_migration_metadata(
                     candidate,
                     migrated_at=migration_time,

@@ -445,6 +445,65 @@ def test_migration_current_task_owner_resolves_competing_backreferences(
     assert StateManager(state_dir).load() == state
 
 
+@pytest.mark.parametrize("operator_resolution", [False, True])
+def test_migration_audits_and_restores_missing_task_owner(
+    legacy_workspace: LegacyWorkspace,
+    operator_resolution: bool,
+) -> None:
+    state_dir = legacy_workspace.state_dir
+    state = legacy_workspace.expected_state.model_copy(deep=True)
+    state.tasks["upstream"].work_item_id = None
+    state_path = state_dir / "state.yaml"
+    state_path.write_text(yaml.safe_dump(state.model_dump(mode="json")))
+    if operator_resolution:
+        competing = legacy_workspace.expected_items[1].model_copy(
+            update={"task_slugs": ["downstream", "upstream"]}
+        )
+        (state_dir / "workitems" / "wi-archived.json").write_text(
+            competing.model_dump_json()
+        )
+    original_inputs = _filesystem_bytes(state_dir)
+    mapping = {"upstream": "wi-active"} if operator_resolution else None
+    preview = preview_migration(state_dir, owner_resolutions=mapping)
+    assert not preview.ownership.conflicts
+    assert _filesystem_bytes(state_dir) == original_inputs
+    report = migrate_state(
+        state_dir, daemon_probe=lambda: None, now=NOW, owner_resolutions=mapping
+    )
+    assert StateManager(state_dir).load() == legacy_workspace.expected_state
+    restored_items = WorkItemStore(state_dir / "workitems").list(include_archived=True)
+    assert {item.id: item for item in restored_items} == {
+        item.id: item for item in legacy_workspace.expected_items
+    }
+    assert report.backup_path is not None
+    for relative, payload in original_inputs.items():
+        if relative == "state.yaml" or relative.startswith("workitems/"):
+            assert (report.backup_path / relative).read_bytes() == payload
+    assert report.report_path is not None
+    audit = json.loads(report.report_path.read_text())
+    assert audit["ownership"]["task_changes"] == [
+        {"task_slug": "upstream", "before": None, "after": "wi-active"}
+    ]
+    assert report.ownership == preview.ownership
+    database = WorkspaceDatabase(state_dir)
+    with database.read() as connection:
+        metadata = dict(
+            connection.execute(select(storage_metadata.c.key, storage_metadata.c.value))
+            .tuples()
+            .all()
+        )
+    assert json.loads(metadata["ownership_plan"]) == audit["ownership"]
+    assert (
+        metadata["migration_report_sha256"]
+        == hashlib.sha256(report.report_path.read_bytes()).hexdigest()
+    )
+    repeated = migrate_state(
+        state_dir, daemon_probe=lambda: None, now=NOW, owner_resolutions=mapping
+    )
+    assert not repeated.migrated
+    assert StateManager(state_dir).load() == legacy_workspace.expected_state
+
+
 def test_migration_reports_all_ownership_conflicts_before_backup(
     legacy_workspace: LegacyWorkspace,
 ) -> None:
@@ -527,6 +586,9 @@ def test_migration_correction_fault_keeps_legacy_authoritative(
     legacy_workspace: LegacyWorkspace,
 ) -> None:
     state_dir = legacy_workspace.state_dir
+    state = legacy_workspace.expected_state.model_copy(deep=True)
+    state.tasks["upstream"].work_item_id = None
+    (state_dir / "state.yaml").write_text(yaml.safe_dump(state.model_dump(mode="json")))
     archived_path = state_dir / "workitems" / "wi-archived.json"
     archived = legacy_workspace.expected_items[1].model_copy(
         update={"task_slugs": ["downstream", "upstream"]}
@@ -544,6 +606,7 @@ def test_migration_correction_fault_keeps_legacy_authoritative(
             daemon_probe=lambda: None,
             now=NOW,
             stage_hook=fail_verify,
+            owner_resolutions={"upstream": "wi-active"},
         )
 
     assert _filesystem_bytes(state_dir).items() >= original_inputs.items()
@@ -599,23 +662,16 @@ def test_preview_migration_is_read_only_for_legacy_empty_and_sqlite(
     assert empty.migration_required is False
     assert not empty_dir.exists()
 
-    sqlite_dir = tmp_path / "sqlite" / ".mothership"
-    sqlite_dir.mkdir(parents=True)
-    sqlite_path = sqlite_dir / "mothership.db"
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.execute("CREATE TABLE alembic_version (version_num TEXT)")
-        connection.execute("INSERT INTO alembic_version VALUES ('preview-test')")
-        connection.execute("CREATE TABLE tasks (slug TEXT)")
-        connection.execute("CREATE TABLE work_items (id TEXT)")
-        connection.execute("INSERT INTO tasks VALUES ('task')")
-        connection.execute("INSERT INTO work_items VALUES ('item')")
+    sqlite_dir = legacy_workspace.state_dir
+    report = migrate_state(sqlite_dir, daemon_probe=lambda: None, now=NOW)
     sqlite_before = _filesystem_bytes(sqlite_dir)
 
     sqlite_preview = preview_migration(sqlite_dir)
 
     assert sqlite_preview.backend == "sqlite"
-    assert sqlite_preview.revision == "preview-test"
-    assert (sqlite_preview.tasks, sqlite_preview.work_items) == (1, 1)
+    assert sqlite_preview.revision == report.revision
+    assert sqlite_preview.migration_required is False
+    assert (sqlite_preview.tasks, sqlite_preview.work_items) == (2, 2)
     assert _filesystem_bytes(sqlite_dir) == sqlite_before
 
     (sqlite_dir / "mothership.db-wal").write_bytes(b"uncheckpointed")

@@ -76,7 +76,8 @@ def test_explicit_owner_does_not_depend_on_workitem_order_or_metadata(
     original = [item.model_dump(mode="json") for item in items]
 
     plan = plan_ownership(tmp_path, state, items)
-    actual = apply_ownership_plan(items, plan)
+    actual_state, actual = apply_ownership_plan(state, items, plan)
+    assert actual_state == state
 
     assert not plan.conflicts
     expected = {item.id: item.model_dump(mode="json") for item in items}
@@ -100,13 +101,15 @@ def test_removed_task_requires_consensus_not_newest_or_oldest_snapshot(
     assert [c.task_slug for c in conflicted.conflicts] == ["closed"]
     assert len(conflicted.conflicts[0].evidence) == 2
     with pytest.raises(ValueError):
-        apply_ownership_plan(items, conflicted)
+        apply_ownership_plan(state, items, conflicted)
 
     explicit = plan_ownership(
         tmp_path, state, items, owner_resolutions={"closed": "wi-b"}
     )
     assert not explicit.conflicts
-    assert [item.task_slugs for item in apply_ownership_plan(items, explicit)] == [
+    assert [
+        item.task_slugs for item in apply_ownership_plan(state, items, explicit)[1]
+    ] == [
         [],
         ["closed", "sibling"],
     ]
@@ -124,7 +127,9 @@ def test_removed_task_requires_consensus_not_newest_or_oldest_snapshot(
     )
     agreed = plan_ownership(tmp_path, state, items)
     assert not agreed.conflicts
-    assert [item.task_slugs for item in apply_ownership_plan(items, agreed)] == [
+    assert [
+        item.task_slugs for item in apply_ownership_plan(state, items, agreed)[1]
+    ] == [
         ["closed"],
         ["sibling"],
     ]
@@ -163,7 +168,7 @@ def test_invalid_owner_and_operator_conflicts_are_aggregated(tmp_path: Path) -> 
         "unknown-slug",
     }
     with pytest.raises(ValueError):
-        apply_ownership_plan(items, plan)
+        apply_ownership_plan(state, items, plan)
     assert items[0].task_slugs == ["missing", "owned", "ambiguous"]
     assert items[1].task_slugs == ["owned", "ambiguous"]
 
@@ -190,3 +195,20 @@ def test_external_history_symlink_is_not_ownership_authority(tmp_path: Path) -> 
     plan = plan_ownership(state_dir, WorkspaceState(), items)
     assert [c.task_slug for c in plan.conflicts] == ["closed"]
     assert plan.evidence_fingerprints == {}
+
+
+def test_planned_missing_owner_cannot_overwrite_subsequent_explicit_owner(
+    tmp_path: Path,
+) -> None:
+    state = WorkspaceState(tasks={"active": _task("active", None)})
+    items = [_item("wi-a", ["active"]), _item("wi-b", [])]
+    plan = plan_ownership(tmp_path, state, items)
+    original = state.model_dump(mode="json")
+    normalized, _ = apply_ownership_plan(state, items, plan)
+    assert normalized.tasks["active"].work_item_id == "wi-a"
+    assert state.model_dump(mode="json") == original
+
+    state.tasks["active"].work_item_id = "wi-b"
+    with pytest.raises(ValueError):
+        apply_ownership_plan(state, items, plan)
+    assert state.tasks["active"].work_item_id == "wi-b"

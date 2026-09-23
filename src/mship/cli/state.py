@@ -80,6 +80,10 @@ def _render_ownership(out: Output, plan: Any) -> None:
         before = ", ".join(change.before) or "-"
         after = ", ".join(change.after) or "-"
         lines.append(f"work item {change.work_item_id}: {before} -> {after}")
+    for change in plan.task_changes:
+        lines.append(
+            f"task {change.task_slug} work_item_id: {change.before!r} -> {change.after}"
+        )
     for conflict in plan.conflicts:
         owners = ", ".join(conflict.owner_ids) or "-"
         evidence = f" ({'; '.join(conflict.evidence)})" if conflict.evidence else ""

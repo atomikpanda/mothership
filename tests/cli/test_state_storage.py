@@ -185,6 +185,12 @@ def test_state_migrate_upgrades_known_sqlite_ancestor(state_cli: Path) -> None:
         config = make_alembic_config(database.path)
         config.attributes["connection"] = connection
         command.downgrade(config, "0001_tasks_and_workitems")
+    database.dispose()
+    before = _legacy_files(state_cli)
+    preview = runner.invoke(app, ["--json", "state", "migrate", "--preview"])
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.output)["migration_required"] is True
+    assert _legacy_files(state_cli) == before
 
     result = runner.invoke(app, ["--json", "state", "migrate"])
     payload = json.loads(result.output)
@@ -224,24 +230,32 @@ def test_state_status_and_export_use_sqlite_after_migration(
     assert json.loads(exported.output) == {"tasks": [], "work_items": []}
 
 
-@pytest.mark.parametrize("revision", ["behind_revision", "future_revision"])
+@pytest.mark.parametrize("revision", [None, "future_revision"])
 def test_state_commands_explain_incompatible_revision(
     state_cli: Path,
-    revision: str,
+    revision: str | None,
 ) -> None:
     database = WorkspaceDatabase(state_cli)
     database.initialize()
     with database.write() as connection:
-        connection.execute(
-            text("UPDATE alembic_version SET version_num = :revision"),
-            {"revision": revision},
-        )
+        if revision is None:
+            connection.execute(text("DELETE FROM alembic_version"))
+        else:
+            connection.execute(
+                text("UPDATE alembic_version SET version_num = :revision"),
+                {"revision": revision},
+            )
+    database.dispose()
+    before = _legacy_files(state_cli)
+    preview = runner.invoke(app, ["state", "migrate", "--preview"])
+    assert preview.exit_code == 1, preview.output
+    assert str(revision) in preview.output
+    assert _legacy_files(state_cli) == before
 
     result = runner.invoke(app, ["state", "migrate"])
 
     assert result.exit_code == 1
-    assert revision in result.output
-    assert "requires" in result.output
+    assert str(revision) in result.output
 
 
 def test_state_migrate_preview_aggregates_conflicts_without_mutation(
@@ -284,6 +298,17 @@ def test_state_migrate_retries_ownership_preview_with_operator_map(
         "mship.core.persistence.migration.daemon_is_running",
         lambda: False,
     )
+    before = _legacy_files(state_cli)
+    preview = runner.invoke(
+        app,
+        ["--json", "state", "migrate", "--preview", "--resolve-owners", str(owner_map)],
+    )
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.output)["ownership"]["task_changes"] == [
+        {"task_slug": "task-a", "before": None, "after": "wi-first"},
+        {"task_slug": "task-b", "before": None, "after": "wi-second"},
+    ]
+    assert _legacy_files(state_cli) == before
 
     result = runner.invoke(
         app,
@@ -308,6 +333,10 @@ def test_state_migrate_retries_ownership_preview_with_operator_map(
     assert (state_cli / "mothership.db").is_file()
     exported = runner.invoke(app, ["state", "export", "--format", "json"])
     assert exported.exit_code == 0, exported.output
+    assert {
+        task["slug"]: task["work_item_id"]
+        for task in json.loads(exported.output)["tasks"]
+    } == {"task-a": "wi-first", "task-b": "wi-second"}
     task_slugs = {
         item["id"]: item["task_slugs"]
         for item in json.loads(exported.output)["work_items"]

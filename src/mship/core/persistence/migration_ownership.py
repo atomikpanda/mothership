@@ -39,11 +39,19 @@ class OwnershipChange:
 
 
 @dataclass(frozen=True)
+class TaskOwnershipChange:
+    task_slug: str
+    before: None
+    after: str
+
+
+@dataclass(frozen=True)
 class OwnershipPlan:
     resolutions: tuple[OwnershipResolution, ...] = ()
     conflicts: tuple[OwnershipConflict, ...] = ()
     changes: tuple[OwnershipChange, ...] = ()
     evidence_fingerprints: dict[str, str] = field(default_factory=dict)
+    task_changes: tuple[TaskOwnershipChange, ...] = ()
 
 
 def _historical_owners(
@@ -94,7 +102,7 @@ def plan_ownership(
     *,
     owner_resolutions: Mapping[str, str] | None = None,
 ) -> OwnershipPlan:
-    """Plan only backreference removals/deduplication; never rewrite a Task."""
+    """Plan backreference corrections and missing Task owners without mutating inputs."""
     overrides = dict(owner_resolutions or {})
     if any(
         not isinstance(slug, str)
@@ -123,6 +131,7 @@ def plan_ownership(
     )
     resolutions: list[OwnershipResolution] = []
     conflicts: list[OwnershipConflict] = []
+    task_changes: list[TaskOwnershipChange] = []
     chosen: dict[str, str] = {}
     for slug in sorted(claimants.keys() | state.tasks.keys() | overrides.keys()):
         owners = tuple(sorted(claimants.get(slug, ())))
@@ -189,6 +198,8 @@ def plan_ownership(
             conflicts.append(OwnershipConflict(slug, owners, reason, evidence))
         elif owner is not None:
             chosen[slug] = owner
+            if task is not None and explicit is None:
+                task_changes.append(TaskOwnershipChange(slug, None, owner))
             resolutions.append(
                 OwnershipResolution(
                     slug,
@@ -209,14 +220,33 @@ def plan_ownership(
         if before != after:
             changes.append(OwnershipChange(item.id, before, after))
     return OwnershipPlan(
-        tuple(resolutions), tuple(conflicts), tuple(changes), fingerprints
+        resolutions=tuple(resolutions),
+        conflicts=tuple(conflicts),
+        changes=tuple(changes),
+        evidence_fingerprints=fingerprints,
+        task_changes=tuple(task_changes),
     )
 
 
-def apply_ownership_plan(items: list[WorkItem], plan: OwnershipPlan) -> list[WorkItem]:
+def apply_ownership_plan(
+    state: WorkspaceState, items: list[WorkItem], plan: OwnershipPlan
+) -> tuple[WorkspaceState, list[WorkItem]]:
     """Apply a complete plan in memory, preserving every unrelated field."""
     if plan.conflicts:
         raise ValueError("cannot apply an ownership plan with unresolved conflicts")
+    normalized_state = state
+    if plan.task_changes:
+        tasks = dict(state.tasks)
+        for change in plan.task_changes:
+            task = tasks.get(change.task_slug)
+            if task is None or task.work_item_id is not None:
+                raise ValueError(
+                    "ownership plan no longer matches the legacy Task owner"
+                )
+            tasks[change.task_slug] = task.model_copy(
+                update={"work_item_id": change.after}
+            )
+        normalized_state = state.model_copy(update={"tasks": tasks})
     changes = {change.work_item_id: change for change in plan.changes}
     normalized = []
     for item in items:
@@ -231,4 +261,4 @@ def apply_ownership_plan(items: list[WorkItem], plan: OwnershipPlan) -> list[Wor
             normalized.append(
                 item.model_copy(update={"task_slugs": list(change.after)})
             )
-    return normalized
+    return normalized_state, normalized
