@@ -200,6 +200,12 @@ mship relay approve <id> \
   --pubkeys-dir /path/to/docker/relay/pubkeys
 ```
 
+The tunnel forwards to the configured serve address, not an assumed localhost
+listener. An existing Tailscale/LAN-specific bind can therefore add `--relay`
+without changing its listener or direct clients. Wildcard binds use matching
+loopback destinations (`0.0.0.0` → `127.0.0.1`, `::` → `::1`); concrete IPv6
+destinations are bracketed in the SSH forwarding argument.
+
 `--relay` needs a local bind to forward, from this install or an earlier one
 (`--serve HOST:PORT`); like `--serve`, a **changed** relay takes effect on
 `mship daemon restart`. Nothing else is manual: while its key is unapproved the

@@ -1,23 +1,62 @@
 from pathlib import Path
+import pytest
 from mship.core.relay.config import RelayConfig
 from mship.core.relay.tunnel import subdomain_for, build_tunnel_argv
+
 
 def test_subdomain_slugs_workspace():
     assert subdomain_for("Mship Workspace") == "mship-workspace"
 
+
 def test_subdomain_no_phrase_heuristic_colon():
     assert subdomain_for("team: alpha") == "team-alpha"
+
 
 def test_subdomain_no_phrase_heuristic_dot():
     assert subdomain_for("My.Cool Workspace") == "my-cool-workspace"
 
+
 def test_build_tunnel_argv():
     rc = RelayConfig(host="relay.example.com", ssh_port=2222, user="tunnel")
-    argv = build_tunnel_argv(rc, subdomain="mship-workspace", local_port=47100, key_path=Path("/k/relay_ed25519"))
+    argv = build_tunnel_argv(
+        rc,
+        subdomain="mship-workspace",
+        local_host="100.115.83.120",
+        local_port=47100,
+        key_path=Path("/k/relay_ed25519"),
+    )
     assert argv[0] == "ssh"
-    assert "-R" in argv and "mship-workspace:80:localhost:47100" in argv
+    assert argv[argv.index("-R") + 1] == "mship-workspace:80:100.115.83.120:47100"
     assert "-p" in argv and "2222" in argv
     assert "-i" in argv and "/k/relay_ed25519" in argv
     assert argv[-1] == "tunnel@relay.example.com"
     # resilience options present
-    assert "-o" in argv and "ExitOnForwardFailure=yes" in argv and "ServerAliveInterval=30" in argv
+    assert (
+        "-o" in argv
+        and "ExitOnForwardFailure=yes" in argv
+        and "ServerAliveInterval=30" in argv
+    )
+
+
+@pytest.mark.parametrize(
+    ("bind_host", "destination"),
+    [
+        ("0.0.0.0", "127.0.0.1"),
+        ("::", "[::1]"),
+        ("fd7a:115c:a1e0::1", "[fd7a:115c:a1e0::1]"),
+        ("[fd7a:115c:a1e0::1]", "[fd7a:115c:a1e0::1]"),
+        ("[::]", "[::1]"),
+        ("localhost", "localhost"),
+    ],
+)
+def test_tunnel_destination_preserves_address_family_and_ssh_syntax(
+    bind_host, destination
+):
+    argv = build_tunnel_argv(
+        RelayConfig(host="relay.example.com"),
+        subdomain="host",
+        local_host=bind_host,
+        local_port=47100,
+        key_path=Path("/k/relay_ed25519"),
+    )
+    assert argv[argv.index("-R") + 1] == f"host:80:{destination}:47100"

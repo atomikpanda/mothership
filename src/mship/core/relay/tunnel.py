@@ -84,8 +84,18 @@ def device_subdomain(workspace: str, dev_id: str, secret: bytes) -> str:
 
 
 def build_tunnel_argv(
-    rc: RelayConfig, *, subdomain: str, local_port: int, key_path: Path
+    rc: RelayConfig, *, subdomain: str, local_host: str, local_port: int, key_path: Path
 ) -> list[str]:
+    if local_host.startswith("[") and local_host.endswith("]"):
+        local_host = local_host[1:-1]
+    # Wildcard addresses are listeners, not destinations. Dial the matching
+    # loopback family; otherwise preserve the server's restricted bind address.
+    if local_host == "0.0.0.0":
+        local_host = "127.0.0.1"
+    elif local_host == "::":
+        local_host = "::1"
+    if ":" in local_host:
+        local_host = f"[{local_host}]"
     target = f"{rc.user}@{rc.host}" if rc.user else rc.host
     return [
         "ssh",
@@ -103,7 +113,7 @@ def build_tunnel_argv(
         "StrictHostKeyChecking=accept-new",
         "-N",
         "-R",
-        f"{subdomain}:80:localhost:{local_port}",
+        f"{subdomain}:80:{local_host}:{local_port}",
         target,
     ]
 

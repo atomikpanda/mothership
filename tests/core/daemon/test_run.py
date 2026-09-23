@@ -596,15 +596,17 @@ def test_build_tunnel_dials_the_subdomain_the_link_currently_owns(
         lambda argv, log_path=None: (spawned.append(argv), _Proc())[1],
     )
 
-    tunnel = run_mod._build_tunnel(home, RelayConfig(host="relay.example"), SERVE_BLOCK)
+    serve = {"host": "100.115.83.120", "port": 47100}
+    tunnel = run_mod._build_tunnel(home, RelayConfig(host="relay.example"), serve)
     assert tunnel.host_id == tunnel._link.host_id
     assert tunnel.instance_id == tunnel._link.instance_id
     # Stands in for the auto-reidentify `test_relay_link.py` drives end to end.
     tunnel._link.subdomain = "hst-reidentified"
     tunnel._supervisor.start()
 
-    assert spawned[-1][spawned[-1].index("-R") + 1].startswith("hst-reidentified:")
-    assert str(SERVE_BLOCK["port"]) in spawned[-1][spawned[-1].index("-R") + 1]
+    assert spawned[-1][spawned[-1].index("-R") + 1] == (
+        "hst-reidentified:80:100.115.83.120:47100"
+    )
 
 
 def test_no_relay_block_means_no_tunnel(tmp_path):

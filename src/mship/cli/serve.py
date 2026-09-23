@@ -246,7 +246,9 @@ def _serve_with_relay(
     )
 
     subdomain = pair_link.subdomain
-    argv = build_tunnel_argv(rc, subdomain=subdomain, local_port=port, key_path=key_path)
+    argv = build_tunnel_argv(
+        rc, subdomain=subdomain, local_host=host, local_port=port, key_path=key_path
+    )
 
     public_url = pair_link.url
     link = pair_link.link
