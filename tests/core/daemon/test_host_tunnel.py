@@ -197,6 +197,7 @@ class _Fixture:
         return build_tunnel_argv(
             RELAY,
             subdomain=self.link.subdomain,
+            local_host="localhost",
             local_port=BIND_PORT,
             key_path=relay_key_path(self.home),
         )

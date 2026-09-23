@@ -375,7 +375,9 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     assert argv[0] == "ssh"
     assert "tunnel@relay.example.com" in argv
     # The per-device subdomain is used in the tunnel forward spec.
-    assert any(f"{expected_subdomain}:80:localhost:47100" in a for a in argv)
+    assert argv[argv.index("-R") + 1] == (
+        f"{expected_subdomain}:80:{seen['uvicorn_host']}:{seen['uvicorn_port']}"
+    )
     # Output advertises the public URL + scannable deep-link.
     assert expected_public_url in r.output
     assert "groundcontrol://add?" in r.output

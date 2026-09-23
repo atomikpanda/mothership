@@ -165,6 +165,7 @@ def _build_tunnel(home: Path, relay_cfg, serve_cfg):
         argv=lambda: build_tunnel_argv(
             relay_cfg,
             subdomain=link.subdomain,
+            local_host=serve_cfg["host"],
             local_port=int(serve_cfg["port"]),
             key_path=keys.relay_key_path(home),
         ),
