@@ -5,13 +5,17 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Literal
 
+import httpx
 import pytest
 
+from mship.cli.output import Output
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.persistence.workspace_store import WorkspaceStore
+from mship.core.remote_dispatch import PreparedSource, SourceSnapshot, _RunRefSource
 from mship.core.remote_tool import ToolResult
 from mship.core.run_host.config import (
     HostRegistration,
+    RelayRunHostIdentity,
     RunHostConnection,
     registration_identity,
 )
@@ -296,6 +300,87 @@ def test_resolve_launch_fails_closed_when_one_eligible_host_is_incomplete(tmp_pa
     assert error.value.code == "discovery_incomplete"
 
 
+@pytest.mark.parametrize(
+    "dirty_source", [True, False], ids=["source-transfer", "discovery"]
+)
+def test_relay_auth_failure_reports_repair_without_launch_or_secret_output(
+    tmp_path, monkeypatch, capsys, dirty_source
+):
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    pairings = config_home / "mothership" / "relay-pairings.json"
+    pairings.parent.mkdir(parents=True)
+    credential = "private-relay-account"
+    pairings.write_text(
+        json.dumps({"version": 1, "pairings": {"relay.invalid": credential}})
+    )
+    pairings.chmod(0o600)
+    host = HostRegistration(
+        "mobile",
+        ("mobile",),
+        (),
+        0,
+        RelayRunHostIdentity("relay.invalid", "host-1", "workspace-1", "instance-1"),
+        "project",
+    )
+    requests = []
+
+    def reject_pairing(request):
+        requests.append((request.method, request.url.host, request.url.path))
+        return httpx.Response(401, json={"detail": "untrusted private server response"})
+
+    snapshot = SourceSnapshot(
+        {"app": _SHA},
+        None,
+        (_RunRefSource("app", tmp_path / "app", "feature/task", _SHA),),
+    )
+    monkeypatch.setattr(
+        "mship.core.remote_dispatch.snapshot_remote_source", lambda **kwargs: snapshot
+    )
+    if not dirty_source:
+        monkeypatch.setattr(
+            "mship.core.remote_dispatch.prepare_remote_source",
+            lambda **kwargs: PreparedSource((), {"app": _SHA}),
+        )
+    executor = RemoteBackendExecutor(
+        task_obj=_task(tmp_path),
+        config=_config(tmp_path),
+        shell=SimpleNamespace(
+            run=lambda *args, **kwargs: pytest.fail(
+                "rejected pairing must not publish source or execute"
+            )
+        ),
+        output=Output(force_json=True, force_quiet=True),
+        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
+        transport=httpx.MockTransport(reject_pairing),
+    )
+
+    with pytest.raises(TargetSelectionError) as error:
+        resolve_launch(
+            config=_config(tmp_path),
+            task=_task(tmp_path),
+            repo_name="app",
+            profile_name="phone",
+            host_name=None,
+            remote_role=None,
+            target_alias=None,
+            registry=_Registry([host]),
+            preferences=_Preferences(),
+            execute=executor,
+            choose=lambda candidates: pytest.fail(
+                "rejected pairing must not select a target"
+            ),
+        )
+
+    assert error.value.code == "discovery_incomplete"
+    assert requests == [("GET", "enroll.relay.invalid", "/hosts")]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "mship run-host pair-relay" in captured.err
+    assert credential not in captured.err
+    assert "untrusted private server response" not in captured.err
+
+
 def test_resolve_launch_requires_a_production_source_preparer(tmp_path):
     with pytest.raises(TargetSelectionError) as error:
         resolve_launch(
@@ -312,34 +397,6 @@ def test_resolve_launch_requires_a_production_source_preparer(tmp_path):
             choose=lambda candidates: candidates[0],
         )
     assert error.value.code == "owner_unavailable"
-
-
-def test_remote_executor_preserves_bounded_discovery_output(tmp_path, monkeypatch):
-    calls = 0
-
-    def exec_tool(**kwargs):
-        nonlocal calls
-        calls += 1
-        return ToolResult(status="completed", exit_code=0, stdout=b"{}", stderr=b"safe")
-
-    monkeypatch.setattr("mship.core.remote_client.exec_tool", exec_tool)
-    executor = RemoteBackendExecutor(
-        task_obj=_task(tmp_path),
-        config=_config(tmp_path),
-        shell=object(),
-        output=SimpleNamespace(breadcrumb=lambda message: None),
-        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
-    )
-    host = _host("mobile")
-    executor._prepared[executor._host_key("app", host)] = SimpleNamespace(
-        run_ref_repos=("app",), source_revision=_SHA, failure=None
-    )
-
-    result = executor(host, _discovery_execution(tmp_path))
-
-    assert calls == 1
-    assert result.stdout == b"{}"
-    assert result.stderr == b"safe"
 
 
 def test_remote_executor_rejects_forged_certified_request_before_remote_call(

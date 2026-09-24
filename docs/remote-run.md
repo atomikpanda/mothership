@@ -155,6 +155,12 @@ missing/revoked, transfer a new account link and pair again; if directory
 selection or instance binding fails, re-enrol/approve the host or correct the
 stored identity mapping.
 
+Profiled runs preserve source-transfer and relay-authentication error details on
+stderr, attributed to the selected host, before reporting incomplete discovery.
+Missing or revoked pairing includes the `mship run-host pair-relay` recovery
+command even with `--json` or `--quiet`. These diagnostics do not add retries or
+allow local fallback.
+
 To replace a legacy direct record, select the approved identity first and use
 the explicit preview/apply flow. It writes a private byte-for-byte backup before
 replacement; it never treats the legacy token as a refresh credential or keeps

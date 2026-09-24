@@ -182,7 +182,8 @@ class RemoteBackendExecutor:
                     run_ref_repos=prepared.run_ref_repos,
                     source_revision=source_revision,
                 )
-            except RemoteDispatchError, run_transfer.RunTransferError, RunHostError:
+            except (RemoteDispatchError, run_transfer.RunTransferError, RunHostError) as error:
+                self.output.error(f"{host.name}: {error}")
                 self._prepared[key] = _PreparedHost(
                     run_ref_repos=(),
                     source_revision=source_revision,
@@ -478,7 +479,8 @@ class RemoteBackendExecutor:
                 session_source_revision=session_source_revision,
                 cancel_event=cancel_event,
             )
-        except RunHostError:
+        except RunHostError as error:
+            self.output.error(f"{host.name}: {error}")
             return self._result(error_code="auth_error")
         stdout = result.stdout if execution.preparation == "discover" else b""
         stderr = result.stderr if execution.preparation == "discover" else b""
