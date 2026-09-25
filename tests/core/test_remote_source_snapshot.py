@@ -83,6 +83,46 @@ def _dirty_preflight(repo: Path, head: str, *, aliases: tuple[str, ...] = ("app"
     )
 
 
+def test_failed_origin_push_does_not_expose_transport_output(tmp_path):
+    sha = "a" * 40
+    snapshot = SourceSnapshot(
+        {"app": sha},
+        SimpleNamespace(
+            to_push=[
+                SimpleNamespace(
+                    repo="app",
+                    path=tmp_path,
+                    branch="task-1",
+                    head_sha=sha,
+                    push_reason="not on origin",
+                )
+            ]
+        ),
+        (),
+    )
+    shell = SimpleNamespace(
+        run=lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="private-server-payload private-credential",
+        )
+    )
+    with pytest.raises(RemoteDispatchError) as error:
+        prepare_remote_source(
+            task_obj=_Task(),
+            target_repos=["app"],
+            config=None,
+            shell=shell,
+            host=_host("https://host.invalid"),
+            resolver=RunHostResolver(),
+            output=_Output(),
+            snapshot=snapshot,
+            on_prepared=lambda _: pytest.fail("failed source must not be dispatched"),
+        )
+    assert "private-server-payload" not in str(error.value)
+    assert "private-credential" not in str(error.value)
+
+
 def test_frozen_dirty_snapshot_reaches_every_host_after_local_edits(
     tmp_path, monkeypatch
 ):

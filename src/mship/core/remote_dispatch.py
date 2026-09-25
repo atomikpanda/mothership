@@ -189,7 +189,12 @@ def prepare_remote_source(
                 task=task_obj.slug,
                 sha=source.sha,
             )
-        except (run_transfer.RunTransferError, RunRefNameError, RunHostError) as exc:
+        except run_transfer.RunTransferError:
+            raise RemoteDispatchError(
+                f"could not transfer {source.git_repo} to the selected run host; "
+                "verify host connectivity, pairing and repository access"
+            ) from None
+        except (RunRefNameError, RunHostError) as exc:
             raise RemoteDispatchError(str(exc)) from None
         # A receipt is never made for a failed push. If durable receipt creation
         # fails after a successful push, roll back only this exact ref with the
@@ -229,7 +234,10 @@ def prepare_remote_source(
     if not run_ref_only:
         pushed, push_error = remote_preflight.push(snapshot._preflight, shell)
         if push_error is not None:
-            raise RemoteDispatchError(push_error)
+            raise RemoteDispatchError(
+                "could not push task source to origin; "
+                "verify Git authentication and repository access"
+            )
         pushed_sha = {state.repo: state.head_sha for state in snapshot._preflight.to_push}
         for repo_name in pushed:
             sha = pushed_sha.get(repo_name)

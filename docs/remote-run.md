@@ -166,7 +166,9 @@ permitted pre-start retry; a successful refresh/retry emits no authentication
 error. Relay diagnostics identify the host/workspace registration to check and
 the relay pairing command. Direct registrations get a command template requiring
 a fresh direct pair link; it preserves the registration's roles, tags and preference.
-Neither credentials nor HTTP error bodies are printed.
+These authentication diagnostics never print credentials or HTTP error bodies.
+Source-transfer failures report the failed stage and recovery checks, not captured
+Git output, which can contain server-supplied text.
 
 To replace a legacy direct record, select the approved identity first and use
 the explicit preview/apply flow. It writes a private byte-for-byte backup before
