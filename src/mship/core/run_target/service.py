@@ -138,6 +138,7 @@ class RemoteBackendExecutor:
                     shell=self.shell,
                 )
             except RemoteDispatchError as error:
+                self.output.error(str(error))
                 raise TargetSelectionError(
                     "owner_unavailable",
                     "could not certify source for remote target discovery",
@@ -498,7 +499,6 @@ class RemoteBackendExecutor:
                     "mship",
                     "run-host",
                     "add",
-                    host.name,
                     "--scope",
                     host.scope,
                     "--pair-link",
@@ -507,9 +507,10 @@ class RemoteBackendExecutor:
                     str(host.preference),
                 ]
                 for role in host.roles:
-                    command.extend(("--role", role))
+                    command.append(f"--role={role}")
                 for tag in host.tags:
-                    command.extend(("--tag", tag))
+                    command.append(f"--tag={tag}")
+                command.extend(("--", host.name))
                 recovery = (
                     "obtain a fresh direct pair link from the host, then replace "
                     f"the placeholder in `{shlex.join(command)}`"

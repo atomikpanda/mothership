@@ -1947,7 +1947,6 @@ def test_a_repo_whose_git_state_is_unreadable_is_not_dispatched(tmp_path, monkey
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "unreadable git state in api" in result.output
-        assert "not a git repository" in result.output
         assert "mship commit" not in result.output  # a broken repo is not a dirty one
         assert shell.pushes == []
         assert recorder == {}  # the remote was never contacted

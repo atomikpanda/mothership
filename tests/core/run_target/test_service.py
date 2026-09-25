@@ -306,6 +306,54 @@ def test_resolve_launch_fails_closed_when_one_eligible_host_is_incomplete(tmp_pa
     assert error.value.code == "discovery_incomplete"
 
 
+@pytest.mark.parametrize("stage", ["preflight", "snapshot"])
+def test_profile_source_failure_preserves_safe_repository_context(
+    tmp_path, monkeypatch, capsys, stage
+):
+    from mship.core import remote_preflight
+
+    blocked = stage == "preflight"
+    state = remote_preflight.RepoState(
+        repo="app",
+        path=tmp_path / "app",
+        branch="feature/task",
+        blocked_reason=remote_preflight.ORIGIN_UNREACHABLE if blocked else None,
+        detail="private-git-output private-credential",
+        dirty=not blocked,
+        needs_push=False,
+        push_reason=None,
+        head_sha=_SHA,
+        git_repo="app",
+    )
+    preflight = remote_preflight.Preflight(
+        states=[state],
+        blocked=[state] if blocked else [],
+        dirty=[] if blocked else [state],
+        to_push=[],
+    )
+    monkeypatch.setattr(remote_preflight, "inspect", lambda *args, **kwargs: preflight)
+    executor = RemoteBackendExecutor(
+        task_obj=_task(tmp_path),
+        config=_config(tmp_path),
+        shell=SimpleNamespace(
+            run=lambda *args, **kwargs: SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="private-git-output private-credential",
+            )
+        ),
+        output=Output(force_json=True, force_quiet=True),
+        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
+    )
+    with pytest.raises(TargetSelectionError) as error:
+        executor.prepare([_host("mobile")], "app")
+    assert error.value.code == "owner_unavailable"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "app" in captured.err
+    assert "private" not in captured.err
+
+
 @pytest.mark.parametrize(
     "dirty_source", [True, False], ids=["source-transfer", "discovery"]
 )
@@ -397,6 +445,7 @@ def test_execution_auth_diagnostics_follow_final_retry_outcome(
         _host("mobile", roles=("mobile", "--secondary")),
         tags=("lab", "--untrusted"),
         preference=7,
+        name="--mobile" if mode == "direct-rejected" else "mobile",
     )
     if mode != "direct-rejected":
         host = replace(
@@ -528,7 +577,7 @@ def test_execution_auth_diagnostics_follow_final_retry_outcome(
     else:
         assert "mobile" in captured.err
         recovery = (
-            "mship run-host add mobile"
+            "mship run-host add"
             if mode == "direct-rejected"
             else "mship run-host pair-relay"
         )
@@ -559,7 +608,7 @@ def test_execution_auth_diagnostics_follow_final_retry_outcome(
             repaired = CliRunner().invoke(app, command[1:])
             assert repaired.exit_code == 0, repaired.output
             assert registry.connection_for_role("--secondary", environ={}) == fresh
-            registration = registry.effective_hosts()["mobile"]
+            registration = registry.effective_hosts()[host.name]
             assert registration.tags == ("lab", "--untrusted")
             assert registration.preference == 7
         finally:

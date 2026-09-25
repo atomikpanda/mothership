@@ -155,8 +155,8 @@ missing/revoked, transfer a new account link and pair again; if directory
 selection or instance binding fails, re-enrol/approve the host or correct the
 stored identity mapping.
 
-Profiled runs preserve source-transfer and relay-authentication error details on
-stderr, attributed to the selected host, before reporting incomplete discovery.
+Profiled runs report safe source-preparation and relay-authentication diagnostics
+on stderr, identifying the failing repository or selected host.
 Missing or revoked pairing includes the `mship run-host pair-relay` recovery
 command even with `--json` or `--quiet`. These diagnostics do not add retries or
 allow local fallback.
@@ -168,7 +168,7 @@ the relay pairing command. Direct registrations get a command template requiring
 a fresh direct pair link; it preserves the registration's roles, tags and preference.
 These authentication diagnostics never print credentials or HTTP error bodies.
 Source-transfer failures report the failed stage and recovery checks, not captured
-Git output, which can contain server-supplied text.
+Git error output, which can contain server-supplied text.
 
 To replace a legacy direct record, select the approved identity first and use
 the explicit preview/apply flow. It writes a private byte-for-byte backup before

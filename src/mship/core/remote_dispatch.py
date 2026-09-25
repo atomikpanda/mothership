@@ -76,6 +76,20 @@ def snapshot_remote_source(*, task_obj, target_repos, config, shell) -> SourceSn
     selected = tuple(target_repos)
     pre = remote_preflight.inspect(task_obj, shell, repos=list(selected), config=config)
     if not pre.ok:
+        raw_git_failures = (
+            remote_preflight.UNREADABLE,
+            remote_preflight.ORIGIN_UNREACHABLE,
+        )
+        # Preserve our own operation/branch recovery guidance, not Git error text.
+        pre = replace(
+            pre,
+            blocked=[
+                replace(state, detail=None)
+                if state.blocked_reason in raw_git_failures
+                else state
+                for state in pre.blocked
+            ],
+        )
         raise RemoteDispatchError(remote_preflight.blocked_message(pre))
 
     revisions: dict[str, str] = {
