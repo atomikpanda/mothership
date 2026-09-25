@@ -1,20 +1,30 @@
 from __future__ import annotations
 
 import json
+import shlex
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Literal
 
+import httpx
 import pytest
+from typer.testing import CliRunner
 
+from mship.cli import app, container
+from mship.cli.output import Output
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.persistence.workspace_store import WorkspaceStore
-from mship.core.remote_tool import ToolResult
+from mship.core.relay.pairing import build_pair_link
+from mship.core.remote_dispatch import PreparedSource, SourceSnapshot, _RunRefSource
+from mship.core.remote_tool import ToolEvent, ToolResult, encode_tool_event
 from mship.core.run_host.config import (
     HostRegistration,
+    RelayRunHostIdentity,
     RunHostConnection,
     registration_identity,
 )
+from mship.core.run_host.store import RunHostStore
 from mship.core.run_target.models import (
     AppRun,
     BackendConfig,
@@ -296,6 +306,318 @@ def test_resolve_launch_fails_closed_when_one_eligible_host_is_incomplete(tmp_pa
     assert error.value.code == "discovery_incomplete"
 
 
+@pytest.mark.parametrize("stage", ["preflight", "snapshot"])
+def test_profile_source_failure_preserves_safe_repository_context(
+    tmp_path, monkeypatch, capsys, stage
+):
+    from mship.core import remote_preflight
+
+    blocked = stage == "preflight"
+    state = remote_preflight.RepoState(
+        repo="app",
+        path=tmp_path / "app",
+        branch="feature/task",
+        blocked_reason=remote_preflight.ORIGIN_UNREACHABLE if blocked else None,
+        detail="private-git-output private-credential",
+        dirty=not blocked,
+        needs_push=False,
+        push_reason=None,
+        head_sha=_SHA,
+        git_repo="app",
+    )
+    preflight = remote_preflight.Preflight(
+        states=[state],
+        blocked=[state] if blocked else [],
+        dirty=[] if blocked else [state],
+        to_push=[],
+    )
+    monkeypatch.setattr(remote_preflight, "inspect", lambda *args, **kwargs: preflight)
+    executor = RemoteBackendExecutor(
+        task_obj=_task(tmp_path),
+        config=_config(tmp_path),
+        shell=SimpleNamespace(
+            run=lambda *args, **kwargs: SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="private-git-output private-credential",
+            )
+        ),
+        output=Output(force_json=True, force_quiet=True),
+        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
+    )
+    with pytest.raises(TargetSelectionError) as error:
+        executor.prepare([_host("mobile")], "app")
+    assert error.value.code == "owner_unavailable"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "app" in captured.err
+    assert "private" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "dirty_source", [True, False], ids=["source-transfer", "discovery"]
+)
+def test_relay_auth_failure_reports_repair_without_launch_or_secret_output(
+    tmp_path, monkeypatch, capsys, dirty_source
+):
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    pairings = config_home / "mothership" / "relay-pairings.json"
+    pairings.parent.mkdir(parents=True)
+    credential = "private-relay-account"
+    pairings.write_text(
+        json.dumps({"version": 1, "pairings": {"relay.invalid": credential}})
+    )
+    pairings.chmod(0o600)
+    host = HostRegistration(
+        "mobile",
+        ("mobile",),
+        (),
+        0,
+        RelayRunHostIdentity("relay.invalid", "host-1", "workspace-1", "instance-1"),
+        "project",
+    )
+    requests = []
+
+    def reject_pairing(request):
+        requests.append((request.method, request.url.host, request.url.path))
+        return httpx.Response(401, json={"detail": "untrusted private server response"})
+
+    snapshot = SourceSnapshot(
+        {"app": _SHA},
+        None,
+        (_RunRefSource("app", tmp_path / "app", "feature/task", _SHA),),
+    )
+    monkeypatch.setattr(
+        "mship.core.remote_dispatch.snapshot_remote_source", lambda **kwargs: snapshot
+    )
+    if not dirty_source:
+        monkeypatch.setattr(
+            "mship.core.remote_dispatch.prepare_remote_source",
+            lambda **kwargs: PreparedSource((), {"app": _SHA}),
+        )
+    executor = RemoteBackendExecutor(
+        task_obj=_task(tmp_path),
+        config=_config(tmp_path),
+        shell=SimpleNamespace(
+            run=lambda *args, **kwargs: pytest.fail(
+                "rejected pairing must not publish source or execute"
+            )
+        ),
+        output=Output(force_json=True, force_quiet=True),
+        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
+        transport=httpx.MockTransport(reject_pairing),
+    )
+
+    with pytest.raises(TargetSelectionError) as error:
+        resolve_launch(
+            config=_config(tmp_path),
+            task=_task(tmp_path),
+            repo_name="app",
+            profile_name="phone",
+            host_name=None,
+            remote_role=None,
+            target_alias=None,
+            registry=_Registry([host]),
+            preferences=_Preferences(),
+            execute=executor,
+            choose=lambda candidates: pytest.fail(
+                "rejected pairing must not select a target"
+            ),
+        )
+
+    assert error.value.code == "discovery_incomplete"
+    assert requests == [("GET", "enroll.relay.invalid", "/hosts")]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "mship run-host pair-relay" in captured.err
+    assert credential not in captured.err
+    assert "untrusted private server response" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "mode", ["relay-rejected", "relay-refreshed", "direct-rejected"]
+)
+def test_execution_auth_diagnostics_follow_final_retry_outcome(
+    tmp_path, monkeypatch, capsys, mode
+):
+    host = replace(
+        _host("mobile", roles=("mobile", "--secondary")),
+        tags=("lab", "--untrusted"),
+        preference=7,
+        name="--mobile" if mode == "direct-rejected" else "mobile",
+    )
+    if mode != "direct-rejected":
+        host = replace(
+            host,
+            connection=RelayRunHostIdentity(
+                "relay.invalid", "host-1", "workspace-1", "instance-1"
+            ),
+        )
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    pairings = config_home / "mothership" / "relay-pairings.json"
+    pairings.parent.mkdir(parents=True)
+    pairings.write_text(
+        json.dumps({"version": 1, "pairings": {"relay.invalid": "private-fleet"}})
+    )
+    pairings.chmod(0o600)
+    monkeypatch.setattr(
+        "mship.core.remote_dispatch.snapshot_remote_source",
+        lambda **kwargs: SourceSnapshot({"app": _SHA}, None, ()),
+    )
+    monkeypatch.setattr(
+        "mship.core.remote_dispatch.prepare_remote_source",
+        lambda **kwargs: PreparedSource((), {"app": _SHA}),
+    )
+    minted = []
+    executions = []
+
+    def transport(request):
+        if request.url == httpx.URL("https://enroll.relay.invalid/hosts"):
+            return httpx.Response(
+                200,
+                json={
+                    "hosts": [
+                        {
+                            "host_id": "host-1",
+                            "state": "online",
+                            "instance_id": "instance-1",
+                            "subdomain": "mobile-abcdef",
+                            "public_url": "https://mobile-abcdef.relay.invalid",
+                            "refresh": "private-refresh",
+                        }
+                    ]
+                },
+            )
+        if request.url == httpx.URL("https://mobile-abcdef.relay.invalid/host/token"):
+            token = f"private-bearer-{len(minted) + 1}"
+            minted.append(token)
+            return httpx.Response(200, json={"token": token, "expires_in": 60})
+        expected_url = (
+            "https://mobile.invalid/exec/tool"
+            if mode == "direct-rejected"
+            else "https://mobile-abcdef.relay.invalid/workspaces/workspace-1/exec/tool"
+        )
+        assert str(request.url) == expected_url
+        assert request.method == "POST"
+        executions.append(request.headers["Authorization"])
+        if len(executions) == 1 or mode != "relay-refreshed":
+            return httpx.Response(
+                401 if len(executions) == 1 else 403,
+                content=b"untrusted private server response",
+            )
+        identity = {
+            "owner_ref": "owner-abcdef",
+            "generation": "generation-abcdef",
+            "source_revision": _SHA,
+        }
+        nonce = "nonceabcdef012345"
+        events = (
+            ToolEvent("started", result=ToolResult("running", **identity)),
+            ToolEvent(
+                "result",
+                result=ToolResult(
+                    "completed", exit_code=0, stdout=_result().stdout, **identity
+                ),
+            ),
+        )
+        return httpx.Response(
+            200,
+            headers={"X-Mship-Exec-Nonce": nonce},
+            content=iter(encode_tool_event(event, nonce) for event in events),
+        )
+
+    executor = RemoteBackendExecutor(
+        task_obj=_task(tmp_path),
+        config=_config(tmp_path),
+        shell=SimpleNamespace(
+            run=lambda *args, **kwargs: pytest.fail(
+                "discovery must not execute locally"
+            )
+        ),
+        output=Output(force_json=True, force_quiet=True),
+        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
+        transport=httpx.MockTransport(transport),
+    )
+
+    def select():
+        return resolve_launch(
+            config=_config(tmp_path),
+            task=_task(tmp_path),
+            repo_name="app",
+            profile_name="phone",
+            host_name=None,
+            remote_role=None,
+            target_alias=None,
+            registry=_Registry([host]),
+            preferences=_Preferences(),
+            execute=executor,
+            choose=lambda candidates: pytest.fail("one target must not prompt"),
+        )
+
+    if mode == "relay-refreshed":
+        selected = select()
+        assert selected.host.name == "mobile"
+        assert selected.candidate.label == "Phone"
+    else:
+        with pytest.raises(TargetSelectionError) as error:
+            select()
+        assert error.value.code == "discovery_incomplete"
+    if mode == "direct-rejected":
+        assert len(executions) == 1
+        assert not minted
+    else:
+        assert len(executions) == len(minted) == 2
+        assert executions[0] != executions[1]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if mode == "relay-refreshed":
+        assert captured.err == ""
+    else:
+        assert "mobile" in captured.err
+        recovery = (
+            "mship run-host add"
+            if mode == "direct-rejected"
+            else "mship run-host pair-relay"
+        )
+        assert captured.err.count(recovery) == 1
+    assert "private" not in captured.err
+    if mode == "direct-rejected":
+        command = next(
+            shlex.split(part)
+            for part in captured.err.split("`")
+            if part.startswith("mship run-host add ")
+        )
+        fresh = RunHostConnection("https://repaired.invalid", "private-repaired")
+        link = build_pair_link(url=fresh.url, token=fresh.token, workspace="workspace")
+        command = [
+            link if part == "<fresh-direct-pair-link>" else part for part in command
+        ]
+        state_dir = tmp_path / ".mothership"
+        state_dir.mkdir(exist_ok=True)
+        config_path = tmp_path / "mothership.yaml"
+        config_path.write_text("workspace: workspace\nrepos: {}\n")
+        registry = RunHostStore(state_dir)
+        registry.set_host(host, scope=host.scope)
+        container.config.reset()
+        container.state_manager.reset()
+        container.config_path.override(config_path)
+        container.state_dir.override(state_dir)
+        try:
+            repaired = CliRunner().invoke(app, command[1:])
+            assert repaired.exit_code == 0, repaired.output
+            assert registry.connection_for_role("--secondary", environ={}) == fresh
+            registration = registry.effective_hosts()[host.name]
+            assert registration.tags == ("lab", "--untrusted")
+            assert registration.preference == 7
+        finally:
+            container.config_path.reset_override()
+            container.state_dir.reset_override()
+            container.config.reset()
+            container.state_manager.reset()
+
+
 def test_resolve_launch_requires_a_production_source_preparer(tmp_path):
     with pytest.raises(TargetSelectionError) as error:
         resolve_launch(
@@ -312,34 +634,6 @@ def test_resolve_launch_requires_a_production_source_preparer(tmp_path):
             choose=lambda candidates: candidates[0],
         )
     assert error.value.code == "owner_unavailable"
-
-
-def test_remote_executor_preserves_bounded_discovery_output(tmp_path, monkeypatch):
-    calls = 0
-
-    def exec_tool(**kwargs):
-        nonlocal calls
-        calls += 1
-        return ToolResult(status="completed", exit_code=0, stdout=b"{}", stderr=b"safe")
-
-    monkeypatch.setattr("mship.core.remote_client.exec_tool", exec_tool)
-    executor = RemoteBackendExecutor(
-        task_obj=_task(tmp_path),
-        config=_config(tmp_path),
-        shell=object(),
-        output=SimpleNamespace(breadcrumb=lambda message: None),
-        store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
-    )
-    host = _host("mobile")
-    executor._prepared[executor._host_key("app", host)] = SimpleNamespace(
-        run_ref_repos=("app",), source_revision=_SHA, failure=None
-    )
-
-    result = executor(host, _discovery_execution(tmp_path))
-
-    assert calls == 1
-    assert result.stdout == b"{}"
-    assert result.stderr == b"safe"
 
 
 def test_remote_executor_rejects_forged_certified_request_before_remote_call(
