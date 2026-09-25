@@ -91,8 +91,11 @@ def snapshot_remote_source(*, task_obj, target_repos, config, shell) -> SourceSn
             sha = run_transfer.synthesize_commit(
                 shell, state.path, base_sha=state.head_sha
             )
-        except run_transfer.RunTransferError as exc:
-            raise RemoteDispatchError(str(exc)) from None
+        except run_transfer.RunTransferError:
+            raise RemoteDispatchError(
+                f"could not snapshot {state.git_repo}; "
+                "inspect the task worktree and Git state before retrying"
+            ) from None
         dirty_sources.append(
             _RunRefSource(
                 git_repo=state.git_repo,
@@ -234,8 +237,9 @@ def prepare_remote_source(
     if not run_ref_only:
         pushed, push_error = remote_preflight.push(snapshot._preflight, shell)
         if push_error is not None:
+            failed_repo = snapshot._preflight.to_push[len(pushed)].repo
             raise RemoteDispatchError(
-                "could not push task source to origin; "
+                f"could not push {failed_repo} to origin; "
                 "verify Git authentication and repository access"
             )
         pushed_sha = {state.repo: state.head_sha for state in snapshot._preflight.to_push}

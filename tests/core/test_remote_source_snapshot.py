@@ -83,26 +83,49 @@ def _dirty_preflight(repo: Path, head: str, *, aliases: tuple[str, ...] = ("app"
     )
 
 
+def test_failed_snapshot_does_not_expose_git_output(tmp_path, monkeypatch):
+    preflight = _dirty_preflight(tmp_path, "a" * 40)
+    monkeypatch.setattr(remote_preflight, "inspect", lambda *args, **kwargs: preflight)
+    shell = SimpleNamespace(
+        run=lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="private-filter-output private-credential",
+        )
+    )
+    with pytest.raises(RemoteDispatchError) as error:
+        snapshot_remote_source(
+            task_obj=_Task(),
+            target_repos=["app"],
+            config=None,
+            shell=shell,
+        )
+    assert "app" in str(error.value)
+    assert "private-filter-output" not in str(error.value)
+    assert "private-credential" not in str(error.value)
+
+
 def test_failed_origin_push_does_not_expose_transport_output(tmp_path):
     sha = "a" * 40
     snapshot = SourceSnapshot(
-        {"app": sha},
+        {"first-repo": sha, "failed-repo": sha},
         SimpleNamespace(
             to_push=[
                 SimpleNamespace(
-                    repo="app",
-                    path=tmp_path,
+                    repo=repo,
+                    path=tmp_path / repo,
                     branch="task-1",
                     head_sha=sha,
                     push_reason="not on origin",
                 )
+                for repo in ("first-repo", "failed-repo")
             ]
         ),
         (),
     )
     shell = SimpleNamespace(
         run=lambda *args, **kwargs: SimpleNamespace(
-            returncode=1,
+            returncode=0 if kwargs["cwd"].name == "first-repo" else 1,
             stdout="",
             stderr="private-server-payload private-credential",
         )
@@ -110,7 +133,7 @@ def test_failed_origin_push_does_not_expose_transport_output(tmp_path):
     with pytest.raises(RemoteDispatchError) as error:
         prepare_remote_source(
             task_obj=_Task(),
-            target_repos=["app"],
+            target_repos=["first-repo", "failed-repo"],
             config=None,
             shell=shell,
             host=_host("https://host.invalid"),
@@ -119,6 +142,8 @@ def test_failed_origin_push_does_not_expose_transport_output(tmp_path):
             snapshot=snapshot,
             on_prepared=lambda _: pytest.fail("failed source must not be dispatched"),
         )
+    assert "failed-repo" in str(error.value)
+    assert "first-repo" not in str(error.value)
     assert "private-server-payload" not in str(error.value)
     assert "private-credential" not in str(error.value)
 

@@ -394,8 +394,8 @@ def test_execution_auth_diagnostics_follow_final_retry_outcome(
     tmp_path, monkeypatch, capsys, mode
 ):
     host = replace(
-        _host("mobile", roles=("mobile", "secondary")),
-        tags=("lab",),
+        _host("mobile", roles=("mobile", "--secondary")),
+        tags=("lab", "--untrusted"),
         preference=7,
     )
     if mode != "direct-rejected":
@@ -558,9 +558,9 @@ def test_execution_auth_diagnostics_follow_final_retry_outcome(
         try:
             repaired = CliRunner().invoke(app, command[1:])
             assert repaired.exit_code == 0, repaired.output
-            assert registry.connection_for_role("secondary", environ={}) == fresh
+            assert registry.connection_for_role("--secondary", environ={}) == fresh
             registration = registry.effective_hosts()["mobile"]
-            assert registration.tags == ("lab",)
+            assert registration.tags == ("lab", "--untrusted")
             assert registration.preference == 7
         finally:
             container.config_path.reset_override()
