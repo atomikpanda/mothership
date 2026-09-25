@@ -164,7 +164,8 @@ allow local fallback.
 A final execution-endpoint authentication rejection is reported after any
 permitted pre-start retry; a successful refresh/retry emits no authentication
 error. Relay diagnostics identify the host/workspace registration to check and
-the relay pairing command. Direct registrations get direct pairing instructions.
+the relay pairing command. Direct registrations get a command template requiring
+a fresh direct pair link; it preserves the registration's roles, tags and preference.
 Neither credentials nor HTTP error bodies are printed.
 
 To replace a legacy direct record, select the approved identity first and use

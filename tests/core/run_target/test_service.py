@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -8,10 +9,13 @@ from typing import Literal
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
+from mship.cli import app, container
 from mship.cli.output import Output
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.persistence.workspace_store import WorkspaceStore
+from mship.core.relay.pairing import build_pair_link
 from mship.core.remote_dispatch import PreparedSource, SourceSnapshot, _RunRefSource
 from mship.core.remote_tool import ToolEvent, ToolResult, encode_tool_event
 from mship.core.run_host.config import (
@@ -20,6 +24,7 @@ from mship.core.run_host.config import (
     RunHostConnection,
     registration_identity,
 )
+from mship.core.run_host.store import RunHostStore
 from mship.core.run_target.models import (
     AppRun,
     BackendConfig,
@@ -388,7 +393,11 @@ def test_relay_auth_failure_reports_repair_without_launch_or_secret_output(
 def test_execution_auth_diagnostics_follow_final_retry_outcome(
     tmp_path, monkeypatch, capsys, mode
 ):
-    host = _host("mobile")
+    host = replace(
+        _host("mobile", roles=("mobile", "secondary")),
+        tags=("lab",),
+        preference=7,
+    )
     if mode != "direct-rejected":
         host = replace(
             host,
@@ -525,6 +534,39 @@ def test_execution_auth_diagnostics_follow_final_retry_outcome(
         )
         assert captured.err.count(recovery) == 1
     assert "private" not in captured.err
+    if mode == "direct-rejected":
+        command = next(
+            shlex.split(part)
+            for part in captured.err.split("`")
+            if part.startswith("mship run-host add ")
+        )
+        fresh = RunHostConnection("https://repaired.invalid", "private-repaired")
+        link = build_pair_link(url=fresh.url, token=fresh.token, workspace="workspace")
+        command = [
+            link if part == "<fresh-direct-pair-link>" else part for part in command
+        ]
+        state_dir = tmp_path / ".mothership"
+        state_dir.mkdir(exist_ok=True)
+        config_path = tmp_path / "mothership.yaml"
+        config_path.write_text("workspace: workspace\nrepos: {}\n")
+        registry = RunHostStore(state_dir)
+        registry.set_host(host, scope=host.scope)
+        container.config.reset()
+        container.state_manager.reset()
+        container.config_path.override(config_path)
+        container.state_dir.override(state_dir)
+        try:
+            repaired = CliRunner().invoke(app, command[1:])
+            assert repaired.exit_code == 0, repaired.output
+            assert registry.connection_for_role("secondary", environ={}) == fresh
+            registration = registry.effective_hosts()["mobile"]
+            assert registration.tags == ("lab",)
+            assert registration.preference == 7
+        finally:
+            container.config_path.reset_override()
+            container.state_dir.reset_override()
+            container.config.reset()
+            container.state_manager.reset()
 
 
 def test_resolve_launch_requires_a_production_source_preparer(tmp_path):

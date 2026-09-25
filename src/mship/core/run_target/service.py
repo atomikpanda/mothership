@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -493,9 +494,25 @@ class RemoteBackendExecutor:
                     "use `mship run-host pair-relay`"
                 )
             else:
+                command = [
+                    "mship",
+                    "run-host",
+                    "add",
+                    host.name,
+                    "--scope",
+                    host.scope,
+                    "--pair-link",
+                    "<fresh-direct-pair-link>",
+                    "--preference",
+                    str(host.preference),
+                ]
+                for role in host.roles:
+                    command.extend(("--role", role))
+                for tag in host.tags:
+                    command.extend(("--tag", tag))
                 recovery = (
-                    "refresh the direct pairing with "
-                    f"`mship run-host add {host.name} --scope {host.scope}`"
+                    "obtain a fresh direct pair link from the host, then replace "
+                    f"the placeholder in `{shlex.join(command)}`"
                 )
             self.output.error(f"{host.name}: remote execution rejected authentication; {recovery}")
         stdout = result.stdout if execution.preparation == "discover" else b""
