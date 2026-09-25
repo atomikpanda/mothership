@@ -11,7 +11,11 @@ from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from mship.core.run_host import RunHostError, RunHostResolver
-from mship.core.run_host.config import HostRegistration, registration_identity
+from mship.core.run_host.config import (
+    HostRegistration,
+    RelayRunHostIdentity,
+    registration_identity,
+)
 from mship.core.run_target.backend import BackendExecutor, discover_on_host
 from mship.core.run_target.models import (
     AppRun,
@@ -482,6 +486,18 @@ class RemoteBackendExecutor:
         except RunHostError as error:
             self.output.error(f"{host.name}: {error}")
             return self._result(error_code="auth_error")
+        if result.status == "auth_error":
+            if isinstance(host.connection, RelayRunHostIdentity):
+                recovery = (
+                    "verify the registered host/workspace; if pairing needs repair, "
+                    "use `mship run-host pair-relay`"
+                )
+            else:
+                recovery = (
+                    "refresh the direct pairing with "
+                    f"`mship run-host add {host.name} --scope {host.scope}`"
+                )
+            self.output.error(f"{host.name}: remote execution rejected authentication; {recovery}")
         stdout = result.stdout if execution.preparation == "discover" else b""
         stderr = result.stderr if execution.preparation == "discover" else b""
         if result.status in {"completed", "running"}:

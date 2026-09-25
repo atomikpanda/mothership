@@ -161,6 +161,12 @@ Missing or revoked pairing includes the `mship run-host pair-relay` recovery
 command even with `--json` or `--quiet`. These diagnostics do not add retries or
 allow local fallback.
 
+A final execution-endpoint authentication rejection is reported after any
+permitted pre-start retry; a successful refresh/retry emits no authentication
+error. Relay diagnostics identify the host/workspace registration to check and
+the relay pairing command. Direct registrations get direct pairing instructions.
+Neither credentials nor HTTP error bodies are printed.
+
 To replace a legacy direct record, select the approved identity first and use
 the explicit preview/apply flow. It writes a private byte-for-byte backup before
 replacement; it never treats the legacy token as a refresh credential or keeps
