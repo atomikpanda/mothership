@@ -88,6 +88,35 @@ def test_sign_wraps_a_missing_ssh_keygen(tmp_path):
         sign_blob(b"x", key_path=tmp_path / "k", namespace=NS, runner=rec)
 
 
+def test_sign_timeout_reaps_the_child_and_maps_to_signature_error(tmp_path, monkeypatch):
+    """Omitting the subprocess deadline lets a stuck signer hold a tunnel tick."""
+    import sys
+
+    from mship.core.relay import ssh_sig
+
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+    children = []
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def slow_signer(_argv, **kwargs):
+        return real_run([sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs)
+
+    monkeypatch.setattr(ssh_sig, "SSH_KEYGEN_TIMEOUT_S", 0.01, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", capture_child)
+    monkeypatch.setattr(subprocess, "run", slow_signer)
+
+    with pytest.raises(SignatureError) as raised:
+        sign_blob(b"payload", key_path=tmp_path / "key", namespace=NS)
+    assert isinstance(raised.value.__cause__, subprocess.TimeoutExpired)
+    assert len(children) == 1
+    assert children[0].poll() is not None
+
+
 # --- verify ----------------------------------------------------------------
 
 

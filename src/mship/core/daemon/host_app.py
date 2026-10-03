@@ -9,8 +9,8 @@ NOT `app.mount`: Starlette neither supports mutating a mount table safely on
 refresh nor runs mounted sub-apps' lifespan events at all — the PrWatcher in
 `create_app`'s lifespan would silently never start. Instead each sub-app's
 lifespan is entered explicitly on first build and exited when a refresh
-removes/degrades its entry, under a per-host `AsyncExitStack`-style supervisor
-guarded by a lock.
+removes/degrades its entry, under a per-host AnyIO task-group supervisor guarded
+by a lock.
 
 Addressing is by ID only — name-in-URL would reintroduce the same-name
 ambiguity the id exists to kill. Degraded/missing ids → 503 with the stored
@@ -30,22 +30,42 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qs
 
+import anyio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from mship.core.async_runtime import run_sync
 from mship.core.daemon.capabilities import runner_block
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
+
+
+log = logging.getLogger(__name__)
+
+
+class _SettlingStreamingResponse(StreamingResponse):
+    """A stream response that settles its request-owned producer on every exit."""
+
+    def __init__(self, *args, settle_producer: Callable[[], Awaitable[None]], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._settle_producer = settle_producer
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._settle_producer()
 
 
 def _credential_paths(home: Path) -> tuple[Path, Path, Path]:
@@ -203,16 +223,54 @@ class _SubApp:
         self.app = app
         self.fingerprint = fingerprint
         self._cm = None
+        self._stop_requested: anyio.Event | None = None
+        self._drained: anyio.Event | None = None
 
-    async def start(self) -> None:
-        # Enter the sub-app's lifespan explicitly (mounted apps never get it).
+    async def _supervise(
+        self,
+        *,
+        task_status: anyio.abc.TaskStatus[None] = anyio.TASK_STATUS_IGNORED,
+    ) -> None:
+        """Enter and exit the nested lifespan in this one owner task."""
+        stop_requested = self._stop_requested
+        drained = self._drained
+        assert stop_requested is not None and drained is not None
         self._cm = self.app.router.lifespan_context(self.app)
-        await self._cm.__aenter__()
+        entered = False
+        try:
+            await self._cm.__aenter__()
+            entered = True
+            task_status.started()
+            await stop_requested.wait()
+        finally:
+            try:
+                if entered:
+                    await self._cm.__aexit__(None, None, None)
+            finally:
+                self._cm = None
+                drained.set()
+
+    async def start(self, task_group: anyio.abc.TaskGroup) -> None:
+        # Mounted apps never get lifespan events. Start a host-owned supervisor
+        # and do not report readiness until the nested serve lifespan is ready.
+        self._stop_requested = anyio.Event()
+        self._drained = anyio.Event()
+        try:
+            await task_group.start(self._supervise)
+        except BaseException:
+            self._stop_requested = None
+            self._drained = None
+            raise
 
     async def stop(self) -> None:
-        if self._cm is not None:
-            await self._cm.__aexit__(None, None, None)
-            self._cm = None
+        stop_requested = self._stop_requested
+        drained = self._drained
+        if stop_requested is None or drained is None:
+            return
+        stop_requested.set()
+        await drained.wait()
+        self._stop_requested = None
+        self._drained = None
 
 
 def _default_build_subapp(
@@ -439,16 +497,30 @@ def create_host_app(
 
     subapps: dict[str, _SubApp] = {}
     lock = asyncio.Lock()
+    subapp_task_group: anyio.abc.TaskGroup | None = None
+
+    async def _stop_cached_subapp(workspace_id: str, sub: _SubApp) -> None:
+        """Drain and remove one cached sub-app while the caller holds ``lock``."""
+        with anyio.CancelScope(shield=True):
+            await sub.stop()
+            if subapps.get(workspace_id) is sub:
+                subapps.pop(workspace_id)
 
     @asynccontextmanager
     async def _lifespan(_app):
+        nonlocal subapp_task_group
         try:
-            yield
+            async with anyio.create_task_group() as task_group:
+                subapp_task_group = task_group
+                try:
+                    yield
+                finally:
+                    with anyio.CancelScope(shield=True):
+                        async with lock:
+                            for workspace_id, sub in list(subapps.items()):
+                                await _stop_cached_subapp(workspace_id, sub)
         finally:
-            async with lock:
-                for sub in subapps.values():
-                    await sub.stop()
-                subapps.clear()
+            subapp_task_group = None
 
     app = FastAPI(title="mship host", docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=_lifespan)
@@ -475,9 +547,12 @@ def create_host_app(
                 # the cached app still points at the OLD root and state dir.
                 # Checked per request, so a rescan through ANY path — the host
                 # refresh route or the control socket's — takes effect.
-                await subapps.pop(entry.id).stop()
+                await _stop_cached_subapp(entry.id, sub)
                 sub = None
+                await anyio.lowlevel.checkpoint_if_cancelled()
             if sub is None:
+                if subapp_task_group is None:
+                    raise RuntimeError("host lifespan is not running")
                 sub = _SubApp(
                     build_subapp(
                         entry,
@@ -490,7 +565,7 @@ def create_host_app(
                     ),
                     fp,
                 )
-                await sub.start()
+                await sub.start(subapp_task_group)
                 subapps[entry.id] = sub
             return sub
 
@@ -501,7 +576,7 @@ def create_host_app(
         async with lock:
             for wid in list(subapps):
                 if wid not in healthy_ids:
-                    await subapps.pop(wid).stop()
+                    await _stop_cached_subapp(wid, subapps[wid])
 
     # The control-socket refresh route runs the same registry rescan but lives
     # in a sibling ASGI app. Expose only the post-rescan cleanup it must await.
@@ -575,7 +650,7 @@ def create_host_app(
     async def refresh():
         if rescan is not None:
             try:
-                await asyncio.get_running_loop().run_in_executor(None, rescan)
+                await run_sync("registry", rescan)
             except (ValueError, RegistryReadError) as exc:
                 raise HTTPException(
                     status_code=RESCAN_ERROR_STATUS, detail=str(exc)
@@ -629,10 +704,13 @@ def create_host_app(
         # daemon memory — the unbounded-buffer OOM class #469 calls out. With a
         # bound, the sub-app blocks until the client consumes.
         chunks: asyncio.Queue = asyncio.Queue(maxsize=8)
+        response_started = False
 
         async def send(message):
+            nonlocal response_started
             if message["type"] == "http.response.start":
                 await start.put(message)
+                response_started = True
             elif message["type"] == "http.response.body":
                 await chunks.put(message.get("body", b""))
                 if not message.get("more_body", False):
@@ -641,35 +719,65 @@ def create_host_app(
         async def run_subapp():
             try:
                 await sub.app(scope, request.receive, send)
-            except Exception:
-                if start.empty():
-                    await start.put({"type": "http.response.start", "status": 500, "headers": []})
-                await chunks.put(None)
-                raise
             finally:
-                if start.empty():  # sub-app returned without starting a response
-                    await start.put({"type": "http.response.start", "status": 500, "headers": []})
-                    await chunks.put(None)
+                if not response_started:
+                    start.put_nowait({"type": "http.response.start", "status": 500, "headers": []})
+                # Wake an idle consumer, but never wait for queue space during
+                # cancellation. If full, the consumer drains the queued body
+                # and observes task completion instead of needing a sentinel.
+                try:
+                    chunks.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
 
         task = asyncio.create_task(run_subapp())
-        started = await start.get()
+        producer_settled = False
+
+        async def settle_producer() -> None:
+            """Join the request-owned asyncio task and retrieve its result."""
+            nonlocal producer_settled
+            if producer_settled:
+                return
+            if not task.done():
+                task.cancel()
+            try:
+                with anyio.CancelScope(shield=True):
+                    await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("forwarded workspace producer failed")
+            finally:
+                producer_settled = True
+
+        try:
+            started = await start.get()
+        except BaseException:
+            # A server shutdown can cancel this request before the sub-app
+            # starts its response. The producer is still request-owned here.
+            await settle_producer()
+            raise
 
         async def body_stream():
             try:
                 while True:
+                    if task.done() and chunks.empty():
+                        break
                     chunk = await chunks.get()
                     if chunk is None:
                         break
                     if chunk:
                         yield chunk
             finally:
-                if not task.done():
-                    task.cancel()  # client hung up → propagate to the serve app
+                # Normal completion retrieves sub-app failures too; cancellation
+                # propagates to its receive path before the task is joined.
+                await settle_producer()
 
-        return StreamingResponse(
+        return _SettlingStreamingResponse(
             body_stream(),
             status_code=started.get("status", 500),
             headers={k.decode(): v.decode() for k, v in started.get("headers", [])},
+            settle_producer=settle_producer,
         )
 
     app.include_router(guarded)

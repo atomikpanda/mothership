@@ -24,6 +24,149 @@ mship daemon run       # foreground/debug, no supervisor
 `mship serve` is unchanged: a foreground/API dev surface. Ordinary local mship
 commands never require the daemon.
 
+## Structured concurrency and ownership
+
+`anyio.run(..., backend="asyncio")` enters one daemon-root task group for all
+three configurations: control only, control plus host, and control plus host
+plus tunnel. Ownership below is nested: a server owns its ASGI lifespans and
+requests; the host lifespan owns cached workspace lifespans; each workspace
+lifespan owns its PR watcher. Readiness and cleanup mean different things for
+each owner. In particular, local tunnel readiness does not mean relay enrollment
+or registration has succeeded.
+
+| Activity | Owner | Readiness | Cancellation trigger | Cleanup bound | Failure destination |
+|---|---|---|---|---|---|
+| Control UDS and optional host TCP server children | daemon `_serve` task group, with a nested group per server | `TaskGroup.start()` returns after Uvicorn sets `started`; only then is TCP `serve` capability published | SIGTERM/SIGINT, root cancellation, or first server outcome | on interruption close listeners/connections, cancel and join request tasks, then shield Uvicorn/lifespan shutdown; initialized pre-bind lifespans also drain; no new wall-clock deadline | fatal outcome translated after cleanup; daemon log and nonzero exit |
+| Tunnel loop and one-second timer | daemon `_serve` task group | local `TaskStatus.started()` before the first tick | shared stop event or root-group cancellation | stop wakes the timer; join in-flight tick, then call `HostTunnel.stop()` | tick exceptions logged and retried; published tunnel state reports collaborator failures |
+| Relay HTTP request and deadline | synchronous tunnel worker (or CLI caller) owns `relay.http.request` and its short-lived AnyIO asyncio run | complete HTTP response body returned | whole-call deadline: 10s registration/enrollment, 8s health read-back | cancel request and close HTTPX async client before returning; no detached request worker | HTTPX timeout exception; registration/read-back retain recoverable error mapping |
+| Native hostname resolution | request-local asyncio loop owns one `anyio.run_process` child per lookup | complete OS `getaddrinfo` address list returned | enclosing HTTP deadline, including resolver interpreter startup | cancellation kills and reaps child before returning; no default-executor DNS work survives the scope | native DNS errors retain HTTPX `ConnectError` mapping; deadline retains HTTPX timeout mapping |
+| Cached workspace sub-app lifespans | host lifespan task group, one `_SubApp._supervise` child per cached app | nested lifespan startup completes in the same task that will exit it | replacement, refresh removal/degradation, or host lifespan exit | shield old-app drain and cache removal under the host lock; start no successor until drain completes | startup error reaches forwarding request; child/lifespan failure reaches host ASGI error handling |
+| PR watcher and its interval timer | workspace serve-app lifespan task group | local ownership established before the immediate background sweep or waiting for its lane | owning lifespan exits or is cancelled | stop wakes timer; join any in-flight sweep before lifespan ends | sweep exception logged as `pr-watch tick failed`, then retry |
+| Registry refresh offload | control or host refresh request | scan returns before response and stale-subapp cleanup | request cancellation | join in-flight scan; no independent timer or total scan timeout | `ValueError`/`RegistryReadError` map to HTTP 503; other errors reach ASGI error handling |
+| Mailbox thread-list and long-poll reads | `/threads` request | each snapshot read completes | request cancellation or request deadline between reads | join in-flight read; long-poll timeout is capped at 30s, not a deadline on filesystem I/O | bad cursor maps to HTTP 422; read errors reach ASGI error handling |
+| Forwarding producer and bounded queues | forwarding request until headers; then `_SettlingStreamingResponse` | one-slot response-start queue delivers headers; eight-slot chunk queue supplies body | disconnect, request cancellation, response send error, or response/body finalization | cancel and await producer, retrieve result exactly once; finalization never waits for body queue space; no independent cleanup timeout | pre-header failure supplies HTTP 500; post-header failure ends stream; non-cancellation producer error logged |
+| SSH reverse-forward process and reconnect/read-back schedules | `HostTunnel` and its `TunnelSupervisor` | retained `Popen` handle; online only after matching health read-back | tunnel stop, failed child, redial, or orphan reap | join tick before final stop; direct child TERM wait 5s then KILL wait 5s; orphan phases described below | tunnel snapshot/log; existing next-start orphan recovery |
+
+### Offload capacity and cancellation
+
+`core/async_runtime.py` supplies four independent, run-local capacity limiters:
+
+| Lane | Tokens | Operations |
+|---|---:|---|
+| `tunnel` | 1 | `HostTunnel.tick()` |
+| `registry` | 1 | control/host registry rescans |
+| `pr_watch` | 1 | all workspace PR watcher sweeps in this event loop |
+| `mailbox` | 4 | thread-list and long-poll snapshot reads |
+
+These limiters are shared within one event loop and recreated for another run.
+They do not consume the default Starlette limiter or asyncio executor capacity.
+Every lane uses `abandon_on_cancel=False`: cancellation while waiting for a token
+can stop the caller, but an already-running worker must finish before its owner
+leaves the await. Python cannot safely kill that thread. Registry and mailbox
+filesystem work and a whole PR sweep have no added total deadline. The PR timer
+uses the configured interval; mailbox requests retain their one-second async
+poll interval, cursor/filter semantics, and timeout response shape.
+
+The `_tunnel_join_timeout()` operation-budget calculation is 84 seconds:
+three 10s relay calls, up to three 10s process-table snapshots, and two shared
+2s orphan exit waits, plus one 10s signing and one 10s key-generation subprocess.
+The HTTP allowances are whole-call AnyIO deadlines around resolver startup,
+native name resolution, the request, and full response consumption. A
+request-local public asyncio loop override runs the unchanged OS
+`socket.getaddrinfo` in an owned subprocess, rather than the uninterruptible
+default-executor thread that asyncio would otherwise join after cancellation.
+The process is killed and reaped within request cleanup; resolution consumes
+the existing HTTP allowance rather than adding a separate DNS allowance.
+HTTPX's per-phase inactivity timeout is also retained, but repeated small
+response chunks cannot extend the whole-call deadline. The tradeoff is one
+short-lived Python process per hostname lookup (numeric IPs need no resolver),
+with no resolver cache. The full IPv4/IPv6 address list still goes through
+AnyIO's fallback; HTTPX retains the original URL, Host, SNI, TLS verification,
+proxy selection, and HTTP error/response mappings.
+Each orphan phase polls at most every 50ms and revalidates process identity
+before signaling. A running-child tick can instead perform an 8s health
+read-back and a 5s TERM/5s KILL stop; those fit inside the larger 34s orphan
+allowance. Final direct-child stop adds its existing two 5s waits after the tick
+joins. Subprocess timeout kills and reaps the short-lived signer/key generator;
+signing timeout maps to `SignatureError` and a recoverable registration failure.
+
+This calculation is not an outer cancellation timer: the worker is never
+abandoned on expiry. It budgets the explicit network/process deadlines, not
+an absolute wall-clock guarantee for scheduler delays, process creation,
+filesystem I/O, or a wedged kernel. Registry/mailbox operations and a whole PR
+sweep still have no total deadline. Those limitations can outlast the OS
+supervisor's stop deadline and require the existing supervisor/orphan recovery.
+
+### Shutdown and exception mapping
+
+The first server outcome or root cancellation clears `serve` capability, sets
+every server's `should_exit`, sets the shared stop event, and cancels the owning
+group. A signal requests exit through that same shared state. Interrupted
+Uvicorn children explicitly finish shielded shutdown because cancelling
+`Server.serve()` alone skips Uvicorn's normal shutdown call and can leave an
+ASGI lifespan alive. For both control UDS and host TCP, interrupted shutdown
+first closes listeners and requests connection shutdown, then explicitly
+cancels and joins Uvicorn's active asyncio request tasks. Request finalizers
+therefore settle forwarding producers before Uvicorn ends the app lifespan;
+an open streaming client is not responsible for releasing shutdown. Ordinary
+Uvicorn graceful shutdown remains unchanged when `serve()` returns normally.
+Interruption gives active requests no additional grace interval, but their
+cancellation cleanup is joined without abandonment or a new wall-clock limit;
+code that ignores cancellation or blocks in cleanup can still delay shutdown.
+The root joins its children before stopping the tunnel;
+each child records its outcome after cleanup independently of cancellable
+notification delivery. The root reconciles all recorded outcomes, including
+sibling failures that finish during cancellation. `_run` writes clean-stop
+history only after `_serve` returns normally with no fatal outcome.
+
+| Outcome | Daemon result |
+|---|---|
+| Server returns after a requested exit | normal return; clean-stop history/log; exit 0 |
+| Control/TCP server exits before readiness | `RuntimeError("control server failed to bind")` or `RuntimeError("TCP server failed to bind")`, with original exception as cause |
+| Running server raises | `RuntimeError("daemon server failed")`, with original exception as cause; if shutdown also fails, the cause is a group containing both original and cleanup exceptions; concurrent server/cleanup failures are reported together in an exception group |
+| Running server returns without requested exit | `RuntimeError("daemon server stopped unexpectedly")` |
+| Root cancellation | cleanup runs and cancellation propagates; no clean-stop history |
+| Other fatal task-group failure | exception group propagates to the daemon composition boundary; `main` logs the traceback and returns 1 |
+
+Fatal exceptions handled by `main` leave the start entry without a clean-stop
+entry. Recoverable tunnel/sweep exceptions are logged inside their loop and do
+not become daemon failures. The lease loser exit policy below is unchanged.
+
+### Intentional interop and audit coverage
+
+- Uvicorn retains its asyncio sockets, ASGI tasks, and signal capture. The
+  daemon's `_install_stop_handlers` is the asyncio signal bridge; child readiness
+  observes `server.started` with cooperative `anyio.sleep(0)`. Real-Uvicorn
+  regressions exercise cancellation both before bind and while serving, and
+  daemon tests cover one/two-server SIGTERM and fatal/clean outcomes.
+- The single remaining `asyncio.create_task` in `core/daemon` is the forwarding
+  producer above. Its response scope always cancels/awaits it, including before
+  body iteration. `test_host_app.py` characterizes completion, disconnect,
+  failure, header-send cancellation/error, and eight-chunk backpressure;
+  `test_serve_exec.py` retains real subprocess-disconnect and task-lock coverage.
+  Remote-exec's request-owned sync generator, AnyIO response group, cancellation
+  event, and process-group protocol remain unchanged.
+- Registry startup discovery runs synchronously before the async runtime.
+  The lease's loser-record retry also precedes that runtime (five reads, up to
+  four 30ms sleeps). `test_run.py` and `test_lease.py` cover those entry paths.
+- `host_tunnel.py` retains its synchronous `ps` subprocess and orphan polling
+  inside the tunnel lane. Low-level `Popen(start_new_session=True)`, polling,
+  and TERM/KILL handling remain in the existing tunnel supervisor, covered by
+  `test_host_tunnel.py` and the relay tunnel tests.
+- `daemon/supervisor.py` subprocesses belong to synchronous CLI install/start/
+  stop/status operations, not daemon background tasks. Launchctl calls retain
+  their 30s timeout; systemctl/loginctl calls retain no Python timeout. The
+  supervisor tests cover command and error mapping; native launchd tests remain
+  macOS-only.
+
+There are no remaining `gather(return_exceptions=True)` or `run_in_executor`
+offloads in `core/daemon`; `core/serve.py` still has a caller-local
+`asyncio.to_thread` for task-worktree cleanup, outside these daemon-owned
+lanes.
+Synchronous FastAPI handlers and request-stream iteration still use the
+framework's own worker pool; this boundary does not rewrite all synchronous
+domain operations.
+
 ## Paths
 
 - State: `~/.mothership/daemon/` (per OS user — the daemon is workspace-agnostic)

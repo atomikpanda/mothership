@@ -1,4 +1,7 @@
 """Workspace-addressed host app (#472 Task 7)."""
+import asyncio
+import gc
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -359,6 +362,49 @@ def test_host_refresh_reports_operational_error_without_dropping_cached_subapp(
         assert built["ws-a"] is cached
 
 
+def test_host_refresh_does_not_depend_on_default_executor_capacity(tmp_path):
+    """A busy unrelated executor must not prevent a registry refresh."""
+    import asyncio
+    import concurrent.futures
+    import threading
+
+    import anyio
+    import httpx
+
+    occupied = threading.Event()
+    release = threading.Event()
+    rescanned = threading.Event()
+
+    def occupy_default_executor():
+        occupied.set()
+        assert release.wait(3), "test did not release the default executor"
+
+    store = _seed(tmp_path / "home", [])
+    app = create_host_app(store, auth_token=None, rescan=rescanned.set)
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        )
+        blocker = asyncio.create_task(asyncio.to_thread(occupy_default_executor))
+        try:
+            with anyio.fail_after(1):
+                while not occupied.is_set():
+                    await anyio.sleep(0)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://host",
+                ) as client:
+                    response = await client.post("/workspaces/refresh")
+            assert response.status_code == 200
+            assert rescanned.is_set()
+        finally:
+            release.set()
+            await blocker
+
+    anyio.run(scenario, backend="asyncio")
+
+
 def test_host_passes_github_app_credentials_to_workspace_subapp(tmp_path):
     home = tmp_path / "home"
     store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
@@ -568,6 +614,419 @@ class StreamingSubApp:
         return _R()
 
 
+class _OwnedForwardSubApp:
+    """An event-driven ASGI peer for request-owned forwarding tests."""
+
+    def __init__(self, mode):
+        self.mode = mode
+        self.active: set[asyncio.Task] = set()
+        self.entered = asyncio.Event()
+        self.finalized = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.blocked_on_ninth_send = asyncio.Event()
+        self.release = asyncio.Event()
+        self.lifespan_stopped = asyncio.Event()
+        self.cleanup_started = asyncio.Event()
+        self.cleanup_release = asyncio.Event()
+        if mode != "wait-for-cancellation-hold-cleanup":
+            self.cleanup_release.set()
+
+    async def __call__(self, _scope, _receive, send):
+        task = asyncio.current_task()
+        assert task is not None
+        self.active.add(task)
+        self.entered.set()
+        try:
+            if self.mode == "fail-before-start":
+                raise RuntimeError("before response start")
+
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 207,
+                    "headers": [(b"x-forwarded-test", b"kept")],
+                }
+            )
+            if self.mode == "fail-after-start":
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b"raw-first\\x00",
+                        "more_body": True,
+                    }
+                )
+                raise RuntimeError("after response start")
+            if self.mode == "block-on-ninth-send":
+                for index in range(9):
+                    if index == 8:
+                        self.blocked_on_ninth_send.set()
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": bytes([index]),
+                            "more_body": True,
+                        }
+                    )
+                await send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+                return
+
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"raw-first\x00",
+                    "more_body": True,
+                }
+            )
+            if self.mode == "normal":
+                await send(
+                    {"type": "http.response.body", "body": b"raw-last", "more_body": False}
+                )
+            else:
+                await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        finally:
+            self.cleanup_started.set()
+            await self.cleanup_release.wait()
+            self.active.discard(task)
+            self.finalized.set()
+
+    @property
+    def router(self):
+        from contextlib import asynccontextmanager
+
+        outer = self
+
+        class _Router:
+            def lifespan_context(self, _app):
+                @asynccontextmanager
+                async def lifespan():
+                    try:
+                        yield
+                    finally:
+                        outer.lifespan_stopped.set()
+
+                return lifespan()
+
+        return _Router()
+
+
+def _owned_forward_app(tmp_path, mode):
+    store = _seed(tmp_path / "home", [_entry("ws-stream", "stream", tmp_path / "stream")])
+    subapp = _OwnedForwardSubApp(mode)
+    app = create_host_app(
+        store, auth_token=None, build_subapp=lambda _entry, **_kwargs: subapp
+    )
+    return app, subapp
+
+
+def _forward_scope():
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/workspaces/ws-stream/exec/run",
+        "raw_path": b"/workspaces/ws-stream/exec/run",
+        "root_path": "",
+        "scheme": "http",
+        "query_string": b"",
+        "headers": [],
+        "client": ("test", 1),
+        "server": ("test", 80),
+    }
+
+
+def _forward_endpoint(app):
+    def find(routes):
+        for route in routes:
+            if getattr(route, "name", None) == "forward":
+                return route.endpoint
+            nested = getattr(route, "routes", None)
+            if nested is None:
+                nested = getattr(getattr(route, "original_router", None), "routes", None)
+            if nested:
+                endpoint = find(nested)
+                if endpoint is not None:
+                    return endpoint
+        return None
+
+    endpoint = find(app.routes)
+    assert endpoint is not None
+    return endpoint
+
+
+async def _wait_for(event):
+    async with asyncio.timeout(5):
+        await event.wait()
+
+
+def test_forward_normal_completion_finalizes_request_producer_and_keeps_wire_shape(tmp_path):
+    """Catches removing the terminal queue sentinel or losing forwarded status,
+    headers, or raw chunks after the producer completes normally."""
+    app, subapp = _owned_forward_app(tmp_path, "normal")
+
+    async def scenario():
+        messages = []
+        response_finished = asyncio.Event()
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await response_finished.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            messages.append(message)
+            if (
+                message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                response_finished.set()
+
+        async with app.router.lifespan_context(app):
+            await app(_forward_scope(), receive, send)
+        await _wait_for(subapp.finalized)
+        return messages
+
+    messages = asyncio.run(scenario())
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    body = [message.get("body", b"") for message in messages if message["type"] == "http.response.body"]
+    assert (start["status"], dict(start["headers"])[b"x-forwarded-test"]) == (207, b"kept")
+    assert body == [b"raw-first\x00", b"raw-last", b""]
+    assert subapp.active == set()
+
+
+def test_forward_client_disconnect_finalizes_request_producer(tmp_path):
+    """Catches deleting ``task.cancel()`` from ``body_stream``'s disconnect
+    finalizer, which leaves the workspace producer live after the client leaves."""
+    app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+
+    async def scenario():
+        first_body_forwarded = asyncio.Event()
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await first_body_forwarded.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first_body_forwarded.set()
+
+        async with app.router.lifespan_context(app):
+            await app(_forward_scope(), receive, send)
+        await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+    assert subapp.cancelled.is_set()
+    assert subapp.active == set()
+
+
+@pytest.mark.parametrize("mode", ["fail-before-start", "fail-after-start"])
+def test_forward_subapp_failure_is_retrieved_and_logged_after_request_completion(
+    tmp_path, caplog, mode
+):
+    """Catches silently swallowing a producer exception after retrieving it;
+    failures before and after response start must reach the daemon log."""
+    app, subapp = _owned_forward_app(tmp_path, mode)
+    caplog.set_level(logging.ERROR, logger="mship.core.daemon.host_app")
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        unhandled = []
+        previous_handler = loop.get_exception_handler()
+        response_finished = asyncio.Event()
+        sent_request = False
+
+        def capture_unhandled(_loop, context):
+            unhandled.append(context)
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await response_finished.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if (
+                message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                response_finished.set()
+
+        loop.set_exception_handler(capture_unhandled)
+        try:
+            async with app.router.lifespan_context(app):
+                await app(_forward_scope(), receive, send)
+            await _wait_for(subapp.finalized)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+        return unhandled
+
+    unhandled = asyncio.run(scenario())
+    assert not unhandled
+    assert subapp.active == set()
+    assert "forwarded workspace producer failed" in caplog.text
+
+
+def test_forward_response_start_send_failure_finalizes_request_producer(tmp_path):
+    """Catches returning a bare StreamingResponse: if its response-start send
+    fails before body iteration, its producer must still be cancelled and joined."""
+    app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+
+    async def scenario():
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Future()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                raise OSError("client disconnected while receiving response headers")
+
+        async with app.router.lifespan_context(app):
+            with pytest.raises(OSError, match="response headers"):
+                await app(_forward_scope(), receive, send)
+            try:
+                assert subapp.cancelled.is_set()
+                assert subapp.active == set()
+            finally:
+                # Release the peer if the assertion fails so a RED run leaves
+                # no task behind when asyncio.run closes its loop.
+                subapp.release.set()
+                await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+
+
+def test_forward_cancellation_while_eight_chunk_queue_send_is_blocked_finalizes_producer(tmp_path):
+    """Catches changing the eight-chunk queue to unbounded, or cancelling a
+    blocked producer without draining it through the response lifecycle."""
+    from starlette.requests import Request
+
+    app, subapp = _owned_forward_app(tmp_path, "block-on-ninth-send")
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def scenario():
+        request = Request(_forward_scope(), receive=receive)
+        async with app.router.lifespan_context(app):
+            response = await _forward_endpoint(app)("ws-stream", "exec/run", request)
+            await _wait_for(subapp.blocked_on_ninth_send)
+            first = await anext(response.body_iterator)
+            assert first == b"\x00"
+            await response.body_iterator.aclose()
+            await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+    assert subapp.cancelled.is_set()
+    assert subapp.active == set()
+
+
+def test_forward_connection_cancellation_before_body_iteration_finalizes_producer(tmp_path):
+    """Catches cancellation while the response header send is blocked, before
+    body iteration can enter the generator finalizer and settle its producer."""
+    app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+
+    async def scenario():
+        sent_request = False
+        response_start_entered = asyncio.Event()
+        hold_response_start = asyncio.Event()
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Future()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                response_start_entered.set()
+                await hold_response_start.wait()
+
+        async with app.router.lifespan_context(app):
+            connection = asyncio.create_task(app(_forward_scope(), receive, send))
+            await _wait_for(response_start_entered)
+            connection.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await connection
+            try:
+                assert subapp.cancelled.is_set()
+                assert subapp.active == set()
+            finally:
+                subapp.release.set()
+                await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("exit_mode", ["cancel", "header-error"])
+def test_full_forward_queue_settles_before_any_body_iteration(tmp_path, exit_mode):
+    """Header delivery failure/cancellation must join a full-queue producer."""
+    app, subapp = _owned_forward_app(tmp_path, "block-on-ninth-send")
+
+    async def scenario():
+        header_entered = asyncio.Event()
+        fail_headers = asyncio.Event()
+        body_messages = []
+
+        async def receive():
+            await asyncio.Future()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                header_entered.set()
+                await fail_headers.wait()
+                raise OSError("header delivery failed")
+            body_messages.append(message)
+
+        async with app.router.lifespan_context(app):
+            connection = asyncio.create_task(app(_forward_scope(), receive, send))
+            try:
+                await _wait_for(header_entered)
+                await _wait_for(subapp.blocked_on_ninth_send)
+                if exit_mode == "cancel":
+                    connection.cancel()
+                else:
+                    fail_headers.set()
+                done, _ = await asyncio.wait({connection}, timeout=1)
+                assert done, "forward cleanup blocked on a full queue without a consumer"
+                expected = asyncio.CancelledError if exit_mode == "cancel" else OSError
+                with pytest.raises(expected):
+                    await connection
+                assert subapp.cancelled.is_set()
+                assert subapp.active == set()
+                assert body_messages == []
+            finally:
+                # A second cancellation releases the buggy final sentinel put
+                # on RED, so this bounded regression leaves no pending task.
+                connection.cancel()
+                await asyncio.gather(connection, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_forward_streams_chunks_incrementally(tmp_path):
     """Regression (#476 P2): a buffered proxy delivered nothing until the task
     exited, breaking live `mship ... --remote` output.
@@ -624,6 +1083,136 @@ def test_forward_streams_chunks_incrementally(tmp_path):
     assert b"".join(received) == b"chunk-0\nchunk-1\nchunk-2\n"
     # the client had chunk 0 in hand before the sub-app had emitted all three
     assert first_at and first_at[0] < 3, f"response was buffered until completion (sent={first_at})"
+
+
+@pytest.mark.parametrize(
+    ("server_role", "interrupt"),
+    [("control", True), ("host", True), ("control", False)],
+    ids=["control-interrupted", "host-interrupted", "control-graceful"],
+)
+def test_daemon_shutdown_cancels_active_forward_stream(
+    tmp_path, monkeypatch, server_role, interrupt
+):
+    """Real server shutdown must settle the request before ending its subapp."""
+    from contextlib import asynccontextmanager
+    from tempfile import TemporaryDirectory
+
+    import anyio
+    import httpx
+    import uvicorn
+    from fastapi import FastAPI
+
+    from mship.core.daemon import run as run_mod
+
+    async def scenario():
+        host, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation-hold-cleanup")
+        control = FastAPI() if server_role == "host" else host
+        ready = anyio.Event()
+        stopped = anyio.Event()
+        lifespan_ended = anyio.Event()
+        graceful_shutdown_entered = anyio.Event()
+        control.state.set_serve_bound = lambda bound: ready.set() if bound else None
+        original_lifespan = host.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app):
+            async with original_lifespan(app):
+                yield
+            assert subapp.active == set()
+            assert subapp.finalized.is_set()
+            assert subapp.lifespan_stopped.is_set()
+            lifespan_ended.set()
+
+        host.router.lifespan_context = lifespan
+        servers = []
+        real_server = uvicorn.Server
+
+        def build_server(config):
+            server = real_server(config)
+            if not interrupt:
+                original_shutdown = server.shutdown
+
+                async def observe_shutdown(sockets=None):
+                    graceful_shutdown_entered.set()
+                    await original_shutdown(sockets=sockets)
+
+                server.shutdown = observe_shutdown
+            servers.append(server)
+            return server
+
+        monkeypatch.setattr(uvicorn, "Server", build_server)
+        monkeypatch.setattr(run_mod, "_install_stop_handlers", lambda *_args: ready.set())
+        daemon_scope = anyio.CancelScope()
+
+        async def daemon():
+            with daemon_scope:
+                await run_mod._serve(
+                    control, Path(socket_dir) / "control.sock",
+                    host if server_role == "host" else None,
+                    {"host": "127.0.0.1", "port": 0} if server_role == "host" else None,
+                    None,
+                )
+            stopped.set()
+
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as group:
+                group.start_soon(daemon)
+                await ready.wait()
+                if server_role == "host":
+                    port = servers[1].servers[0].sockets[0].getsockname()[1]
+                    transport = httpx.AsyncHTTPTransport()
+                    origin = f"http://127.0.0.1:{port}"
+                else:
+                    transport = httpx.AsyncHTTPTransport(uds=str(Path(socket_dir) / "control.sock"))
+                    origin = "http://daemon"
+                try:
+                    async with httpx.AsyncClient(transport=transport) as client:
+                        async with client.stream(
+                            "POST", f"{origin}/workspaces/ws-stream/exec/run"
+                        ) as response:
+                            body = response.aiter_bytes()
+                            try:
+                                assert response.status_code == 207
+                                assert await anext(body) == b"raw-first\x00"
+                                assert subapp.active
+                                if interrupt:
+                                    daemon_scope.cancel()
+                                else:
+                                    servers[0].should_exit = True
+                                    with anyio.fail_after(1):
+                                        await graceful_shutdown_entered.wait()
+                                    assert not subapp.cleanup_started.is_set()
+                                    assert not subapp.cancelled.is_set()
+                                    subapp.release.set()
+                                # Keep the iterator AND transport open through
+                                # this observation: client cleanup cannot be
+                                # what makes server-side cancellation succeed.
+                                with anyio.move_on_after(1):
+                                    await subapp.cleanup_started.wait()
+                                assert subapp.cleanup_started.is_set(), "daemon waited for client stream closure"
+                                assert not stopped.is_set()
+                                assert not lifespan_ended.is_set()
+                                assert not subapp.lifespan_stopped.is_set()
+                                subapp.cleanup_release.set()
+                                with anyio.move_on_after(1):
+                                    await stopped.wait()
+                                assert stopped.is_set(), "daemon waited for client stream closure"
+                                assert subapp.finalized.is_set()
+                                assert subapp.cancelled.is_set() is interrupt
+                                assert lifespan_ended.is_set()
+                            finally:
+                                await body.aclose()
+                finally:
+                    daemon_scope.cancel()
+                    subapp.release.set()
+                    subapp.cleanup_release.set()
+                assert lifespan_ended.is_set()
+                assert subapp.cancelled.is_set() is interrupt
+                assert all(not server.server_state.tasks for server in servers)
+
+    # macOS pytest roots can exceed the native Unix socket path limit.
+    with TemporaryDirectory(prefix="mship-stream-", dir="/tmp") as socket_dir:
+        anyio.run(scenario, backend="asyncio")
 
 
 def test_moved_workspace_rebuilds_subapp(tmp_path):
@@ -1096,3 +1685,407 @@ def test_unbuildable_workspace_is_503_not_500(tmp_path):
         r = client.get("/workspaces/ws-x/specs")
         assert r.status_code == 503
         assert "no mothership.yaml" in r.json()["detail"]
+
+
+def test_cold_workspace_startup_does_not_block_routes_when_pr_watch_lane_is_full(
+    tmp_path, monkeypatch
+):
+    """A cold watcher must release cache ownership before waiting for its lane."""
+    from threading import Event
+
+    import anyio
+    import httpx
+
+    from mship.core import serve as serve_mod
+    from mship.core.async_runtime import _limiter_for
+    from mship.core.serve import create_app as create_workspace_app
+    from mship.core.state import StateManager
+
+    watcher_built = asyncio.Event()
+    swept = Event()
+    rescanned = Event()
+
+    class Watcher:
+        def __init__(self, *_args, **_kwargs):
+            watcher_built.set()
+
+        def check_once(self):
+            swept.set()
+
+    monkeypatch.setattr(serve_mod, "PrWatcher", Watcher)
+    store = _seed(tmp_path / "home", [
+        _entry("cold", "cold", tmp_path / "cold"),
+        _entry("warm", "warm", tmp_path / "warm"),
+    ])
+
+    def build(entry, **_kwargs):
+        root = Path(entry.path)
+        return create_workspace_app(
+            specs_dir=root / "specs", state_manager=StateManager(root / ".mothership"),
+            log_manager=None, workspace_root=root, workspace_name=entry.name,
+            pr_watch_interval=60 if entry.id == "cold" else 0,
+        )
+
+    host = create_host_app(
+        store, auth_token=None, build_subapp=build, rescan=rescanned.set
+    )
+
+    async def scenario():
+        async with host.router.lifespan_context(host):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=host), base_url="http://host"
+            ) as client:
+                with anyio.fail_after(2):
+                    assert (await client.get("/workspaces/warm/health")).status_code == 200
+                lane = _limiter_for("pr_watch")
+                await lane.acquire()
+                pending = []
+                try:
+                    cold = asyncio.create_task(client.get("/workspaces/cold/health"))
+                    pending.append(cold)
+                    await _wait_for(watcher_built)
+                    await anyio.wait_all_tasks_blocked()
+                    for method, path in [
+                        ("GET", "/workspaces/warm/health"),
+                        ("GET", "/health"),
+                        ("POST", "/workspaces/refresh"),
+                    ]:
+                        pending.append(asyncio.create_task(client.request(method, path)))
+                    done, blocked = await asyncio.wait(pending, timeout=1)
+                    assert not blocked, "cold watcher held the host cache lock during lane I/O"
+                    assert len(done) == 4
+                    assert all(response.result().status_code == 200 for response in done)
+                    assert rescanned.is_set()
+                    assert not swept.is_set()
+                finally:
+                    lane.release()
+                    # Let startup finish and publish its cache entry before
+                    # host shutdown; cancellation here races that publication.
+                    _, unfinished = await asyncio.wait(pending, timeout=2)
+                    for request in unfinished:
+                        request.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                with anyio.fail_after(1):
+                    while not swept.is_set():
+                        await anyio.sleep(0)
+
+    asyncio.run(scenario())
+
+
+def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
+    tmp_path, monkeypatch
+):
+    """Every cached serve app owns one watcher and fully drains it before the
+    cache replaces/removes the app or the host lifespan itself exits."""
+    from contextlib import asynccontextmanager
+    from threading import Event, Thread
+
+    from mship.core import serve as serve_mod
+    from mship.core.serve import create_app as create_workspace_app
+    from mship.core.state import StateManager
+
+    class BlockingSecondSweep:
+        instances = []
+
+        def __init__(self, *_args, **_kwargs):
+            self.calls = 0
+            self.active = False
+            self.entered = Event()
+            self.release = Event()
+            self.created_while_active = sum(
+                probe.active for probe in self.__class__.instances
+            )
+            self.__class__.instances.append(self)
+
+        def check_once(self):
+            self.calls += 1
+            if self.calls != 2:
+                return
+            self.active = True
+            self.entered.set()
+            try:
+                self.release.wait()
+            finally:
+                self.active = False
+
+    monkeypatch.setattr(serve_mod, "PrWatcher", BlockingSecondSweep)
+
+    home = tmp_path / "home"
+    before = tmp_path / "before"
+    store = _seed(home, [_entry("ws-a", "a", before)])
+    subapp_stops = []
+
+    def build(entry, **_kwargs):
+        root = Path(entry.path)
+        app = create_workspace_app(
+            specs_dir=root / "specs",
+            state_manager=StateManager(root / ".mothership"),
+            log_manager=None,
+            workspace_root=root,
+            workspace_name=entry.name,
+            pr_watch_interval=0.01,
+        )
+        original_lifespan = app.router.lifespan_context
+        stop_reached = Event()
+        subapp_stops.append(stop_reached)
+
+        @asynccontextmanager
+        async def observed_lifespan(lifespan_app):
+            async with original_lifespan(lifespan_app):
+                try:
+                    yield
+                finally:
+                    stop_reached.set()
+
+        app.router.lifespan_context = observed_lifespan
+        return app
+
+    host = create_host_app(
+        store,
+        auth_token=None,
+        build_subapp=build,
+        pr_watch_interval=0.01,
+    )
+    client = TestClient(host)
+    client.__enter__()
+    closed = False
+    observations = {}
+
+    def in_thread(call):
+        done = Event()
+        result = []
+        error = []
+
+        def run():
+            try:
+                result.append(call())
+            except BaseException as exc:  # surfaced on the test thread below
+                error.append(exc)
+            finally:
+                done.set()
+
+        thread = Thread(target=run)
+        thread.start()
+        return thread, done, result, error
+
+    def finish_call(thread, done, result, error):
+        assert done.wait(2)
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        if error:
+            raise error[0]
+        return result[0] if result else None
+
+    try:
+        assert client.get("/workspaces/ws-a/health").status_code == 200
+        assert client.get("/workspaces/ws-a/health").status_code == 200
+        assert len(BlockingSecondSweep.instances) == 1
+        first = BlockingSecondSweep.instances[0]
+        assert first.entered.wait(1)
+
+        moved = tmp_path / "moved"
+        store.mutate(
+            lambda state: state.entries.__setitem__(
+                0, _entry("ws-a", "a", moved)
+            )
+        )
+        replace = in_thread(lambda: client.get("/workspaces/ws-a/health"))
+        assert subapp_stops[0].wait(1)
+        observations["replacement_finished_while_old_active"] = replace[1].is_set()
+        first.release.set()
+        assert finish_call(*replace).status_code == 200
+        assert len(BlockingSecondSweep.instances) == 2
+        second = BlockingSecondSweep.instances[1]
+        observations["replacement_overlap"] = second.created_while_active
+        assert second.entered.wait(1)
+
+        added = tmp_path / "added"
+        store.mutate(
+            lambda state: state.entries.__setitem__(
+                0, _entry("ws-b", "b", added)
+            )
+        )
+        refresh = in_thread(lambda: client.post("/workspaces/refresh"))
+        assert subapp_stops[1].wait(1)
+        observations["refresh_finished_while_removed_active"] = refresh[1].is_set()
+        second.release.set()
+        assert finish_call(*refresh).status_code == 200
+        assert len(BlockingSecondSweep.instances) == 2
+
+        assert client.get("/workspaces/ws-b/health").status_code == 200
+        assert client.get("/workspaces/ws-b/health").status_code == 200
+        assert len(BlockingSecondSweep.instances) == 3
+        third = BlockingSecondSweep.instances[2]
+        observations["addition_overlap"] = third.created_while_active
+        assert third.entered.wait(1)
+
+        shutdown = in_thread(lambda: client.__exit__(None, None, None))
+        assert subapp_stops[2].wait(1)
+        observations["shutdown_finished_while_active"] = shutdown[1].is_set()
+        third.release.set()
+        finish_call(*shutdown)
+        closed = True
+        observations["active_after_shutdown"] = sum(
+            probe.active for probe in BlockingSecondSweep.instances
+        )
+    finally:
+        for probe in BlockingSecondSweep.instances:
+            probe.release.set()
+        if not closed:
+            client.__exit__(None, None, None)
+
+    assert observations == {
+        "replacement_finished_while_old_active": False,
+        "replacement_overlap": 0,
+        "refresh_finished_while_removed_active": False,
+        "addition_overlap": 0,
+        "shutdown_finished_while_active": False,
+        "active_after_shutdown": 0,
+    }
+
+
+@pytest.mark.parametrize("transition", ["replacement", "removal"])
+def test_cancelled_subapp_transition_keeps_old_lifespan_until_drain(
+    tmp_path, transition
+):
+    """Cancelling cache replacement/removal cannot let a successor overlap."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    import anyio
+    import httpx
+    from fastapi import FastAPI
+
+    home = tmp_path / "home"
+    before = tmp_path / "before"
+    moved = tmp_path / "moved"
+    store = _seed(home, [_entry("ws-a", "a", before)])
+    built = []
+    active = 0
+
+    def build(entry, **_kwargs):
+        nonlocal active
+        stop_reached = anyio.Event()
+        allow_drain = anyio.Event()
+        drained = anyio.Event()
+        block_drain = not built
+        probe = SimpleNamespace(
+            stop_reached=stop_reached,
+            allow_drain=allow_drain,
+            drained=drained,
+            started=False,
+            created_while_active=active,
+        )
+
+        @asynccontextmanager
+        async def lifespan(_app):
+            nonlocal active
+            probe.started = True
+            active += 1
+            try:
+                yield
+            finally:
+                stop_reached.set()
+                if block_drain:
+                    await allow_drain.wait()
+                active -= 1
+                drained.set()
+
+        app = FastAPI(lifespan=lifespan)
+
+        @app.get("/health")
+        def health():
+            return {"status": "ok", "workspace": entry.name}
+
+        built.append(probe)
+        return app
+
+    host = create_host_app(store, auth_token=None, build_subapp=build)
+
+    async def scenario():
+        first = None
+        try:
+            async with host.router.lifespan_context(host):
+                transport = httpx.ASGITransport(app=host)
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://test"
+                ) as client:
+                    response = await client.get("/workspaces/ws-a/health")
+                    assert response.status_code == 200
+                    first = built[0]
+
+                    if transition == "replacement":
+                        store.mutate(
+                            lambda state: state.entries.__setitem__(
+                                0, _entry("ws-a", "a", moved)
+                            )
+                        )
+
+                        async def transition_call():
+                            await client.get("/workspaces/ws-a/health")
+
+                    else:
+                        store.mutate(lambda state: state.entries.clear())
+
+                        async def transition_call():
+                            await host.state.drop_stale_subapps()
+
+                    transition_done = anyio.Event()
+                    successor_done = anyio.Event()
+                    successor_response = []
+
+                    async def interrupt_transition(
+                        *, task_status=anyio.TASK_STATUS_IGNORED
+                    ):
+                        with anyio.CancelScope() as scope:
+                            task_status.started(scope)
+                            await transition_call()
+                        transition_done.set()
+
+                    async def request_successor():
+                        successor_response.append(
+                            await client.get("/workspaces/ws-a/health")
+                        )
+                        successor_done.set()
+
+                    async with anyio.create_task_group() as task_group:
+                        scope = await task_group.start(interrupt_transition)
+                        await first.stop_reached.wait()
+                        scope.cancel()
+                        await anyio.wait_all_tasks_blocked()
+
+                        if transition == "removal":
+                            store.mutate(
+                                lambda state: state.entries.append(
+                                    _entry("ws-a", "a", moved)
+                                )
+                            )
+
+                        task_group.start_soon(request_successor)
+                        await anyio.wait_all_tasks_blocked()
+                        observed_before_drain = {
+                            "transition_done": transition_done.is_set(),
+                            "successor_done": successor_done.is_set(),
+                            "built": len(built),
+                            "active": active,
+                        }
+
+                        first.allow_drain.set()
+                        await successor_done.wait()
+
+                    assert observed_before_drain == {
+                        "transition_done": False,
+                        "successor_done": False,
+                        "built": 1,
+                        "active": 1,
+                    }
+                    assert first.drained.is_set()
+                    started = [probe for probe in built if probe.started]
+                    assert len(started) == 2
+                    assert started[1].created_while_active == 0
+                    assert successor_response[0].status_code == 200
+        finally:
+            if first is not None:
+                first.allow_drain.set()
+
+    anyio.run(scenario, backend="asyncio")

@@ -7,6 +7,19 @@ from mship.core.relay.health import (
 class _Resp:
     def __init__(self, status): self.status_code = status
 
+
+def test_health_deadline_closes_a_continuously_dripping_response():
+    """Read-back must not hold the tunnel worker forever on trickling bytes."""
+    from tests.core.relay.http_server import response_server
+
+    with response_server() as peer:
+        probe = probe_health(peer.url, "", timeout=0.4)
+        assert not probe.ok
+        assert probe.error is not None
+        assert peer.sent >= 2, "test must reach body streaming"
+        assert peer.sent < 80, "deadline must interrupt the incomplete body"
+        assert peer.finished.wait(1), "timed-out health client left its connection open"
+
 class _Clock:
     """Fake monotonic clock: sleep() advances the clock instead of blocking."""
     def __init__(self): self.t = 0.0

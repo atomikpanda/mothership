@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+import anyio
 from pydantic import BaseModel, field_validator
 
 # The only fastapi names imported at MODULE scope, and they have to be: this
@@ -27,6 +28,7 @@ from pydantic import BaseModel, field_validator
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
+from mship.core.async_runtime import run_sync
 from mship.core.gh_app import GhAppError, mint_installation_token, resolve_installation
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
@@ -195,7 +197,11 @@ def _make_auth_dependency(token: str):
 
 
 async def _pr_watch_loop(
-    watcher: PrWatcher, stop: asyncio.Event, interval: float
+    watcher: PrWatcher,
+    stop: anyio.Event,
+    interval: float,
+    *,
+    task_status: anyio.abc.TaskStatus[None] = anyio.TASK_STATUS_IGNORED,
 ) -> None:
     """Runs `watcher.check_once()` off the event loop (it shells out to `gh`)
     every `interval` seconds until `stop` is set. The first sweep happens
@@ -207,15 +213,16 @@ async def _pr_watch_loop(
     `PrWatcher.check_once` already isolates failures per-PR, but this is a
     second, coarser layer of defense in case something outside that (e.g.
     `state_manager.load()`) raises."""
+    # Readiness means this lifespan owns the watcher. External sweep I/O (or
+    # waiting for another workspace's lane token) must not hold host startup.
+    task_status.started()
     while not stop.is_set():
         try:
-            await asyncio.to_thread(watcher.check_once)
+            await run_sync("pr_watch", watcher.check_once)
         except Exception:
             logger.exception("pr-watch tick failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
-            pass
+        with anyio.move_on_after(interval):
+            await stop.wait()
 
 
 def _dispatch_marker(spec_id: str, task_slug: str) -> str:
@@ -457,15 +464,14 @@ def create_app(
             shell=ShellRunner(),
             worktree_manager=worktree_manager,
         )
-        stop = asyncio.Event()
-        task = asyncio.create_task(_pr_watch_loop(watcher, stop, interval))
-        try:
-            yield
-        finally:
-            stop.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        stop = anyio.Event()
+        async with anyio.create_task_group() as task_group:
+            await task_group.start(_pr_watch_loop, watcher, stop, interval)
+            try:
+                yield
+            finally:
+                stop.set()
+                task_group.cancel_scope.cancel()
 
     if auth_token:
         dependencies = [Depends(_make_auth_dependency(auth_token))]
@@ -1718,7 +1724,8 @@ def create_app(
         q: str | None = None,
     ):
         if not wait:
-            return await asyncio.to_thread(
+            return await run_sync(
+                "mailbox",
                 lambda: _filtered_summaries(msgs.list(), inbox, q)
             )
         from mship.core.message_wait import changed_since
@@ -1742,7 +1749,7 @@ def create_app(
         interval = 1.0
         deadline = _time.monotonic() + timeout
         while True:
-            summaries, cursor = await asyncio.to_thread(read_updates)
+            summaries, cursor = await run_sync("mailbox", read_updates)
             threads = [
                 summary
                 for summary in summaries

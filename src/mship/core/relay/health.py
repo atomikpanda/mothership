@@ -32,8 +32,8 @@ def probe_health(public_url: str, token: str, *, get: Callable | None = None,
     an attacker-selected request from inside the host.
     """
     if get is None:
-        import httpx
-        get = lambda url, **kw: httpx.get(url, **kw)
+        from mship.core.relay.http import request
+        get = lambda url, **kw: request("GET", url, **kw)
     url = public_url.rstrip("/") + "/health"
     headers = {"Authorization": f"Bearer {token}"} if token else None
     try:
@@ -67,7 +67,7 @@ def verify_relay_reachable(public_url: str, token: str, *, get: Callable | None 
 
     Returns (ok, detail). ok=True only on 2xx. 401/403 → a token-mismatch hint.
     Any transport error → ok=False with the exception text (the real reason).
-    `get` is injectable (defaults to httpx.get) for testing.
+    `get` is injectable; the default uses a whole-call deadline including the body.
     """
     p = probe_health(public_url, token, get=get, timeout=timeout)
     if p.error is not None:

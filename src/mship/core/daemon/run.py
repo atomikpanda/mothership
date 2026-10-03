@@ -16,7 +16,7 @@ SIGTERM is no longer uvicorn's business alone (#471): its handlers only set
 would never learn a stop was requested, the daemon would outlive
 `TimeoutStopSec`, be SIGKILLed, and leave its `start_new_session=True` ssh child
 orphaned on the subdomain — where it blocks the next start from claiming it. One
-shared `asyncio.Event` is the stop condition for everything.
+shared `anyio.Event` is the stop condition for everything.
 """
 
 from __future__ import annotations
@@ -24,16 +24,20 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from mship.core.daemon import history, lease as lease_mod, paths
 from mship.core.daemon.log_capture import (
     LAUNCHD_CAPTURE_MAX_BYTES,
     rotate_launchd_captures,
 )
+
+if TYPE_CHECKING:
+    import anyio
 
 log = logging.getLogger(__name__)
 
@@ -175,14 +179,17 @@ def _build_tunnel(home: Path, relay_cfg, serve_cfg):
 
 
 def _tunnel_join_timeout() -> float:
-    """How long a shutdown waits for the tunnel loop's in-flight tick.
+    """Retained shutdown budget for the tunnel loop's bounded in-flight tick.
 
-    DERIVED, never picked: cancelling the loop cannot interrupt the tick already
-    running in the executor, so a bound shorter than a worst-case tick would
-    routinely give up while one is still in flight. That worst case is the three
-    relay calls a single tick can make (challenge, register, enroll); automatic
-    clone recovery rotates its local key without revoking the incumbent's shared
-    key, so it adds no relay calls. The tick can also make three fixed, bounded
+    The task group joins the non-abandoned worker before stopping its supervisor;
+    this budget documents the underlying operation bounds, not permission to
+    abandon a still-running tick. That worst case is the three
+    relay calls a single tick can make (challenge, register, enroll), each with
+    a whole-call deadline including owned resolver startup/resolution and its
+    response body (resolver cancellation kills and reaps the child), plus one signing
+    subprocess, and one key-generation subprocess on automatic clone recovery.
+    Recovery does not revoke the incumbent's shared key, so it adds no relay
+    calls. The tick can also make three fixed, bounded
     process-table snapshots (discovery, pre-TERM, pre-KILL) and the shared
     TERM/KILL exit waits. Still bounded,
     because a daemon that never returns is
@@ -195,11 +202,15 @@ def _tunnel_join_timeout() -> float:
         PROCESS_LIST_TIMEOUT_S,
     )
     from mship.core.daemon.relay_link import HTTP_TIMEOUT_S
+    from mship.core.relay.keys import KEYGEN_TIMEOUT_S
+    from mship.core.relay.ssh_sig import SSH_KEYGEN_TIMEOUT_S
 
     return (
         3 * HTTP_TIMEOUT_S
         + MAX_PROCESS_LIST_CALLS_PER_REAP * PROCESS_LIST_TIMEOUT_S
         + 2 * ORPHAN_EXIT_TIMEOUT_S
+        + SSH_KEYGEN_TIMEOUT_S
+        + KEYGEN_TIMEOUT_S
     )
 
 
@@ -211,58 +222,241 @@ def _serve_forever(control_app, socket_path, host_app, serve_cfg, tunnel=None) -
     and one startup/shutdown shape for all three configurations is one shutdown
     path to keep correct rather than three.
     """
+    import anyio
+
+    anyio.run(
+        _serve,
+        control_app,
+        socket_path,
+        host_app,
+        serve_cfg,
+        tunnel,
+        backend="asyncio",
+    )
+
+
+@dataclass(frozen=True)
+class _ServerOutcome:
+    name: str
+    started: bool
+    clean: bool
+    error: BaseException | None = None
+
+
+class _ServerStoppedBeforeReady(Exception):
+    def __init__(self, outcome: _ServerOutcome) -> None:
+        super().__init__(outcome.name)
+        self.outcome = outcome
+
+
+async def _shutdown_interrupted_server(server) -> None:
+    """Cancel and join Uvicorn requests before ending their app lifespans.
+
+    An interrupted serve() has lost its graceful-shutdown owner. Stop ingress
+    first, then explicitly settle its asyncio request tasks; Uvicorn's default
+    shutdown timeout is unbounded and otherwise waits for streaming clients.
+    Normal serve() returns keep Uvicorn's ordinary graceful shutdown policy.
+    """
     import asyncio
 
-    asyncio.run(_serve(control_app, socket_path, host_app, serve_cfg, tunnel))
+    for listener in server.servers:
+        listener.close()
+    for connection in list(server.server_state.connections):
+        connection.shutdown()
+    while requests := tuple(server.server_state.tasks):
+        for request in requests:
+            request.cancel("daemon server interrupted")
+        # Uvicorn observes/logs ASGI errors. Retrieve every request result and
+        # let its cancellation finalizers finish before lifespan shutdown.
+        await asyncio.gather(*requests, return_exceptions=True)
+    await server.shutdown()
+
+
+async def _run_server_child(
+    name,
+    server,
+    outcomes,
+    terminal_outcomes,
+    *,
+    task_status: anyio.abc.TaskStatus[None],
+) -> None:
+    """Own one uvicorn server and expose its readiness to the root group."""
+    import anyio
+
+    completed = anyio.Event()
+    outcome = None
+
+    async def run_server() -> None:
+        nonlocal outcome
+        returned = False
+        try:
+            await server.serve()
+            returned = True
+        except anyio.get_cancelled_exc_class():
+            raise
+        except BaseException as error:
+            outcome = _ServerOutcome(
+                name=name,
+                started=server.started,
+                clean=server.should_exit,
+                error=error,
+            )
+        else:
+            outcome = _ServerOutcome(
+                name=name,
+                started=server.started,
+                clean=server.should_exit,
+            )
+        finally:
+            try:
+                if not returned:
+                    # Uvicorn calls shutdown only on a normal serve() return.
+                    # Its ASGI lifespan and connections are asyncio-owned, so
+                    # cancelling our child must still join that cleanup.
+                    with anyio.CancelScope(shield=True):
+                        if server.started:
+                            await _shutdown_interrupted_server(server)
+                        elif (lifespan := getattr(server, "lifespan", None)) is not None:
+                            # Startup creates the lifespan before binding. No
+                            # listening sockets exist yet, but the app must exit.
+                            await lifespan.shutdown()
+            except BaseException as cleanup_error:
+                if outcome is None or outcome.error is None:
+                    outcome = _ServerOutcome(
+                        name=name, started=server.started,
+                        clean=server.should_exit, error=cleanup_error,
+                    )
+                else:
+                    outcome = replace(
+                        outcome,
+                        error=BaseExceptionGroup(
+                            "daemon server and shutdown failed",
+                            [outcome.error, cleanup_error],
+                        ),
+                    )
+            finally:
+                # Delivery below can be cancelled by a sibling's outcome.
+                # Record the result without a checkpoint, after cleanup, so
+                # the root can reconcile every failure once it has joined us.
+                if outcome is not None:
+                    terminal_outcomes.append(outcome)
+                completed.set()
+
+    async with outcomes:
+        async with anyio.create_task_group() as server_group:
+            server_group.start_soon(run_server)
+            while not server.started and not completed.is_set():
+                await anyio.sleep(0)
+            if server.started:
+                task_status.started()
+            await completed.wait()
+
+        assert outcome is not None
+        await outcomes.send(outcome)
+        if not outcome.started:
+            raise _ServerStoppedBeforeReady(outcome)
+
+
+async def _start_server_and_report_ready(
+    task_group, name, server, events, terminal_outcomes
+) -> None:
+    """Race one server's readiness handshake against sibling outcomes."""
+    async with events:
+        try:
+            await task_group.start(
+                _run_server_child,
+                name,
+                server,
+                events.clone(),
+                terminal_outcomes,
+            )
+        except _ServerStoppedBeforeReady:
+            # The child sent its startup outcome before raising this transport
+            # sentinel, so readiness must not also be reported.
+            return
+        await events.send(None)
+
+
+def _raise_for_server_outcome(outcome: _ServerOutcome) -> None:
+    if not outcome.started:
+        label = "TCP" if outcome.name == "host" else "control"
+        raise RuntimeError(f"{label} server failed to bind") from outcome.error
+    if outcome.error is not None:
+        raise RuntimeError("daemon server failed") from outcome.error
+    if not outcome.clean:
+        raise RuntimeError("daemon server stopped unexpectedly")
 
 
 async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
-    import asyncio
-
+    import anyio
     import uvicorn
 
     control = uvicorn.Server(
         uvicorn.Config(control_app, uds=str(socket_path), log_config=None)
     )
     servers = [control]
-    tasks = [asyncio.create_task(control.serve())]
     control_app.state.set_serve_bound(False)
-    stop = asyncio.Event()
-    tunnel_task = None
+    stop = anyio.Event()
+    first_outcome = None
+    terminal_outcomes = []
+    failures = []
     try:
-        if host_app is not None and serve_cfg is not None:
-            host = uvicorn.Server(
-                uvicorn.Config(
-                    host_app,
-                    host=serve_cfg["host"],
-                    port=int(serve_cfg["port"]),
-                    log_config=None,
-                )
-            )
-            servers.append(host)
-            tasks.append(asyncio.create_task(host.serve()))
-            await _await_tcp_bind(control, tasks[0], host, tasks[1])
-            control_app.state.set_serve_bound(True)
-        _install_stop_handlers(stop, servers)
-        if tunnel is not None:
-            tunnel_task = asyncio.create_task(_tunnel_loop(tunnel, stop))
+        send_outcome, receive_outcome = anyio.create_memory_object_stream(2)
+        async with send_outcome, receive_outcome:
+            async with anyio.create_task_group() as task_group:
+                try:
+                    try:
+                        await task_group.start(
+                            _run_server_child,
+                            "control",
+                            control,
+                            send_outcome.clone(),
+                            terminal_outcomes,
+                        )
+                    except _ServerStoppedBeforeReady as stopped:
+                        first_outcome = stopped.outcome
 
-        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        unexpected = any(
-            task in done and not server.should_exit
-            for task, server in zip(tasks, servers)
-        )
-        for server in servers:
-            server.should_exit = True
-        stop.set()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        failure = next(
-            (result for result in results if isinstance(result, BaseException)), None
-        )
-        if failure is not None:
-            raise RuntimeError("daemon server failed") from failure
-        if unexpected:
-            raise RuntimeError("daemon server stopped unexpectedly")
+                    if (
+                        first_outcome is None
+                        and host_app is not None
+                        and serve_cfg is not None
+                    ):
+                        host = uvicorn.Server(
+                            uvicorn.Config(
+                                host_app,
+                                host=serve_cfg["host"],
+                                port=int(serve_cfg["port"]),
+                                log_config=None,
+                            )
+                        )
+                        servers.append(host)
+                        task_group.start_soon(
+                            _start_server_and_report_ready,
+                            task_group,
+                            "host",
+                            host,
+                            send_outcome.clone(),
+                            terminal_outcomes,
+                        )
+                        host_start = await receive_outcome.receive()
+                        if host_start is None:
+                            control_app.state.set_serve_bound(True)
+                        else:
+                            first_outcome = host_start
+
+                    if first_outcome is None:
+                        _install_stop_handlers(stop, servers)
+                        if tunnel is not None:
+                            await task_group.start(_tunnel_loop, tunnel, stop)
+                        first_outcome = await receive_outcome.receive()
+                finally:
+                    control_app.state.set_serve_bound(False)
+                    for server in servers:
+                        server.should_exit = True
+                    stop.set()
+                    task_group.cancel_scope.cancel()
+    except BaseException as error:
+        failures.append(error)
     finally:
         control_app.state.set_serve_bound(False)
         # Joined BEFORE the tunnel is torn down, and torn down before `_run`
@@ -270,28 +464,20 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
         # signals the ssh child could spawn a replacement nothing then owns,
         # and that orphan holds the subdomain against the next start.
         stop.set()
-        await _join_tunnel(tunnel_task)
         if tunnel is not None:
-            tunnel.stop()
-
-
-async def _await_tcp_bind(control, control_task, host, host_task) -> None:
-    """Block until the TCP host app is listening, or fail loudly if either
-    server gives up first — a half-bound daemon must not advertise itself."""
-    import asyncio
-
-    while not host.started:
-        if host_task.done():
-            control.should_exit = True
-            await asyncio.gather(control_task, return_exceptions=True)
-            raise RuntimeError("TCP server failed to bind") from host_task.exception()
-        if control_task.done():
-            host.should_exit = True
-            await asyncio.gather(host_task, return_exceptions=True)
-            raise RuntimeError(
-                "control server stopped before TCP bind"
-            ) from control_task.exception()
-        await asyncio.sleep(0)
+            try:
+                tunnel.stop()
+            except BaseException as error:
+                failures.append(error)
+    for outcome in terminal_outcomes:
+        try:
+            _raise_for_server_outcome(outcome)
+        except RuntimeError as error:
+            failures.append(error)
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise BaseExceptionGroup("daemon failures", failures)
 
 
 def _install_stop_handlers(stop, servers) -> None:
@@ -300,15 +486,12 @@ def _install_stop_handlers(stop, servers) -> None:
     Uvicorn's own handlers only set `should_exit` on the server that installed
     them, so nothing else in the process would ever learn a stop was requested.
 
-    ORDERING, deliberately not relied upon: uvicorn captures signals with
-    `signal.signal` from inside `serve()`, and so does `add_signal_handler` —
-    last install wins. Ours goes in after the TCP bind wait, which is after both
-    servers have started (so ours wins) in the host shape, but before the
-    control server's first await in the control-only shape (so uvicorn's wins
-    there). Both outcomes are correct, and that is the point: uvicorn's handler
-    ends its server's task, and the shutdown path below sets this Event the
-    moment ANY server task completes. The handler here is the fast path, never
-    the only one."""
+    Uvicorn captures signals from inside `serve()`, and `add_signal_handler`
+    also replaces the prior handler. The readiness handshakes mean ours is
+    installed after every server has entered `serve()` and marked itself
+    started, so ours wins on the asyncio backend. Where the platform refuses
+    the handler, uvicorn's own handler still ends a server and the first
+    completion outcome drives the same shared shutdown path."""
     import asyncio
     import signal
 
@@ -322,51 +505,43 @@ def _install_stop_handlers(stop, servers) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, _request_stop)
-        except (NotImplementedError, RuntimeError, ValueError):
+        except NotImplementedError, RuntimeError, ValueError:
             # Non-POSIX, or not the main thread (tests). Uvicorn's own handlers
             # plus the shutdown path still stop everything.
             log.debug("no asyncio signal handler available for %s", sig)
 
 
-async def _tunnel_loop(tunnel, stop) -> None:
+async def _tunnel_loop(
+    tunnel,
+    stop,
+    *,
+    task_status: anyio.abc.TaskStatus[None],
+) -> None:
     """`tick(); sleep(interval)` until the shared stop Event says otherwise.
 
-    The tick runs in the default executor because it BLOCKS: a registration
-    waits out an HTTP timeout, an auto-reidentify shells out to `ssh-keygen`,
+    The tick has its own one-token offload capacity because it BLOCKS: a
+    registration waits out an HTTP timeout, an auto-reidentify runs `ssh-keygen`,
     the orphan sweep to `ps`, and a respawn opens a `Popen` — any of them on the
     loop thread would stall both HTTP servers. A tick never raises by contract;
     if one ever does it must not end the loop, because the tunnel is the half of
     the daemon that recovers by retrying."""
-    import asyncio
+    import anyio
 
+    from mship.core.async_runtime import run_sync
     from mship.core.daemon.host_tunnel import TICK_INTERVAL_S
 
-    loop = asyncio.get_running_loop()
+    # Readiness means the local loop can supervise reconnects; a relay outage
+    # must never hold daemon startup behind network registration/read-back.
+    task_status.started()
     while not stop.is_set():
         try:
-            await loop.run_in_executor(None, tunnel.tick)
+            # Cancellation joins the bounded tick before the root can stop
+            # its supervisor. Abandoning this worker could orphan a respawn.
+            await run_sync("tunnel", tunnel.tick)
         except Exception:
             log.exception("tunnel tick failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=TICK_INTERVAL_S)
-        except TimeoutError:
-            pass
-
-
-async def _join_tunnel(task) -> None:
-    import asyncio
-
-    if task is None:
-        return
-    await asyncio.wait({task}, timeout=_tunnel_join_timeout())
-    task.cancel()
-    for result in await asyncio.gather(task, return_exceptions=True):
-        # `return_exceptions` keeps a shutdown going; it must not also make a
-        # crashed tunnel loop invisible.
-        if isinstance(result, BaseException) and not isinstance(
-            result, asyncio.CancelledError
-        ):
-            log.error("tunnel loop stopped on an error: %r", result)
+        with anyio.move_on_after(TICK_INTERVAL_S):
+            await stop.wait()
 
 
 def _configure_logging(home: Path) -> None:

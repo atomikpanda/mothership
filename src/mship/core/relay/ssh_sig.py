@@ -16,6 +16,8 @@ from typing import Callable
 
 from mship.core.relay.enroll import fingerprint, validate_pubkey
 
+SSH_KEYGEN_TIMEOUT_S = 10.0
+
 
 class SignatureError(Exception):
     """Signing failed, or verification could not be carried out at all.
@@ -30,7 +32,9 @@ class SignatureError(Exception):
 def _default_runner(argv: list[str], input_bytes: bytes) -> subprocess.CompletedProcess:
     """Run ssh-keygen with the blob on stdin. No `check=True`: a non-zero exit
     is data here (a bad signature), not an exception."""
-    return subprocess.run(argv, input=input_bytes, capture_output=True)
+    return subprocess.run(
+        argv, input=input_bytes, capture_output=True, timeout=SSH_KEYGEN_TIMEOUT_S
+    )
 
 
 def _run(argv: list[str], input_bytes: bytes, runner: Callable) -> subprocess.CompletedProcess:
