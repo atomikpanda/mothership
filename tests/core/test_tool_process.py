@@ -504,7 +504,9 @@ finally:
         ),
     )
     started = next(stream)
-    ready = next(stream)
+    # A child slower to start than the keepalive interval legitimately gets
+    # keepalives before it reports ready.
+    ready = next(event for event in stream if event.kind != "keepalive")
     assert started.kind == "started"
     assert ready.kind == "ready"
     assert ready.result is not None
