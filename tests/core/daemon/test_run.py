@@ -11,6 +11,7 @@ import logging
 import multiprocessing
 import tomllib
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -768,7 +769,7 @@ def test_server_and_shutdown_failures_both_reach_daemon_reporting(monkeypatch):
 
 @pytest.mark.parametrize("during_startup", [False, True])
 def test_real_uvicorn_root_cancellation_drains_app_lifespans(
-    tmp_path, monkeypatch, during_startup
+    monkeypatch, during_startup
 ):
     """Cancelling serve() without Uvicorn shutdown leaves its ASGI lifespan alive."""
     from contextlib import asynccontextmanager
@@ -815,7 +816,7 @@ def test_real_uvicorn_root_cancellation_drains_app_lifespans(
         async def daemon():
             with scope:
                 await run_mod._serve(
-                    control, tmp_path / "control.sock", host,
+                    control, Path(socket_dir) / "control.sock", host,
                     {"host": "127.0.0.1", "port": 0}, None,
                 )
             daemon_done.set()
@@ -841,7 +842,9 @@ def test_real_uvicorn_root_cancellation_drains_app_lifespans(
                     else:
                         await server.lifespan.shutdown()
 
-    anyio.run(scenario, backend="asyncio")
+    # macOS pytest roots can exceed the native Unix socket path limit.
+    with TemporaryDirectory(prefix="mship-run-", dir="/tmp") as socket_dir:
+        anyio.run(scenario, backend="asyncio")
 
 
 def test_control_server_bind_failure_retains_original_cause(monkeypatch):

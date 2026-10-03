@@ -159,8 +159,10 @@ not become daemon failures. The lease loser exit policy below is unchanged.
   supervisor tests cover command and error mapping; native launchd tests remain
   macOS-only.
 
-There are no remaining `gather(return_exceptions=True)`, `run_in_executor`, or
-caller-local `asyncio.to_thread` offloads in `core/daemon` or `core/serve.py`.
+There are no remaining `gather(return_exceptions=True)` or `run_in_executor`
+offloads in `core/daemon`; `core/serve.py` still has a caller-local
+`asyncio.to_thread` for task-worktree cleanup, outside these daemon-owned
+lanes.
 Synchronous FastAPI handlers and request-stream iteration still use the
 framework's own worker pool; this boundary does not rewrite all synchronous
 domain operations.
