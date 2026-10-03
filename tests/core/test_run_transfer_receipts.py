@@ -77,7 +77,7 @@ def _receipts(state_dir: Path) -> list[dict[str, str]]:
 
 
 def test_only_successful_transfers_are_recorded_when_later_host_source_fails(
-    tmp_path, monkeypatch
+    tmp_path,
 ):
     state_dir = tmp_path / ".mothership"
     host = _host("studio", "https://studio.invalid")
@@ -89,18 +89,22 @@ def test_only_successful_transfers_are_recorded_when_later_host_source_fails(
         (first, second),
     )
 
-    def push(_shell, _path, *, conn, workspace_id, repo, task, sha):
-        if repo == "web":
-            raise RunTransferError("host transfer failed")
-        return run_ref(task, repo)
+    class RejectedTransferShell(_Shell):
+        def run(self, command, *, cwd, env=None):
+            if cwd == second.path:
+                return ShellResult(
+                    returncode=1,
+                    stdout="",
+                    stderr="remote: private-server-payload never-persist-this-token",
+                )
+            return super().run(command, cwd=cwd, env=env)
 
-    monkeypatch.setattr("mship.core.run_transfer.push_run_ref", push)
-    with pytest.raises(RemoteDispatchError, match="host transfer failed"):
+    with pytest.raises(RemoteDispatchError) as error:
         prepare_remote_source(
             task_obj=_Task(),
             target_repos=["api", "web"],
             config=None,
-            shell=_Shell(),
+            shell=RejectedTransferShell(),
             host=host,
             resolver=RunHostResolver(),
             output=_Output(),
@@ -109,6 +113,8 @@ def test_only_successful_transfers_are_recorded_when_later_host_source_fails(
                 state_dir, task=_Task(), host=host, repo=repo, ref=ref, sha=sha
             ),
         )
+    assert "private-server-payload" not in str(error.value)
+    assert "never-persist-this-token" not in str(error.value)
 
     assert _receipts(state_dir) == [
         {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -11,7 +12,11 @@ from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from mship.core.run_host import RunHostError, RunHostResolver
-from mship.core.run_host.config import HostRegistration, registration_identity
+from mship.core.run_host.config import (
+    HostRegistration,
+    RelayRunHostIdentity,
+    registration_identity,
+)
 from mship.core.run_target.backend import BackendExecutor, discover_on_host
 from mship.core.run_target.models import (
     AppRun,
@@ -133,6 +138,7 @@ class RemoteBackendExecutor:
                     shell=self.shell,
                 )
             except RemoteDispatchError as error:
+                self.output.error(str(error))
                 raise TargetSelectionError(
                     "owner_unavailable",
                     "could not certify source for remote target discovery",
@@ -182,7 +188,8 @@ class RemoteBackendExecutor:
                     run_ref_repos=prepared.run_ref_repos,
                     source_revision=source_revision,
                 )
-            except RemoteDispatchError, run_transfer.RunTransferError, RunHostError:
+            except (RemoteDispatchError, run_transfer.RunTransferError, RunHostError) as error:
+                self.output.error(f"{host.name}: {error}")
                 self._prepared[key] = _PreparedHost(
                     run_ref_repos=(),
                     source_revision=source_revision,
@@ -478,8 +485,37 @@ class RemoteBackendExecutor:
                 session_source_revision=session_source_revision,
                 cancel_event=cancel_event,
             )
-        except RunHostError:
+        except RunHostError as error:
+            self.output.error(f"{host.name}: {error}")
             return self._result(error_code="auth_error")
+        if result.status == "auth_error":
+            if isinstance(host.connection, RelayRunHostIdentity):
+                recovery = (
+                    "verify the registered host/workspace; if pairing needs repair, "
+                    "use `mship run-host pair-relay`"
+                )
+            else:
+                command = [
+                    "mship",
+                    "run-host",
+                    "add",
+                    "--scope",
+                    host.scope,
+                    "--pair-link",
+                    "<fresh-direct-pair-link>",
+                    "--preference",
+                    str(host.preference),
+                ]
+                for role in host.roles:
+                    command.append(f"--role={role}")
+                for tag in host.tags:
+                    command.append(f"--tag={tag}")
+                command.extend(("--", host.name))
+                recovery = (
+                    "obtain a fresh direct pair link from the host, then replace "
+                    f"the placeholder in `{shlex.join(command)}`"
+                )
+            self.output.error(f"{host.name}: remote execution rejected authentication; {recovery}")
         stdout = result.stdout if execution.preparation == "discover" else b""
         stderr = result.stderr if execution.preparation == "discover" else b""
         if result.status in {"completed", "running"}:

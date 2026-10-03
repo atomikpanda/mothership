@@ -155,6 +155,21 @@ missing/revoked, transfer a new account link and pair again; if directory
 selection or instance binding fails, re-enrol/approve the host or correct the
 stored identity mapping.
 
+Profiled runs report safe source-preparation and relay-authentication diagnostics
+on stderr, identifying the failing repository or selected host.
+Missing or revoked pairing includes the `mship run-host pair-relay` recovery
+command even with `--json` or `--quiet`. These diagnostics do not add retries or
+allow local fallback.
+
+A final execution-endpoint authentication rejection is reported after any
+permitted pre-start retry; a successful refresh/retry emits no authentication
+error. Relay diagnostics identify the host/workspace registration to check and
+the relay pairing command. Direct registrations get a command template requiring
+a fresh direct pair link; it preserves the registration's roles, tags and preference.
+These authentication diagnostics never print credentials or HTTP error bodies.
+Source-transfer failures report the failed stage and recovery checks, not captured
+Git error output, which can contain server-supplied text.
+
 To replace a legacy direct record, select the approved identity first and use
 the explicit preview/apply flow. It writes a private byte-for-byte backup before
 replacement; it never treats the legacy token as a refresh credential or keeps

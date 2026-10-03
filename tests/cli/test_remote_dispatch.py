@@ -999,7 +999,6 @@ def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(
                 app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
             )
         assert result.exit_code == 1, result.output
-        assert "run host" in result.output and "denied" in result.output
         assert recorder == {}
     finally:
         _reset()
@@ -1703,7 +1702,6 @@ def test_a_failed_transfer_aborts_before_dispatch(tmp_path, monkeypatch):
         ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
-        assert "run host" in result.output and "denied" in result.output
         assert recorder == {}  # never contacted
     finally:
         container.shell.reset_override()
@@ -1900,7 +1898,6 @@ def test_a_failed_push_aborts_before_dispatch(tmp_path, monkeypatch):
         ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
-        assert "could not push api" in result.output
         assert recorder == {}
     finally:
         container.shell.reset_override()
@@ -1950,7 +1947,6 @@ def test_a_repo_whose_git_state_is_unreadable_is_not_dispatched(tmp_path, monkey
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "unreadable git state in api" in result.output
-        assert "not a git repository" in result.output
         assert "mship commit" not in result.output  # a broken repo is not a dirty one
         assert shell.pushes == []
         assert recorder == {}  # the remote was never contacted
