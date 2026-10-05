@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import copy
 import fcntl
+import functools
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +19,11 @@ from mship.core.inbox import InboxAction, apply_inbox_action
 from mship.core.spec import Spec
 
 SPECS_DIRNAME = "specs"  # canonical name of the workspace-level specs directory
+
+# Serve endpoints parse every spec on every request; the pure-Python loader made
+# that CPU-bound enough to serialize concurrent requests under the GIL.
+_FRONTMATTER_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_FRONTMATTER_CACHE_SIZE = 1024
 
 
 @contextmanager
@@ -54,6 +61,12 @@ class ResolvedSpecArtifact:
     policy: Literal["committed", "local", "encrypted"]
 
 
+@functools.lru_cache(maxsize=_FRONTMATTER_CACHE_SIZE)
+def _load_frontmatter(fm_text: str):
+    """Keyed by the exact text, so an edited spec can never read a stale parse."""
+    return yaml.load(fm_text, Loader=_FRONTMATTER_LOADER)
+
+
 # MOS-240: legacy spec statuses (captured/drafting/needs_clarification) are mapped
 # forward by the Spec model's `_migrate_legacy_status` validator (see core/spec.py),
 # so EVERY construction path — parse_spec, `Spec.model_validate_json`, direct
@@ -72,7 +85,8 @@ def parse_spec(text: str) -> Spec:
     fm_text = "".join(lines[1:end])
     body = "".join(lines[end + 1:])
     try:
-        data = yaml.safe_load(fm_text) or {}
+        # Copied: the cached parse is shared, the returned Spec is the caller's.
+        data = copy.deepcopy(_load_frontmatter(fm_text)) or {}
         if not isinstance(data, Mapping):
             raise SpecParseError("spec frontmatter must be a mapping")
         return Spec(**data, body=body)

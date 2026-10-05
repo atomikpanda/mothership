@@ -4,7 +4,9 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+import yaml
 
+from mship.core import spec_store
 from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, OpenQuestion, Spec
 from mship.core.spec_store import (
     SpecArtifactConflict, SpecParseError, SpecStore, parse_spec, serialize_spec,
@@ -99,6 +101,28 @@ def test_non_mapping_frontmatter_raises_spec_parse_error(frontmatter: str):
     with pytest.raises(SpecParseError):
         parse_spec(f"---\n{frontmatter}\n---\nbody\n")
 
+
+
+def test_reparsing_identical_text_never_shares_mutable_state():
+    text = serialize_spec(_spec())
+    first = parse_spec(text)
+    first.non_goals.append("leaked")
+    first.acceptance_criteria[0].text = "leaked"
+
+    assert parse_spec(text) == _spec()
+
+
+def test_changed_frontmatter_is_reparsed():
+    original = _spec()
+    renamed = original.model_copy(update={"title": "Renamed"})
+
+    assert parse_spec(serialize_spec(original)).title == "Decision queue"
+    assert parse_spec(serialize_spec(renamed)).title == "Renamed"
+
+
+@pytest.mark.skipif(not hasattr(yaml, "CSafeLoader"), reason="libyaml not available")
+def test_frontmatter_uses_the_libyaml_loader_when_available():
+    assert spec_store._FRONTMATTER_LOADER is yaml.CSafeLoader
 
 
 def _new_spec(spec_id: str):
