@@ -2041,6 +2041,28 @@ def test_abort_clean_worktree_still_torn_down_without_force(worktree_deps):
     assert "clean-task" not in state_mgr.load().tasks
 
 
+def test_abort_removes_clean_passive_detached_worktree_reachable_from_origin(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+    origin = workspace / "shared-origin.git"
+    _g(["git", "init", "--bare", "-b", "main", str(origin)], workspace)
+    _g(["git", "remote", "add", "origin", str(origin)], shared)
+    _g(["git", "push", "-u", "origin", "main"], shared)
+    _g(["git", "fetch", "origin", "main"], shared)
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("close passive", repos=["auth-service"], workspace_root=workspace, offline=True)
+    task = state_mgr.load().tasks["close-passive"]
+    passive = Path(task.worktrees["shared"])
+
+    assert subprocess.run(
+        ["git", "-C", str(passive), "symbolic-ref", "-q", "HEAD"], capture_output=True
+    ).returncode != 0
+    mgr.abort("close-passive")
+
+    assert not passive.exists()
+    assert "close-passive" not in state_mgr.load().tasks
+
+
 def test_abort_idempotent_when_task_already_gone(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)

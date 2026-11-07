@@ -179,21 +179,37 @@ class GitRunner:
         return bool(result.stdout.strip())
 
     def has_unpushed_commits(self, worktree_path: Path) -> bool:
-        """True if the worktree's current branch has commits not safely on origin.
+        """True if the worktree has commits not provably reachable from origin.
 
         Teardown guard (spec auto-advance-on-merge):
         - No `origin` remote at all -> False (nothing to push to; a no-remote
           checkout can't have "unpushed" work in the sense this guard protects,
           and every no-remote fixture must still tear down).
-        - Upstream tracking ref set (post-`finish`, this is origin/<branch>) ->
-          True iff `git rev-list --count @{u}..HEAD` > 0.
-        - `origin` exists but the branch has NO upstream tracking ref (it was
-          never `push -u`'d) -> True: we can't prove its commits are on origin,
-          so refuse (conservative).
+        - Attached HEAD -> True iff `git rev-list --count @{u}..HEAD` > 0.
+          An attached branch without an upstream remains conservatively protected.
+        - Detached HEAD -> False only when an `origin` remote-tracking ref contains
+          HEAD. Local branches and tags do not establish remote reachability.
         Any git error -> True (conservative: refuse rather than risk data loss).
         """
         if not self.has_remote(worktree_path, "origin"):
             return False
+        head_ref = subprocess.run(
+            ["git", "symbolic-ref", "-q", "HEAD"],
+            cwd=worktree_path, capture_output=True, text=True,
+        )
+        if head_ref.returncode == 1:
+            containing_remote_ref = subprocess.run(
+                [
+                    "git", "for-each-ref", "--format=%(refname)", "--contains=HEAD",
+                    "refs/remotes/origin",
+                ],
+                cwd=worktree_path, capture_output=True, text=True,
+            )
+            if containing_remote_ref.returncode != 0:
+                return True
+            return not bool(containing_remote_ref.stdout.strip())
+        if head_ref.returncode != 0:
+            return True
         upstream = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             cwd=worktree_path, capture_output=True, text=True,

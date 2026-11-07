@@ -77,6 +77,12 @@ commands warn and direct the operator to verify it from the host.
 
 > **Entry point — spawn vs. spec dispatch:** `mship spawn` starts an ad-hoc task directly, but for **spec-driven** work you don't call it first. `mship spec dispatch <id>` (see **Work items & specs** below) is the entry point: it binds an approved spec and **spawns its own task**. Running `spawn` and then `spec dispatch` against the same spec double-creates tasks (#296). Rule of thumb: have an approved spec → `spec dispatch`; ad-hoc chore/bug → `spawn`.
 
+`mship close` checks passive dependency worktrees as well as affected repos.
+A clean detached checkout needs no `--force` when its HEAD is reachable from an
+`origin` remote-tracking ref. Uncommitted changes and detached local-only commits
+still block teardown; local branches or tags alone do not prove a commit was
+pushed. Attached branches without an upstream remain protected.
+
 ## Setup & admin
 
 ```bash

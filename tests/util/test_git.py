@@ -280,3 +280,28 @@ def test_has_unpushed_commits_true_when_origin_exists_but_no_upstream(tmp_path: 
     _run(["git", "checkout", "-b", "feat/never-pushed"], clone)  # no upstream tracking
     git = GitRunner()
     assert git.has_unpushed_commits(clone) is True
+
+
+def test_has_unpushed_commits_false_for_detached_head_reachable_from_origin(tmp_path: Path):
+    _repo, _tip = _repo_with_origin_ahead(tmp_path)
+    clone = tmp_path / "svc-clone"
+    _run(["git", "checkout", "--detach", "origin/main"], clone)
+
+    git = GitRunner()
+
+    assert git.has_unpushed_commits(clone) is False
+
+
+def test_has_unpushed_commits_true_for_detached_local_commit_despite_local_refs(tmp_path: Path):
+    _repo, _tip = _repo_with_origin_ahead(tmp_path)
+    clone = tmp_path / "svc-clone"
+    _run(["git", "checkout", "--detach", "origin/main"], clone)
+    (clone / "local.txt").write_text("local only")
+    _run(["git", "add", "-A"], clone)
+    _run(["git", "commit", "-m", "detached local commit"], clone)
+    _run(["git", "branch", "local-proof"], clone)
+    _run(["git", "tag", "local-proof"], clone)
+
+    git = GitRunner()
+
+    assert git.has_unpushed_commits(clone) is True
