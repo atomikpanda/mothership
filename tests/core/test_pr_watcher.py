@@ -775,16 +775,6 @@ def test_announce_dedupes_against_legacy_event_opened_marker():
     assert not any(c["kind"] == "note" and "PR opened:" in c["text"] for c in msgs.append_calls)
 
 
-def test_pr_watcher_stores_worktree_manager():
-    msgs = FakeMessageStore()
-    workitems = FakeWorkItemStore()
-    state = FakeStateManager({})
-    sentinel = object()
-    watcher = PrWatcher(
-        msgs, workitems, state, lambda u: "open", now_fn,
-        worktree_manager=sentinel,
-    )
-    assert watcher.worktree_manager is sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -792,24 +782,17 @@ def test_pr_watcher_stores_worktree_manager():
 # ---------------------------------------------------------------------------
 
 class FakeWorktreeManager:
-    """Records abort() and mutates the shared task dict so re-sweeps see the
-    teardown, mirroring the real WorktreeManager.abort contract."""
+    """Apply task closure so repeated sweeps see the updated active state."""
 
-    def __init__(self, tasks: dict, *, dirty: dict | None = None, boom: bool = False) -> None:
+    def __init__(self, tasks: dict, *, boom: bool = False) -> None:
         self._tasks = tasks
-        self._dirty = dirty
         self._boom = boom
-        self.abort_calls: list[tuple[str, bool]] = []
 
-    def abort(self, task_slug: str, force: bool = False) -> None:
-        self.abort_calls.append((task_slug, force))
+    def abort(self, task_slug: str) -> None:
         if task_slug not in self._tasks:
             return  # idempotent no-op (mirrors real abort)
-        if not force and self._dirty is not None:
-            from mship.core.worktree import WorktreeDirtyError
-            raise WorktreeDirtyError(task_slug, self._dirty)
-        if not force and self._boom:
-            raise RuntimeError("teardown kaboom")
+        if self._boom:
+            raise RuntimeError("close kaboom")
         self._tasks.pop(task_slug, None)
 
 
@@ -834,7 +817,7 @@ def _seed_dispatched_spec_and_workitem(tmp_path):
     return spec, wi, wstore
 
 
-def test_merge_auto_advances_spec_and_workitem_then_tears_down(tmp_path):
+def test_merge_auto_advances_spec_and_workitem_then_closes_task(tmp_path):
     from mship.core.spec_store import SpecStore
     from mship.core.workitem_store import WorkItemStore
     from mship.core.view.workitem_index import compute_phase, compute_attention
@@ -862,7 +845,6 @@ def test_merge_auto_advances_spec_and_workitem_then_tears_down(tmp_path):
     reread_item = WorkItemStore(tmp_path / ".mothership" / "workitems").get(wi.id)
     assert compute_phase(reread_item, reread_spec, []) == "done"
     assert compute_attention(reread_spec, [], []).needs_review is False
-    assert fwm.abort_calls == [("task-m", False)]
     assert "task-m" not in tasks
     assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
 
@@ -951,40 +933,73 @@ def test_merge_auto_close_noop_without_worktree_manager(tmp_path):
     assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"
 
 
-def test_merge_dirty_worktree_advances_then_posts_skip_note(tmp_path):
-    """ac4: when teardown is refused (dirty), the worktree is left intact, the
-    spec/phase still advances, and a note is posted telling the operator to
-    resolve then `mship close` / --force."""
+def test_merge_closes_task_but_preserves_detached_and_uncommitted_work(workspace_with_git):
+    import os
+    import subprocess
+    from unittest.mock import MagicMock
+
+    from mship.core.config import ConfigLoader
+    from mship.core.graph import DependencyGraph
+    from mship.core.log import LogManager
+    from mship.core.retained_worktrees import RetainedWorktreeStore
     from mship.core.spec_store import SpecStore
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from mship.core.worktree import WorktreeManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
 
-    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
-
-    msgs = FakeMessageStore()
-    url = "https://github.com/org/repo1/pull/1"
-    task = SimpleNamespace(
-        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
-        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    root = workspace_with_git
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(root)
+    config = ConfigLoader.load(root / "mothership.yaml")
+    wt = root / ".worktrees" / "task-m" / "shared"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(wt), "HEAD"],
+        cwd=root / "shared", check=True, capture_output=True,
     )
-    tasks = {"task-m": task}
-    state = FakeStateManager(tasks)
-    fwm = FakeWorktreeManager(tasks, dirty={"repo1": "uncommitted changes"})
-
+    (wt / "local.txt").write_text("detached local commit\n")
+    subprocess.run(["git", "add", "local.txt"], cwd=wt, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "local detached work"], cwd=wt,
+        check=True, capture_output=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=wt)
+    (wt / "draft.txt").write_text("still editing after merge\n")
+    url = "https://github.com/org/shared/pull/1"
+    task = Task(
+        slug="task-m", description="retain merged task", phase="review",
+        created_at=NOW, finished_at=NOW, branch="feat/task-m",
+        affected_repos=["shared"], pr_urls={"shared": url},
+        work_item_id=wi.id, spec_id=spec.id, worktrees={"shared": str(wt)},
+    )
+    state = StateManager(root / ".mothership")
+    state.save(WorkspaceState(tasks={task.slug: task}))
+    manager = WorktreeManager(
+        config, DependencyGraph(config), state, GitRunner(),
+        MagicMock(spec=ShellRunner), MagicMock(spec=LogManager),
+    )
+    msgs = FakeMessageStore()
     watcher = PrWatcher(
         msgs, wstore, state, lambda u: "merged", now_fn,
-        worktree_manager=fwm, workspace_root=tmp_path,
+        worktree_manager=manager, workspace_root=root,
     )
     watcher.check_once()
+    watcher.check_once()
 
-    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
-    assert "task-m" in tasks
+    assert SpecStore(root / "specs").find_by_id(spec.id).status == "implemented"
+    assert task.slug not in state.load().tasks
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=wt) == head
+    assert (wt / "local.txt").read_text() == "detached local commit\n"
+    assert (wt / "draft.txt").read_text() == "still editing after merge\n"
+    [(record, retained)] = RetainedWorktreeStore(state.state_dir).list_records()
+    assert retained == task
     notes = [c for c in msgs.append_calls if c["kind"] == "note"]
     assert len(notes) == 1
-    assert "uncommitted changes" in notes[0]["text"]
-    assert "mship close" in notes[0]["text"]
-
-    watcher.check_once()  # idempotent: does not double-post
-    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
-    assert len(notes) == 1
+    assert str(record) in notes[0]["text"]
 
 
 def test_merge_auto_close_is_idempotent_across_sweeps(tmp_path):
@@ -1003,7 +1018,6 @@ def test_merge_auto_close_is_idempotent_across_sweeps(tmp_path):
     watcher = PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
                         worktree_manager=fwm, workspace_root=tmp_path)
     watcher.check_once(); watcher.check_once(); watcher.check_once()
-    assert fwm.abort_calls == [("task-m", False)]
     assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
 
 
@@ -1028,7 +1042,7 @@ def test_merge_partial_multipr_does_not_advance_or_tear_down(tmp_path):
 
     PrWatcher(msgs, wstore, state, check_state, now_fn,
               worktree_manager=fwm, workspace_root=tmp_path).check_once()
-    assert fwm.abort_calls == []
+    assert "task-m" in tasks
     assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"
 
 
@@ -1068,5 +1082,5 @@ def test_merge_multirepo_all_merged_auto_closes_once(tmp_path):
     fwm = FakeWorktreeManager(tasks)
     PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
               worktree_manager=fwm, workspace_root=tmp_path).check_once()
-    assert fwm.abort_calls == [("task-m", False)]  # torn down once, not twice
+    assert "task-m" not in tasks
     assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"

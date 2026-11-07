@@ -69,8 +69,8 @@ def test_prune_removes_disk_orphan(prune_deps):
 
     mgr = PruneManager(config, state_mgr, git)
     orphans = mgr.scan()
-    count = mgr.prune(orphans)
-    assert count == 1
+    result = mgr.prune(orphans, writers_stopped=True)
+    assert result.count == 1
     assert not wt_path.exists()
 
 
@@ -90,11 +90,13 @@ def test_prune_removes_state_orphan(prune_deps):
 
     mgr = PruneManager(config, state_mgr, git)
     orphans = mgr.scan()
-    count = mgr.prune(orphans)
-    assert count >= 1
+    result = mgr.prune(orphans, writers_stopped=True)
+    assert result.count >= 1
     state = state_mgr.load()
     assert "ghost" not in state.tasks
     assert state.tasks == {}
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    assert RetainedWorktreeStore(state_mgr.state_dir).list_records()[0][1] == task
 
 
 def test_prune_retains_linked_task_metadata_before_last_worktree_removal(prune_deps):
@@ -116,7 +118,7 @@ def test_prune_retains_linked_task_metadata_before_last_worktree_removal(prune_d
     state_mgr.save(WorkspaceState(tasks={task.slug: task}))
 
     manager = PruneManager(config, state_mgr, git)
-    manager.prune(manager.scan())
+    manager.prune(manager.scan(), writers_stopped=True)
 
     summary = build_workitem_index([store.get(item.id)], {}, state_mgr.load().tasks, {})[0]
     assert summary.affected_repos == ["shared"]
@@ -145,7 +147,7 @@ def test_prune_retains_metadata_for_forward_only_workitem_link(prune_deps):
     state_mgr.save(WorkspaceState(tasks={task.slug: task}))
 
     manager = PruneManager(config, state_mgr, git)
-    manager.prune(manager.scan())
+    manager.prune(manager.scan(), writers_stopped=True)
 
     assert task.slug not in state_mgr.load().tasks
     persisted = store.get(item.id)
@@ -207,7 +209,7 @@ def test_prune_refuses_metadata_changed_after_retention(prune_deps, monkeypatch)
     )
 
     with pytest.raises(TaskMetadataRetentionConflictError, match="Retry"):
-        manager.prune(manager.scan())
+        manager.prune(manager.scan(), writers_stopped=True)
 
     live_task = state_mgr.load().tasks["ghost"]
     assert live_task.affected_repos == ["shared", "api-gateway"]
@@ -238,8 +240,8 @@ def test_prune_partial_missing_keeps_task(prune_deps):
 
     mgr = PruneManager(config, state_mgr, git)
     orphans = mgr.scan()
-    count = mgr.prune(orphans)
-    assert count >= 1
+    result = mgr.prune(orphans, writers_stopped=True)
+    assert result.count >= 1
 
     state = state_mgr.load()
     # Task should still exist (auth-service worktree is still valid)
@@ -247,6 +249,8 @@ def test_prune_partial_missing_keeps_task(prune_deps):
     # But shared worktree entry should be removed
     assert "shared" not in state.tasks["partial"].worktrees
     assert "auth-service" in state.tasks["partial"].worktrees
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    assert RetainedWorktreeStore(state_mgr.state_dir).list_records()[0][1] == task
 
 
 def test_prune_detects_hub_layout_orphan(tmp_path):
@@ -281,3 +285,124 @@ def test_prune_detects_hub_layout_orphan(tmp_path):
     orphans = pm.scan()
     paths = {str(o.path.resolve()) for o in orphans}
     assert str(orphan.resolve()) in paths
+
+
+def test_prune_requires_stopped_writers_before_mutation(prune_deps):
+    from mship.core.prune import WritersNotStoppedError
+
+    config, state_mgr, git, workspace = prune_deps
+    wt_path = workspace / "shared" / ".worktrees" / "feat" / "orphan"
+    git.worktree_add(
+        repo_path=workspace / "shared",
+        worktree_path=wt_path,
+        branch="feat/orphan",
+    )
+    manager = PruneManager(config, state_mgr, git)
+
+    with pytest.raises(WritersNotStoppedError, match="writers_stopped=True"):
+        manager.prune(manager.scan())
+
+    assert wt_path.exists()
+
+
+def test_prune_reports_git_refusal_without_removing_worktree(prune_deps):
+    config, state_mgr, git, workspace = prune_deps
+    wt_path = workspace / "shared" / ".worktrees" / "feat" / "dirty"
+    git.worktree_add(
+        repo_path=workspace / "shared",
+        worktree_path=wt_path,
+        branch="feat/dirty",
+    )
+    (wt_path / "untracked.txt").write_text("do not remove")
+    manager = PruneManager(config, state_mgr, git)
+
+    result = manager.prune(manager.scan(), writers_stopped=True)
+
+    assert result.count == 0
+    assert len(result.refusals) == 1
+    assert result.refusals[0].path == wt_path
+    assert wt_path.exists()
+
+
+def test_scan_retained_worktree_once_and_preserves_record(prune_deps):
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+
+    config, state_mgr, git, workspace = prune_deps
+    wt_path = workspace / "shared" / ".worktrees" / "feat" / "retained"
+    git.worktree_add(
+        repo_path=workspace / "shared",
+        worktree_path=wt_path,
+        branch="feat/retained",
+    )
+    retained_task = Task(
+        slug="retained",
+        description="Retained task",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/retained",
+        worktrees={"shared": wt_path},
+    )
+    record = RetainedWorktreeStore(state_mgr.state_dir).retain(retained_task)
+    manager = PruneManager(config, state_mgr, git)
+
+    candidates = manager.scan()
+
+    matching = [candidate for candidate in candidates if candidate.path == wt_path]
+    assert len(matching) == 1
+    assert matching[0].reason == "retained"
+    assert matching[0].retained_record == record
+
+    result = manager.prune(candidates, writers_stopped=True)
+
+    assert result.count == 1
+    assert not wt_path.exists()
+    assert record.exists()
+    assert result.recovery_refs
+
+
+def test_scan_skips_retained_path_still_active(prune_deps):
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+
+    config, state_mgr, git, workspace = prune_deps
+    wt_path = workspace / "shared" / ".worktrees" / "feat" / "active"
+    git.worktree_add(
+        repo_path=workspace / "shared",
+        worktree_path=wt_path,
+        branch="feat/active",
+    )
+    task = Task(
+        slug="active",
+        description="Active task",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/active",
+        worktrees={"shared": wt_path},
+    )
+    RetainedWorktreeStore(state_mgr.state_dir).retain(task)
+    state_mgr.save(WorkspaceState(tasks={task.slug: task}))
+
+    candidates = PruneManager(config, state_mgr, git).scan()
+
+    assert all(candidate.path != wt_path for candidate in candidates)
+
+
+def test_prune_never_recursively_deletes_hub_contents(prune_deps):
+    config, state_mgr, git, workspace = prune_deps
+    wt_path = workspace / ".worktrees" / "stale" / "shared"
+    git.worktree_add(
+        repo_path=workspace / "shared",
+        worktree_path=wt_path,
+        branch="feat/stale-hub",
+    )
+    hub = wt_path.parent
+    preserved = hub / "do-not-delete.txt"
+    preserved.write_text("preserve me")
+    manager = PruneManager(config, state_mgr, git)
+
+    result = manager.prune(manager.scan(), writers_stopped=True)
+
+    assert result.count == 1
+    assert not wt_path.exists()
+    assert preserved.read_text() == "preserve me"

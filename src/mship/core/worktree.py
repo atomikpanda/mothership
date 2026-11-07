@@ -1,4 +1,3 @@
-import logging
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -10,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
+from mship.core.retained_worktrees import RetainedWorktreeStore
 from mship.core.reconcile.fetch import workspace_default_branch_from_config
 from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
 from mship.core.workspace_marker import write_marker
@@ -18,32 +18,12 @@ from mship.util.shell import ShellRunner
 from mship.util.slug import slugify
 
 
-logger = logging.getLogger(__name__)
-
-
 class BaseBranchNotFoundError(ValueError):
     """`spawn --base <branch>` was given a branch that doesn't exist in a target repo.
 
     A ValueError subclass so callers that already handle spawn ValueErrors keep
     working; the CLI catches this type specifically to print a clean message.
     """
-
-
-class WorktreeDirtyError(RuntimeError):
-    """Raised by WorktreeManager.abort when a repo's worktree has uncommitted
-    or unpushed changes and force was not requested. Carries the offending
-    repos so callers can render an actionable message and never lose work."""
-
-    def __init__(self, task_slug: str, dirty: dict[str, str]) -> None:
-        self.task_slug = task_slug
-        self.dirty = (
-            dirty  # repo_name -> reason ("uncommitted changes" | "unpushed commits")
-        )
-        details = "; ".join(f"{repo}: {reason}" for repo, reason in dirty.items())
-        super().__init__(
-            f"Refusing to tear down '{task_slug}': {details}. "
-            f"Resolve them, or pass --force to delete the worktree anyway."
-        )
 
 
 @dataclass
@@ -552,7 +532,12 @@ class WorktreeManager:
                 )
 
         hub = workspace_root / ".worktrees" / slug
-        hub.mkdir(parents=True, exist_ok=True)
+        if hub.exists() or hub.is_symlink():
+            raise ValueError(
+                f"Worktree hub already exists for task '{slug}' at {hub}; "
+                "refusing to overwrite retained work."
+            )
+        hub.mkdir(parents=True)
 
         # Workspace-root .gitignore gets mship's runtime directories if the root
         # is a git repo. `.mothership` holds machine-local state — task state,
@@ -783,42 +768,17 @@ class WorktreeManager:
 
         return SpawnResult(task=task, setup_warnings=setup_warnings)
 
-    def _dirty_worktrees(self, task) -> dict[str, str]:
-        """Return {repo_name: reason} for each affected repo's worktree with
-        uncommitted changes OR unpushed commits. Empty dict = safe to tear down.
-        Skips git_root repos (their worktree is a subdir of the parent's) and
-        already-gone paths (nothing to lose)."""
-        dirty: dict[str, str] = {}
-        for repo_name, wt_path in task.worktrees.items():
-            if self._config.repos[repo_name].git_root is not None:
-                continue
-            p = Path(wt_path)
-            if not p.exists():
-                continue
-            if self._git.has_uncommitted_changes(p):
-                dirty[repo_name] = "uncommitted changes"
-            elif self._git.has_unpushed_commits(p):
-                dirty[repo_name] = "unpushed commits"
-        return dirty
-
-    def abort(self, task_slug: str, force: bool = False) -> None:
+    def abort(self, task_slug: str) -> Path | None:
+        """Retain a task's recovery record, then remove only its active state."""
         state = self._state_manager.load()
         task = state.tasks.get(task_slug)
         if task is None:
-            return  # idempotent: already torn down
-
-        # Universal safety guard: never delete a worktree with uncommitted or
-        # unpushed changes unless force. Pre-pass over ALL worktrees before
-        # removing any, so a dirty repo refuses the whole task's teardown.
-        if not force:
-            dirty = self._dirty_worktrees(task)
-            if dirty:
-                raise WorktreeDirtyError(task_slug, dirty)
+            return None
 
         # App-run rows carry private target bindings and may describe a live
-        # owner.  The close facade must reconcile and remove them first; this
+        # owner. The close facade must reconcile and remove them first; this
         # lower-level primitive never guesses a host or process from durable
-        # metadata after worktrees have begun disappearing.
+        # metadata.
         with self._state_manager.workspace_store.read() as transaction:
             has_app_runs = bool(
                 transaction.app_runs.list_for_task(
@@ -833,58 +793,7 @@ class WorktreeManager:
                 "recorded app runs require close cleanup before worktree teardown",
             )
 
-        removal_failed = False
-        for repo_name, wt_path in task.worktrees.items():
-            repo_config = self._config.repos[repo_name]
-
-            # Skip git_root repos — their "worktree" is just a subdirectory
-            # of the parent's worktree and will disappear with it
-            if repo_config.git_root is not None:
-                continue
-
-            try:
-                self._git.worktree_remove(
-                    repo_path=repo_config.path,
-                    worktree_path=Path(wt_path),
-                )
-            except Exception:
-                # The silent shutil.rmtree(ignore_errors=True) data-loss fallback
-                # was REMOVED: never blow away a directory git refused to remove.
-                # Leave it on disk for `mship prune` to reap.
-                removal_failed = True
-                logger.warning(
-                    "worktree remove failed for %s (%s); left intact",
-                    repo_name,
-                    wt_path,
-                )
-            try:
-                self._git.branch_delete(
-                    repo_path=repo_config.path,
-                    branch=task.branch,
-                )
-            except Exception:
-                pass
-
-        # Remove the hub directory for this task, but ONLY when every worktree
-        # was cleanly removed — otherwise nuking the hub would delete a worktree
-        # git just refused to remove. Inferred from the first worktree's parent,
-        # which is `<workspace>/.worktrees/<slug>/`. Legacy per-repo-layout tasks
-        # have a different parent shape — leave those alone.
-        if not removal_failed:
-            try:
-                sample_wt = None
-                for name, wt in task.worktrees.items():
-                    if self._config.repos[name].git_root is None:
-                        sample_wt = wt
-                        break
-                if sample_wt is not None:
-                    hub = Path(sample_wt).parent
-                    # Sanity: only remove if it looks like a hub (parent ends in .worktrees)
-                    if hub.name == task_slug and hub.parent.name == ".worktrees":
-                        if hub.exists():
-                            shutil.rmtree(hub, ignore_errors=True)
-            except Exception:
-                pass
+        record_path = RetainedWorktreeStore(self._state_manager.state_dir).retain(task)
 
         from mship.core.persistence.lifecycle_repository import LifecycleRepository
 
@@ -893,6 +802,7 @@ class WorktreeManager:
             now=datetime.now(timezone.utc),
             expected_task=task,
         )
+        return record_path
 
     def list_worktrees(self) -> dict[str, dict[str, Path]]:
         state = self._state_manager.load()

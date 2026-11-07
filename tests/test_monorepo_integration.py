@@ -113,19 +113,25 @@ def test_monorepo_spawn_shares_worktree(monorepo_workspace):
     assert web_wt.exists()
 
 
-def test_monorepo_close_cleans_up(monorepo_workspace):
+def test_monorepo_close_retains_root_and_subdirectory_work(monorepo_workspace):
     tmp_path, mock_shell = monorepo_workspace
 
     runner.invoke(app, ["spawn", "--hotfix", "cleanup test"])
     mgr = StateManager(tmp_path / ".mothership")
     state = mgr.load()
     root_wt = Path(state.tasks["cleanup-test"].worktrees["tailrd"])
+    web_wt = Path(state.tasks["cleanup-test"].worktrees["web"])
+    (web_wt / "draft.txt").write_text("subdirectory work in progress\n")
 
     result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", "cleanup-test"])
     assert result.exit_code == 0
 
-    # The parent worktree is removed
-    assert not root_wt.exists()
+    assert root_wt.is_dir()
+    assert (web_wt / "draft.txt").read_text() == "subdirectory work in progress\n"
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    [(record, retained)] = RetainedWorktreeStore(mgr.state_dir).list_records()
+    assert retained.worktrees == state.tasks["cleanup-test"].worktrees
+    assert record.is_file()
 
     state = mgr.load()
     assert "cleanup-test" not in state.tasks

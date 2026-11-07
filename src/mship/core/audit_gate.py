@@ -92,10 +92,14 @@ def compute_finish_audit_scope(task, config, graph, pr_mgr) -> "frozenset[str]":
 
 
 def collect_known_worktree_paths(state_manager) -> "frozenset[Path]":
-    """Return a resolved, absolute set of every worktree path in every task."""
+    """Return managed worktree paths, including recoverable closed tasks."""
     state = state_manager.load()
     paths: set[Path] = set()
     for task in state.tasks.values():
         for raw in task.worktrees.values():
             paths.add(Path(raw).resolve())
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+
+    for _, task in RetainedWorktreeStore(state_manager.state_dir).list_records():
+        paths.update(Path(raw).resolve() for raw in task.worktrees.values())
     return frozenset(paths)

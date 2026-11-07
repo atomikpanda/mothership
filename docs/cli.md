@@ -84,6 +84,41 @@ commands warn and direct the operator to verify it from the host.
 
 > **Entry point — spawn vs. spec dispatch:** `mship spawn` starts an ad-hoc task directly, but for **spec-driven** work you don't call it first. `mship spec dispatch <id>` (see **Work items & specs** below) is the entry point: it binds an approved spec and **spawns its own task**. Running `spawn` and then `spec dispatch` against the same spec double-creates tasks (#296). Rule of thumb: have an approved spec → `spec dispatch`; ad-hoc chore/bug → `spawn`.
 
+`mship close` closes task state without deleting worktrees, branches, or hub files.
+This also applies to passive detached dependencies, merge auto-close, `--abandon`,
+and `--force`; force bypasses lifecycle checks, not data retention. Before active
+state is removed, a private, durable Task snapshot is saved under
+`.mothership/retained-worktrees/`. If retention fails, active state remains.
+`mship worktrees` lists active tasks and recovery records, including original paths.
+Retained worktrees remain managed for audit purposes and do not block new tasks.
+
+Cleanup is separate: inspect `mship prune`, stop all agents, editors and Git
+processes using the listed paths, then run `mship prune --force --writers-stopped`.
+Here `--force` executes cleanup; it never passes `--force` to Git. Cleanup refuses
+tracked changes, untracked or ignored files, unregistered paths, and uncertain Git
+state. Git refusal leaves the directory intact; there is no recursive deletion
+fallback. Unexpected hub files and branches remain. Review and preserve any
+reported files yourself before retrying.
+
+Before deleting a clean worktree, its HEAD is pinned in the owning repository
+under `refs/mship/recovery/<SHA-256-of-resolved-path>/<commit>`. Cleanup reports the
+ref. To recover committed content, run in that repository:
+
+```bash
+git for-each-ref --format='%(refname) %(objectname)' refs/mship/recovery/
+git worktree add --detach /new/recovery/path <reported-recovery-ref>
+```
+
+Recovery records and refs remain after cleanup. Refs protect committed content,
+not uncommitted files or commits created after the cleanup snapshot. The
+`--writers-stopped` flag is an operator acknowledgement, not an exclusive lock:
+if writers cannot be stopped, leave the worktree retained.
+
+Missing worktree paths are also snapshotted before stale task mappings are removed.
+Cleanup does not broadly prune Git registrations: a missing path may be offline
+or moved rather than disposable. After locating a moved worktree, use
+`git worktree repair /moved/path` from its owning repository to repair registration.
+
 ## Setup & admin
 
 ```bash
@@ -199,7 +234,7 @@ console exchanges that for a short-lived cookie and cleans the URL. `GET
 
 ```bash
 mship sync [--repos r]                              # fast-forward behind-only clean repos
-mship prune [--force]                               # remove orphaned worktrees
+mship prune [--force --writers-stopped]              # inspect; explicitly clean quiescent worktrees
 mship export [--redacted] [--format dir|zip]        # bundle a task's journal/plan/spec/state/diffs (opt-in secret redaction)
 mship state status                                  # read-only storage backend/revision inspection
 mship state migrate                                 # validated legacy cutover or known SQLite schema upgrade
