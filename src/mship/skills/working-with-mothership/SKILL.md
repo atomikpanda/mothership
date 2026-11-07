@@ -415,8 +415,8 @@ No soft/advisory edges in v1 — for "informed by task-a" relationships, use `ms
 
 For small post-finish changes — reviewer comments, CI fixes, doc tweaks — use `mship commit <msg>` instead of spawning a new task:
 
-1. Stage the fix with `git add <files>` in the worktree.
-2. Run `mship commit "<commit message>"`. This iterates your task's `affected_repos`, commits staged changes in every worktree that has them, pushes to the existing PR (since the task is finished), and appends a journal entry per repo.
+1. Stage an uncommitted fix with `git add <files>` in the worktree. If you or a subagent already committed it, leave the index clean.
+2. Run `mship commit "<commit message>"`. This iterates your task's `affected_repos`, commits staged changes where present, and pushes to each recorded PR. A clean index with commits ahead of upstream triggers a push only, without creating another commit or using the supplied message. Journals distinguish `committed` from `pushed`; repos with nothing to push are skipped successfully. Missing upstreams or failed pushes remain errors: resolve the cause and retry.
 
 For coordinated multi-repo fixes: stage in each worktree you need, then one `mship commit` handles all of them with the same commit message.
 
@@ -626,7 +626,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
 - **Don't ship a PR with a placeholder body.** If you didn't pass `--body-file`/`--body` to `mship finish`, the PR body is just the task description — not a Summary + Test plan. Follow up with `gh pr edit <url> --body-file <path>` before declaring done. Reviewers (human or agent) need to know what changed and how it was verified.
 - **Don't paste test output into `mship journal`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
-- **Don't keep editing a worktree after `mship finish` without using `mship commit`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). For small post-finish changes (reviewer feedback, CI fixes, doc tweaks), stage your changes and run `mship commit "<msg>"` — it commits and pushes to the existing PR across all affected repos. For larger changes, open a new task with `mship spawn`.
+- **Don't keep editing a worktree after `mship finish` without using `mship commit`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). For small post-finish changes (reviewer feedback, CI fixes, doc tweaks), run `mship commit "<msg>"` after staging or committing the fix — it commits staged changes and pushes new or existing commits to recorded PRs across affected repos. For larger changes, open a new task with `mship spawn`.
 - **Don't manually edit `.mothership/mothership.db` or legacy state files** — use the CLI, including `mship state status`, `migrate`, and `export`.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
 - **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.

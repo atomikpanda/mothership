@@ -742,7 +742,11 @@ if child_pid == 0:
 os.close(write_fd)
 os.read(read_fd, 5)
 os.close(read_fd)
-Path(sys.argv[1]).write_text(str(child_pid))
+ready_path = Path(sys.argv[1])
+pending_path = ready_path.with_suffix(".pending")
+pending_path.write_text(str(child_pid))
+# Existence signals readiness, so publish only after the PID is fully written.
+pending_path.replace(ready_path)
 while True:
     signal.pause()
 """
