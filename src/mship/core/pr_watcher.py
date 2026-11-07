@@ -135,12 +135,11 @@ class PrWatcher:
         self.config = config
         self.workspace_root = workspace_root
         self.shell = shell
-        # When injected (in `serve`), a PR merge auto-advances the bound spec +
-        # WorkItem and tears the worktree down. Gated on presence — like `config`
-        # gates lifecycle hooks — so watchers built without it are unchanged.
+        # When injected (in `serve`), a PR merge advances the spec/WorkItem
+        # and closes task state while retaining worktrees for recovery.
         self.worktree_manager = worktree_manager
         # Per-sweep set of task slugs already auto-closed this sweep, so a task
-        # whose N repos all merged advances + tears down ONCE, not once per repo.
+        # whose N repos all merged advances and closes ONCE, not once per repo.
         self._auto_closed_slugs: set[str] = set()
 
     def check_once(self) -> None:
@@ -210,8 +209,8 @@ class PrWatcher:
         self, slug: str, task: Any, repo: str, url: str, st: str,
     ) -> None:
         """On a clean full merge, advance the bound spec (dispatched->implemented)
-        and its WorkItem (->done / needs_review cleared), then tear the worktree
-        down — the zero-manual-`mship close` path. Non-interactive and fail-open:
+        and its WorkItem (->done / needs_review cleared), retaining worktrees
+        for recovery. Non-interactive and fail-open:
         every failure is logged and swallowed so the sweep never crashes. Only
         active when a worktree_manager is injected (i.e. inside `mship serve`)."""
         if st != "merged":
@@ -223,8 +222,7 @@ class PrWatcher:
         if slug in self._auto_closed_slugs:
             return
 
-        # Advance phase/spec FIRST, so it stands even if teardown is later
-        # skipped for a dirty worktree.
+        # Advance delivery state independently of retained worktree cleanup.
         try:
             from mship.core.spec_store import SPECS_DIRNAME
             from mship.core.spec_lifecycle import advance_spec_on_close
@@ -234,7 +232,7 @@ class PrWatcher:
             merged_count = sum(1 for s in states if s == "merged")
             closed_count = sum(1 for s in states if s == "closed")
             open_count = sum(1 for s in states if s == "open")
-            # Only advance/tear down when the WHOLE task is cleanly merged
+            # Only advance/close when the WHOLE task is cleanly merged
             # (mirrors `mship close`'s routing). A partially-merged multi-PR
             # task waits for its remaining PRs — don't mark it done so a later
             # sweep re-evaluates once its remaining PRs merge.
@@ -272,47 +270,40 @@ class PrWatcher:
             log.exception("pr_watcher: merge auto-advance failed (task=%s)", slug)
             return
 
-        # Guarded teardown. A dirty/unpushed worktree raises WorktreeDirtyError
-        # -> leave the worktree, post a one-time skip-note (the spec/phase advance
-        # already stands). Any other failure just logs (fail-open).
+        # Closure never deletes worktrees, even if an agent is still writing.
         try:
-            self.worktree_manager.abort(slug, force=False)
-        except Exception as exc:
-            from mship.core.worktree import WorktreeDirtyError
-            if isinstance(exc, WorktreeDirtyError):
-                try:
-                    self._post_teardown_skipped_note(slug, task, url, exc)
-                except Exception:
-                    log.exception("pr_watcher: teardown-skip note failed (task=%s)", slug)
-            else:
-                log.exception("pr_watcher: merge teardown failed (task=%s)", slug)
+            recovery_record = self.worktree_manager.abort(slug)
+        except Exception:
+            log.exception("pr_watcher: merge close failed (task=%s)", slug)
             return
+        if recovery_record is not None:
+            try:
+                self._post_retained_note(slug, task, url, recovery_record)
+            except Exception:
+                log.exception("pr_watcher: retained-worktree note failed (task=%s)", slug)
 
-        # sdd dispatch records are per-task scratch — remove with the worktree
-        # (spec mship-dispatch-v2 ac6). Best-effort: cleanup never blocks close.
+        # Dispatch records are transient; the full Task recovery snapshot
+        # has already been persisted before active state removal.
         try:
             from mship.core.sdd_store import SddStore
             SddStore(self.workspace_root / ".mothership").remove_task(slug)
         except Exception:
             log.exception("pr_watcher: sdd cleanup failed (task=%s)", slug)
 
-    def _post_teardown_skipped_note(
-        self, slug: str, task: Any, url: str, exc: Any,
+    def _post_retained_note(
+        self, slug: str, task: Any, url: str, recovery_record: Path,
     ) -> None:
-        """Post a one-time NOTE (kind='note', not 'event' — informational, no
-        nag) when a merged task's worktree was left intact because it had
-        uncommitted/unpushed changes. Deduped across sweeps by a sentinel line."""
+        """Post a deduplicated recovery note without waking the agent."""
         now = self.now_fn()
         tid, _wi = self._resolve_thread(slug, task, url, now)
         thread = self.msgs.get(tid)
-        sentinel = f"Worktree for {slug} left intact"
+        sentinel = f"Worktrees for {slug} retained"
         if thread is not None and any(sentinel in m.text for m in thread.messages):
             return
-        details = "; ".join(f"{repo}: {reason}" for repo, reason in exc.dirty.items())
         text = (
-            f"⚠️ {sentinel}: {details}. "
-            f"Resolve (commit/push), then `mship close` "
-            f"(or `mship close --force` to discard)."
+            f"{sentinel}. Recovery record: {recovery_record}. "
+            "Inspect paths with `mship worktrees` or `mship prune`. "
+            "Cleanup is separate and requires stopping all writers first."
         )
         self.msgs.append(tid, "agent", text, now, kind="note")
 

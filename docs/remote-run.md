@@ -737,13 +737,19 @@ unconditional force-delete. `cleanup_recorded_run_refs` exposes this source-ref
 cleanup independently of task teardown.
 
 `record_remote_worktree_receipt(state_dir, *, task, host, repo, sha)` also records
-clean profile and ordinary remote-command materialization. Task close first
-reconciles the exact session owners, then requests authenticated remote worktree
-cleanup, and only releases scratch-ref leases for hosts whose teardown succeeded.
-The host takes the task lock and verifies the registered worktree, expected
-branch or detached ref, recorded HEAD, and absence of non-ignored changes.
-Ignored generated build output may be removed; newer source, user changes,
-symlinked targets, busy owners, and uncertain outcomes retain cleanup receipts.
+clean profile and ordinary remote-command materialization. Task close reconciles
+the exact session owners but retains remote worktrees, cleanup receipts and
+scratch-ref leases; it does not request remote deletion.
+
+The explicit `cleanup_remote_task_worktrees` API remains available independently
+of close. Its caller must stop external writers first: the host's task lock only
+excludes Mothership executions. The host verifies the registered worktree,
+expected branch or detached ref, and recorded HEAD, and refuses tracked,
+untracked or ignored content. It pins HEAD under `refs/mship/recovery/` before
+non-forced Git removal. Newer source, user changes, symlinked targets, busy owners
+and uncertain outcomes retain cleanup receipts. Local `mship prune` does not
+remove remote materializations. Remote cleanup and leased scratch-ref cleanup
+remain explicit operations on the recorded host, never automatic close effects.
 
 Configured roles alone never authorize ref or worktree deletion: no recorded
 delivery means no remote cleanup. Changed or unavailable host identities retain

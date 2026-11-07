@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mship.util.git import GitRunner
+from mship.util.git import GitRunner, WorktreeRemovalRefused
 
 
 @pytest.fixture
@@ -30,27 +30,126 @@ def test_worktree_add(git_repo: Path):
     assert (wt_path / ".git").exists()
 
 
-def test_worktree_remove(git_repo: Path):
+def test_worktree_remove_pins_head(git_repo: Path):
     runner = GitRunner()
     wt_path = git_repo / ".worktrees" / "feat" / "test-branch"
     runner.worktree_add(repo_path=git_repo, worktree_path=wt_path, branch="feat/test-branch")
-    runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
+
+    recovery_ref = runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
+
     assert not wt_path.exists()
-
-
-def test_branch_delete(git_repo: Path):
-    runner = GitRunner()
-    wt_path = git_repo / ".worktrees" / "feat" / "test-branch"
-    runner.worktree_add(repo_path=git_repo, worktree_path=wt_path, branch="feat/test-branch")
-    runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
-    runner.branch_delete(repo_path=git_repo, branch="feat/test-branch")
-    result = subprocess.run(
-        ["git", "branch", "--list", "feat/test-branch"],
+    pinned = subprocess.run(
+        ["git", "rev-parse", "--verify", recovery_ref],
         cwd=git_repo,
+        check=True,
         capture_output=True,
         text=True,
+    ).stdout.strip()
+    assert pinned
+    branch = subprocess.run(
+        ["git", "branch", "--list", "feat/test-branch"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "feat/test-branch"
+
+
+def test_worktree_remove_refuses_dirty_content(git_repo: Path):
+    runner = GitRunner()
+    (git_repo / "tracked.txt").write_text("before")
+    _run(["git", "add", "tracked.txt"], git_repo)
+    _run(["git", "commit", "-m", "tracked"], git_repo)
+    wt_path = git_repo / ".worktrees" / "feat" / "dirty"
+    runner.worktree_add(repo_path=git_repo, worktree_path=wt_path, branch="feat/dirty")
+    (wt_path / "tracked.txt").write_text("after")
+    (wt_path / "staged.txt").write_text("staged")
+    _run(["git", "add", "staged.txt"], wt_path)
+    (wt_path / "untracked.txt").write_text("untracked")
+
+    with pytest.raises(WorktreeRemovalRefused, match="tracked, untracked, or ignored"):
+        runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
+
+    assert (wt_path / "tracked.txt").read_text() == "after"
+
+
+def test_worktree_remove_refuses_ignored_content(git_repo: Path):
+    runner = GitRunner()
+    (git_repo / ".gitignore").write_text("*.ignored\n")
+    _run(["git", "add", ".gitignore"], git_repo)
+    _run(["git", "commit", "-m", "ignore"], git_repo)
+    wt_path = git_repo / ".worktrees" / "feat" / "ignored"
+    runner.worktree_add(repo_path=git_repo, worktree_path=wt_path, branch="feat/ignored")
+    (wt_path / "cache.ignored").write_text("do not remove")
+
+    with pytest.raises(WorktreeRemovalRefused, match="tracked, untracked, or ignored"):
+        runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
+
+    assert (wt_path / "cache.ignored").read_text() == "do not remove"
+
+
+def test_worktree_remove_pins_detached_local_commit_through_gc(git_repo: Path, tmp_path: Path):
+    runner = GitRunner()
+    wt_path = tmp_path / "detached"
+    runner.worktree_add_detached(repo_path=git_repo, worktree_path=wt_path, ref="HEAD")
+    (wt_path / "detached.txt").write_text("preserve")
+    _run(["git", "add", "detached.txt"], wt_path)
+    _run(["git", "commit", "-m", "detached"], wt_path)
+    detached_head = _rev(wt_path)
+
+    recovery_ref = runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
+    _run(["git", "gc", "--prune=now"], git_repo)
+
+    assert not wt_path.exists()
+    assert _rev(git_repo, recovery_ref) == detached_head
+    subprocess.run(
+        ["git", "cat-file", "-e", f"{detached_head}^{{commit}}"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
     )
-    assert result.stdout.strip() == ""
+
+
+def test_worktree_remove_error_preserves_worktree(git_repo: Path):
+    runner = GitRunner()
+    (git_repo / "preserved.txt").write_text("preserved")
+    _run(["git", "add", "preserved.txt"], git_repo)
+    _run(["git", "commit", "-m", "preserved"], git_repo)
+    wt_path = git_repo / ".worktrees" / "feat" / "error"
+    runner.worktree_add(repo_path=git_repo, worktree_path=wt_path, branch="feat/error")
+    subprocess.run(
+        ["git", "worktree", "lock", str(wt_path)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(WorktreeRemovalRefused, match="locked"):
+        runner.worktree_remove(repo_path=git_repo, worktree_path=wt_path)
+
+    assert (wt_path / "preserved.txt").read_text() == "preserved"
+
+
+def test_worktree_remove_refuses_arbitrary_directory(git_repo: Path, tmp_path: Path):
+    runner = GitRunner()
+    arbitrary = tmp_path / "not-a-worktree"
+    arbitrary.mkdir()
+    (arbitrary / "keep.txt").write_text("keep")
+
+    with pytest.raises(WorktreeRemovalRefused, match="unregistered"):
+        runner.worktree_remove(repo_path=git_repo, worktree_path=arbitrary)
+
+    assert (arbitrary / "keep.txt").read_text() == "keep"
+
+
+def test_worktree_remove_refuses_canonical_worktree(git_repo: Path):
+    runner = GitRunner()
+
+    with pytest.raises(WorktreeRemovalRefused, match="canonical"):
+        runner.worktree_remove(repo_path=git_repo, worktree_path=git_repo)
+
+    assert (git_repo / ".git").is_dir()
 
 
 def test_is_ignored_false(git_repo: Path):
@@ -246,37 +345,3 @@ def test_ref_exists_true_for_remote_tracking_ref(tmp_path):
     assert git.ref_exists(repo, "origin/does-not-exist") is False
 
 
-# ---------------------------------------------------------------------------
-# has_unpushed_commits — teardown guard (spec auto-advance-on-merge)
-# ---------------------------------------------------------------------------
-
-def test_has_unpushed_commits_false_when_no_remote(git_repo: Path):
-    # A repo with no `origin` has nothing to push to; teardown must not be blocked.
-    git = GitRunner()
-    assert git.has_unpushed_commits(git_repo) is False
-
-
-def test_has_unpushed_commits_false_when_fully_pushed(tmp_path: Path):
-    # `_repo_with_origin_ahead` leaves `clone` at origin/main (nothing ahead).
-    _repo, _tip = _repo_with_origin_ahead(tmp_path)
-    clone = tmp_path / "svc-clone"
-    git = GitRunner()
-    assert git.has_unpushed_commits(clone) is False
-
-
-def test_has_unpushed_commits_true_when_local_ahead_of_upstream(tmp_path: Path):
-    _repo, _tip = _repo_with_origin_ahead(tmp_path)
-    clone = tmp_path / "svc-clone"
-    (clone / "c.txt").write_text("3")
-    _run(["git", "add", "-A"], clone)
-    _run(["git", "commit", "-m", "c3 (unpushed)"], clone)
-    git = GitRunner()
-    assert git.has_unpushed_commits(clone) is True
-
-
-def test_has_unpushed_commits_true_when_origin_exists_but_no_upstream(tmp_path: Path):
-    _repo, _tip = _repo_with_origin_ahead(tmp_path)
-    clone = tmp_path / "svc-clone"
-    _run(["git", "checkout", "-b", "feat/never-pushed"], clone)  # no upstream tracking
-    git = GitRunner()
-    assert git.has_unpushed_commits(clone) is True

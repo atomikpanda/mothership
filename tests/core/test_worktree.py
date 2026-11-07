@@ -125,21 +125,34 @@ def test_spawn_custom_branch_pattern(workspace_with_git: Path):
     assert task.branch == "mship/custom-branch"
 
 
-def test_abort_removes_worktrees(worktree_deps):
+def test_abort_retains_worktrees_branch_and_returns_recovery_record(worktree_deps):
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("to abort", repos=["shared"], workspace_root=workspace)
-    state = state_mgr.load()
-    wt_path = state.tasks["to-abort"].worktrees["shared"]
+    task = state_mgr.load().tasks["to-abort"]
+    wt_path = Path(task.worktrees["shared"])
 
-    mgr.abort("to-abort")
-    assert not Path(wt_path).exists()
-    state = state_mgr.load()
-    assert "to-abort" not in state.tasks
+    record_path = mgr.abort("to-abort")
+
+    assert record_path is not None and record_path.is_file()
+    assert wt_path.exists()
+    assert subprocess.run(
+        ["git", "show-ref", "--verify", f"refs/heads/{task.branch}"],
+        cwd=workspace / "shared",
+        check=False,
+        capture_output=True,
+    ).returncode == 0
+    assert RetainedWorktreeStore(state_mgr.state_dir).list_records() == [
+        (record_path, task)
+    ]
+    assert "to-abort" not in state_mgr.load().tasks
 
 
-def test_spawn_and_abort_run_external_collaborators_outside_sql(
-    worktree_deps, monkeypatch,
+def test_spawn_stays_outside_sql_and_abort_skips_git_teardown(
+    worktree_deps,
+    monkeypatch,
 ):
     from contextlib import contextmanager
 
@@ -149,7 +162,6 @@ def test_spawn_and_abort_run_external_collaborators_outside_sql(
     observations = []
     original_write = database.write
     original_add = git.worktree_add
-    original_remove = git.worktree_remove
 
     @contextmanager
     def tracked_write(*, immediate=False):
@@ -168,24 +180,21 @@ def test_spawn_and_abort_run_external_collaborators_outside_sql(
         assert_outside_sql("worktree_add")
         return original_add(*args, **kwargs)
 
-    def observed_remove(*args, **kwargs):
-        assert_outside_sql("worktree_remove")
-        return original_remove(*args, **kwargs)
-
     def observed_task(*args, **kwargs):
         assert_outside_sql("subprocess")
         return ShellResult(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(database, "write", tracked_write)
     monkeypatch.setattr(git, "worktree_add", observed_add)
-    monkeypatch.setattr(git, "worktree_remove", observed_remove)
+    monkeypatch.setattr(git, "worktree_remove", MagicMock())
     shell.run_task.side_effect = observed_task
     manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
 
     manager.spawn("transaction boundary", repos=["shared"], workspace_root=workspace)
     manager.abort("transaction-boundary")
 
-    assert {"worktree_add", "worktree_remove", "subprocess"} <= set(observations)
+    assert {"worktree_add", "subprocess"} <= set(observations)
+    git.worktree_remove.assert_not_called()
 
 def test_abort_retains_linked_delivery_metadata_for_item_summary(worktree_deps):
     from mship.core.view.workitem_index import build_workitem_index
@@ -255,16 +264,25 @@ def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypat
     from mship.core.persistence.lifecycle_repository import (
         LifecycleRepository,
     )
+    from mship.core.retained_worktrees import RetainedWorktreeStore
     from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
     from mship.core.workitem_store import WorkItemStore
 
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     store = WorkItemStore(state_mgr.state_dir / "workitems")
     item = store.create("delivery", "chore", "ws", datetime.now(timezone.utc))
-    updated_item = store.create("updated delivery", "chore", "ws", datetime.now(timezone.utc))
+    updated_item = store.create(
+        "updated delivery", "chore", "ws", datetime.now(timezone.utc)
+    )
     manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    manager.spawn("racing delivery", repos=["shared"], workspace_root=workspace,
-                  work_item_id=item.id)
+    manager.spawn(
+        "racing delivery",
+        repos=["shared"],
+        workspace_root=workspace,
+        work_item_id=item.id,
+    )
+    original_task = state_mgr.load().tasks["racing-delivery"]
+    worktree_path = Path(original_task.worktrees["shared"])
 
     original = LifecycleRepository.retain_and_delete_task
 
@@ -299,6 +317,9 @@ def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypat
     assert live_task.affected_repos == ["shared", "api-gateway"]
     assert live_task.pr_urls == {"api-gateway": "https://github.example/api/pull/2"}
     assert live_task.work_item_id == updated_item.id
+    assert worktree_path.exists()
+    records = RetainedWorktreeStore(state_mgr.state_dir).list_records()
+    assert records[0][1] == original_task
 
 
 def test_abort_retains_no_pr_task_without_inventing_a_pr(worktree_deps):
@@ -628,22 +649,6 @@ def test_spawn_default_base_raises_when_base_exists_nowhere(worktree_deps):
     # Preflight: fail-fast before any worktree/hub is created.
     assert "no-base-anywhere" not in state_mgr.load().tasks
     assert not (workspace / ".worktrees" / "no-base-anywhere").exists()
-
-
-def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("abort fail test", repos=["shared"], workspace_root=workspace)
-
-    # Make branch_delete fail
-    original_branch_delete = git.branch_delete
-    git.branch_delete = MagicMock(side_effect=Exception("branch delete failed"))
-
-    mgr.abort("abort-fail-test")
-
-    # State should still be cleaned up
-    state = state_mgr.load()
-    assert "abort-fail-test" not in state.tasks
 
 
 def test_spawn_skips_git_root_repos(tmp_path: Path):
@@ -1841,14 +1846,31 @@ def test_spawn_workspace_gitignore_includes_worktrees(worktree_deps, tmp_path):
     assert ".worktrees" in gi.read_text().splitlines()
 
 
-def test_abort_removes_hub_directory(worktree_deps):
+def test_abort_retains_hub_and_unknown_files(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("abort test", repos=["shared", "auth-service"], workspace_root=workspace)
+    mgr.spawn(
+        "abort test",
+        repos=["shared", "auth-service"],
+        workspace_root=workspace,
+    )
+    task = state_mgr.load().tasks["abort-test"]
     hub = workspace / ".worktrees" / "abort-test"
-    assert hub.exists()
-    mgr.abort("abort-test")
-    assert not hub.exists(), "abort should rm -rf the hub directory"
+    unknown = hub / "operator-notes.txt"
+    unknown.write_bytes(b"do not remove")
+
+    record_path = mgr.abort("abort-test")
+
+    assert record_path is not None and record_path.exists()
+    assert unknown.read_bytes() == b"do not remove"
+    assert all(Path(path).exists() for path in task.worktrees.values())
+    assert "abort-test" not in state_mgr.load().tasks
+    with pytest.raises(ValueError, match="refusing to overwrite retained work"):
+        mgr.spawn(
+            "abort test",
+            repos=["shared", "auth-service"],
+            workspace_root=workspace,
+        )
 
 
 def test_spawn_materializes_passive_dep(worktree_deps):
@@ -1998,72 +2020,190 @@ def test_spawn_dirty_canonical_base_not_fast_forwarded_but_worktree_fresh(tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# abort teardown guard (spec auto-advance-on-merge)
+# Passive close retains every byte of task work until explicit prune.
 # ---------------------------------------------------------------------------
 
-def test_abort_refuses_dirty_worktree_and_leaves_it_intact(worktree_deps):
-    from mship.core.worktree import WorktreeDirtyError
+def test_abort_retains_staged_untracked_ignored_and_detached_data(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("dirty task", repos=["shared"], workspace_root=workspace)
-    wt = Path(state_mgr.load().tasks["dirty-task"].worktrees["shared"])
-    (wt / "scratch.txt").write_text("uncommitted work")
+    mgr.spawn(
+        "dirty task",
+        repos=["auth-service"],
+        workspace_root=workspace,
+        offline=True,
+    )
+    task = state_mgr.load().tasks["dirty-task"]
+    active = Path(task.worktrees["auth-service"])
+    passive = Path(task.worktrees["shared"])
+    (active / "staged.txt").write_bytes(b"staged")
+    _git_run(active, "add", "staged.txt")
+    (active / ".gitignore").write_text("ignored.txt\n")
+    _git_run(active, "add", ".gitignore")
+    (active / "ignored.txt").write_bytes(b"ignored")
+    (active / "untracked.txt").write_bytes(b"untracked")
+    (passive / "detached.txt").write_bytes(b"detached")
 
-    with pytest.raises(WorktreeDirtyError):
-        mgr.abort("dirty-task")
+    assert subprocess.run(
+        ["git", "-C", str(passive), "symbolic-ref", "-q", "HEAD"],
+        check=False,
+        capture_output=True,
+    ).returncode != 0
+    record_path = mgr.abort("dirty-task")
 
-    assert wt.exists()                                   # left intact (ac4)
-    assert "dirty-task" in state_mgr.load().tasks        # state unchanged
-
-
-def test_abort_force_removes_dirty_worktree(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("dirty task", repos=["shared"], workspace_root=workspace)
-    wt = Path(state_mgr.load().tasks["dirty-task"].worktrees["shared"])
-    (wt / "scratch.txt").write_text("uncommitted work")
-
-    mgr.abort("dirty-task", force=True)                  # ac5
-
-    assert not wt.exists()
+    assert record_path is not None and record_path.exists()
+    assert (active / "staged.txt").read_bytes() == b"staged"
+    assert (active / "ignored.txt").read_bytes() == b"ignored"
+    assert (active / "untracked.txt").read_bytes() == b"untracked"
+    assert (passive / "detached.txt").read_bytes() == b"detached"
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", "ignored.txt"],
+        cwd=active,
+        check=False,
+    ).returncode == 0
+    assert {"staged.txt", ".gitignore"} <= set(
+        subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=active,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    )
     assert "dirty-task" not in state_mgr.load().tasks
 
 
-def test_abort_clean_worktree_still_torn_down_without_force(worktree_deps):
+def test_abort_retains_clean_worktrees(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("clean task", repos=["shared"], workspace_root=workspace)
-    wt = Path(state_mgr.load().tasks["clean-task"].worktrees["shared"])
+    worktree = Path(state_mgr.load().tasks["clean-task"].worktrees["shared"])
 
-    mgr.abort("clean-task")                              # ac6
+    record_path = mgr.abort("clean-task")
 
-    assert not wt.exists()
+    assert record_path is not None and record_path.exists()
+    assert worktree.exists()
+    assert (worktree / ".git").exists()
     assert "clean-task" not in state_mgr.load().tasks
+
+
+def test_abort_retention_write_failure_leaves_state_and_work(
+    worktree_deps,
+    monkeypatch,
+):
+    from mship.core.retained_worktrees import RetainedWorktreeStoreError
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("write failure", repos=["shared"], workspace_root=workspace)
+    worktree = Path(state_mgr.load().tasks["write-failure"].worktrees["shared"])
+
+    def fail_to_retain(self, task):
+        raise RetainedWorktreeStoreError("disk full")
+
+    monkeypatch.setattr(
+        "mship.core.worktree.RetainedWorktreeStore.retain",
+        fail_to_retain,
+    )
+
+    with pytest.raises(RetainedWorktreeStoreError, match="disk full"):
+        mgr.abort("write-failure")
+
+    assert worktree.exists()
+    assert "write-failure" in state_mgr.load().tasks
+
+
+def test_abort_keeps_live_app_run_guard(worktree_deps, monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("guarded task", repos=["shared"], workspace_root=workspace)
+    worktree = Path(
+        state_mgr.load().tasks["guarded-task"].worktrees["shared"]
+    )
+    original_read = state_mgr.workspace_store.read
+
+    @contextmanager
+    def read_with_live_run():
+        yield SimpleNamespace(
+            connection=None,
+            app_runs=SimpleNamespace(list_for_task=lambda *args, **kwargs: [object()]),
+        )
+
+    monkeypatch.setattr(state_mgr.workspace_store, "read", read_with_live_run)
+
+    with pytest.raises(TaskMetadataRetentionConflictError, match="require close cleanup"):
+        mgr.abort("guarded-task")
+
+    monkeypatch.setattr(state_mgr.workspace_store, "read", original_read)
+    assert worktree.exists()
+    assert "guarded-task" in state_mgr.load().tasks
+    assert RetainedWorktreeStore(state_mgr.state_dir).list_records() == []
+
+
+def test_abort_retains_concurrent_writer_commit(worktree_deps, monkeypatch):
+    from threading import Event, Thread
+
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("concurrent writer", repos=["shared"], workspace_root=workspace)
+    worktree = Path(
+        state_mgr.load().tasks["concurrent-writer"].worktrees["shared"]
+    )
+    staged = Event()
+    allow_commit = Event()
+    commit_started = Event()
+    committed = Event()
+    commit_sha: list[str] = []
+
+    def writer() -> None:
+        (worktree / "concurrent.txt").write_bytes(b"written concurrently")
+        _git_run(worktree, "add", "concurrent.txt")
+        staged.set()
+        assert allow_commit.wait(timeout=5)
+        commit_started.set()
+        _git_run(worktree, "commit", "-m", "concurrent writer")
+        commit_sha.append(_head(worktree))
+        committed.set()
+
+    original_retain = RetainedWorktreeStore.retain
+
+    def retain_while_writer_commits(self, task):
+        thread = Thread(target=writer)
+        thread.start()
+        assert staged.wait(timeout=5)
+        allow_commit.set()
+        assert commit_started.wait(timeout=5)
+        record_path = original_retain(self, task)
+        thread.join(timeout=5)
+        assert committed.is_set()
+        return record_path
+
+    monkeypatch.setattr(
+        RetainedWorktreeStore,
+        "retain",
+        retain_while_writer_commits,
+    )
+
+    record_path = mgr.abort("concurrent-writer")
+
+    assert record_path is not None and record_path.exists()
+    assert (worktree / "concurrent.txt").read_bytes() == b"written concurrently"
+    assert commit_sha == [_head(worktree)]
+    assert "concurrent-writer" not in state_mgr.load().tasks
 
 
 def test_abort_idempotent_when_task_already_gone(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.abort("never-existed")                           # ac7: no KeyError, no raise
 
-
-def test_abort_does_not_rmtree_when_git_remove_fails(worktree_deps, monkeypatch):
-    """The silent shutil.rmtree(ignore_errors=True) data-loss fallback is REMOVED:
-    a worktree git refused to remove is LEFT on disk, not force-deleted, and the
-    hub is not nuked either."""
-    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("keep task", repos=["shared"], workspace_root=workspace)
-    wt = Path(state_mgr.load().tasks["keep-task"].worktrees["shared"])
-
-    def _boom(**kwargs):
-        raise RuntimeError("git worktree remove refused")
-    monkeypatch.setattr(git, "worktree_remove", _boom)
-
-    mgr.abort("keep-task")                               # clean tree -> guard passes
-
-    assert wt.exists()                                   # NOT rmtree'd (fallback gone)
-    assert "keep-task" not in state_mgr.load().tasks     # state still cleared
+    assert mgr.abort("never-existed") is None
 
 
 def test_spawn_git_root_parent_unmaterialized_raises(tmp_path: Path, monkeypatch):
