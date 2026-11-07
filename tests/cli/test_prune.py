@@ -27,7 +27,7 @@ def configured_prune_app(workspace_with_git: Path):
 def test_prune_dry_run_no_orphans(configured_prune_app: Path):
     result = runner.invoke(app, ["prune"])
     assert result.exit_code == 0
-    assert "No orphaned worktrees" in result.output or "orphans" in result.output
+    assert "No orphaned or retained worktrees" in result.output or "orphans" in result.output
 
 
 def test_prune_dry_run_finds_orphan(configured_prune_app: Path):
@@ -47,9 +47,10 @@ def test_prune_force_removes_orphan(configured_prune_app: Path):
     wt_path = shared_path / ".worktrees" / "feat" / "orphan"
     git.worktree_add(repo_path=shared_path, worktree_path=wt_path, branch="feat/orphan")
 
-    result = runner.invoke(app, ["prune", "--force"])
+    result = runner.invoke(app, ["prune", "--force", "--writers-stopped"])
     assert result.exit_code == 0
     assert not wt_path.exists()
+    assert "refs/mship/recovery/" in result.output
 
 
 def test_prune_retention_conflict_is_clean_error(
@@ -80,10 +81,66 @@ def test_prune_retention_conflict_is_clean_error(
         reject_retention,
     )
 
-    result = runner.invoke(app, ["prune", "--force"])
+    result = runner.invoke(app, ["prune", "--force", "--writers-stopped"])
 
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit)
     assert "Retry the operation" in result.output
     assert "Traceback" not in result.output
     assert "ghost" in state.load().tasks
+
+
+def test_prune_force_requires_stopped_writers(configured_prune_app: Path):
+    git = GitRunner()
+    shared_path = configured_prune_app / "shared"
+    wt_path = shared_path / ".worktrees" / "feat" / "orphan"
+    git.worktree_add(repo_path=shared_path, worktree_path=wt_path, branch="feat/orphan")
+
+    result = runner.invoke(app, ["prune", "--force"])
+
+    assert result.exit_code == 2
+    assert "--writers-stopped" in result.output
+    assert wt_path.exists()
+
+
+def test_prune_preview_reports_retained_record(configured_prune_app: Path):
+    from datetime import datetime, timezone
+
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    from mship.core.state import Task
+
+    git = GitRunner()
+    shared_path = configured_prune_app / "shared"
+    wt_path = shared_path / ".worktrees" / "feat" / "retained"
+    git.worktree_add(repo_path=shared_path, worktree_path=wt_path, branch="feat/retained")
+    task = Task(
+        slug="retained",
+        description="Retained",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/retained",
+        worktrees={"shared": wt_path},
+    )
+    record = RetainedWorktreeStore(
+        configured_prune_app / ".mothership"
+    ).retain(task)
+
+    result = runner.invoke(app, ["prune"])
+
+    assert result.exit_code == 0
+    assert "retained" in result.output
+    assert str(record) in result.output
+
+
+def test_prune_refuses_unreadable_retained_records(configured_prune_app: Path):
+    records_dir = configured_prune_app / ".mothership" / "retained-worktrees"
+    records_dir.mkdir()
+    (records_dir / "malformed.json").write_text("{not json")
+
+    result = runner.invoke(app, ["prune", "--force", "--writers-stopped"])
+
+    assert result.exit_code == 1
+    assert "Cannot scan retained worktree records" in result.output
+    assert "No cleanup was performed" in result.output
+    assert "Traceback" not in result.output

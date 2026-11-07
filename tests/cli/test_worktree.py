@@ -480,13 +480,14 @@ def test_close_gate_warns_and_proceeds_when_reconciler_raises(
     assert "t" not in sm.load().tasks
 
 
-def test_close_no_active_task_errors():
+def test_close_no_active_task_errors(configured_git_app, monkeypatch):
     from typer.testing import CliRunner
     from mship.cli import app as _app
     r = CliRunner()
+    monkeypatch.chdir(configured_git_app)
     result = r.invoke(_app, ["close", "--yes"])
-    # Either No active task, or config-not-found — both exit 1.
-    assert result.exit_code != 0
+    assert result.exit_code == 1
+    assert StateManager(configured_git_app / ".mothership").load().tasks == {}
 
 
 def test_close_with_all_merged_prs(configured_git_app):
@@ -1437,85 +1438,65 @@ def test_close_abandon_proceeds_when_no_commits(configured_git_app):
         container.shell.reset_override()
 
 
-def test_close_abandon_refuses_when_unrecoverable(configured_git_app):
-    """Commits past base, not merged, not pushed, no PR → refuses without --force."""
-    from unittest.mock import MagicMock
-    from mship.cli import container
-    from mship.core.state import StateManager, WorkspaceState
-    from mship.util.shell import ShellRunner, ShellResult
-    from typer.testing import CliRunner
-    from mship.cli import app as _app
+@pytest.mark.parametrize("close_option", [None, "--abandon", "--force"])
+def test_close_retains_local_work_and_exposes_recovery_record(
+    configured_git_app, close_option,
+):
+    import json
 
-    sm = StateManager(configured_git_app / ".mothership")
-    # worktrees dict must map repo → path; use a dummy path that need not exist,
-    # since the recovery check guards on path existence before calling git.
-    task = _build_close_task(
-        finished=False,
-        worktrees={"shared": configured_git_app / "shared"},
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", "keep local", "--repos", "shared", "--skip-setup"],
     )
-    sm.save(WorkspaceState(tasks={"t": task}))
-
-    def mock_run(cmd, cwd, env=None):
-        if "git rev-list --count" in cmd:
-            return ShellResult(returncode=0, stdout="3\n", stderr="")  # 3 commits past base
-        if "git merge-base --is-ancestor" in cmd:
-            return ShellResult(returncode=1, stdout="", stderr="")  # not merged
-        if "git ls-remote" in cmd:
-            return ShellResult(returncode=0, stdout="", stderr="")  # not pushed
-        if "git rev-parse" in cmd:
-            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
-        return ShellResult(returncode=0, stdout="", stderr="")
-
-    mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.side_effect = mock_run
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
-    container.shell.override(mock_shell)
-    try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
-        assert r.exit_code != 0
-        assert "unrecoverable" in r.output.lower() or "permanently lost" in r.output.lower()
-        assert "t" in sm.load().tasks  # unchanged
-    finally:
-        container.shell.reset_override()
-
-
-def test_close_force_bypasses_recovery_check(configured_git_app):
-    """--force destroys unrecoverable work on purpose."""
-    from unittest.mock import MagicMock
-    from mship.cli import container
-    from mship.core.state import StateManager, WorkspaceState
-    from mship.util.shell import ShellRunner, ShellResult
-    from typer.testing import CliRunner
-    from mship.cli import app as _app
-
+    assert result.exit_code == 0, result.output
     sm = StateManager(configured_git_app / ".mothership")
-    task = _build_close_task(
-        finished=False,
-        worktrees={"shared": configured_git_app / "shared"},
-    )
-    sm.save(WorkspaceState(tasks={"t": task}))
+    task = sm.load().tasks["keep-local"]
+    if close_option is None:
+        from datetime import datetime, timezone
+        task.finished_at = datetime.now(timezone.utc)
+        sm.save(WorkspaceState(tasks={task.slug: task}))
+    wt = Path(task.worktrees["shared"])
 
-    def mock_run(cmd, cwd, env=None):
-        if "git rev-list --count" in cmd:
-            return ShellResult(returncode=0, stdout="3\n", stderr="")
-        if "git merge-base --is-ancestor" in cmd:
-            return ShellResult(returncode=1, stdout="", stderr="")
-        if "git ls-remote" in cmd:
-            return ShellResult(returncode=0, stdout="", stderr="")
-        if "git rev-parse" in cmd:
-            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
-        return ShellResult(returncode=0, stdout="", stderr="")
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=wt, check=True, capture_output=True, text=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.com",
+                "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.com",
+            },
+        ).stdout
 
-    mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.side_effect = mock_run
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
-    container.shell.override(mock_shell)
-    try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--force", "--task", "t"])
-        assert r.exit_code == 0, r.output
-        assert "t" not in sm.load().tasks
-    finally:
-        container.shell.reset_override()
+    (wt / "local.txt").write_text("committed only here\n")
+    (wt / ".gitignore").write_text("private.txt\n")
+    git("add", "local.txt", ".gitignore")
+    git("commit", "-m", "local work")
+    head = git("rev-parse", "HEAD")
+    (wt / "local.txt").write_text("staged work\n")
+    git("add", "local.txt")
+    (wt / "draft.txt").write_text("untracked work\n")
+    (wt / "private.txt").write_text("ignored work\n")
+    status = git("status", "--porcelain", "--ignored")
+
+    options = [close_option] if close_option is not None else []
+    result = runner.invoke(app, ["close", "--yes", *options, "--task", task.slug])
+    assert result.exit_code == 0, result.output
+    assert task.slug not in sm.load().tasks
+    assert git("rev-parse", "HEAD") == head
+    assert git("status", "--porcelain", "--ignored") == status
+    assert git("show", ":local.txt") == "staged work\n"
+    assert (wt / "draft.txt").read_text() == "untracked work\n"
+    assert (wt / "private.txt").read_text() == "ignored work\n"
+    [(record, retained)] = RetainedWorktreeStore(sm.state_dir).list_records()
+    assert retained == task
+    listing = runner.invoke(app, ["worktrees"])
+    assert listing.exit_code == 0, listing.output
+    data = json.loads(listing.output)
+    assert data["tasks"] == {}
+    assert data["retained"] == [
+        {"record": str(record), "task": task.model_dump(mode="json")},
+    ]
 
 
 def test_close_abandon_proceeds_when_merged(configured_git_app):
@@ -2397,9 +2378,16 @@ def test_close_cascade_retains_downstream_task_metadata(configured_git_app: Path
     item = store.create("downstream", "chore", "ws", datetime.now(timezone.utc))
     store.set_phase_override(item.id, "review")
     store.add_task(item.id, "b")
+    wt = configured_git_app / ".worktrees" / "b" / "shared"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(wt), "HEAD"],
+        cwd=configured_git_app / "shared", check=True, capture_output=True,
+    )
+    (wt / "draft.txt").write_text("downstream work in progress\n")
     state.mutate(
         lambda s: (
             setattr(s.tasks["b"], "work_item_id", item.id),
+            s.tasks["b"].worktrees.update({"shared": str(wt)}),
             s.tasks["b"].pr_urls.update(
                 {"shared": "https://github.example/shared/pull/2"}
             ),
@@ -2413,6 +2401,14 @@ def test_close_cascade_retains_downstream_task_metadata(configured_git_app: Path
     assert retained.phase_override == "review"
     assert retained.affected_repos == ["shared"]
     assert retained.pr_urls == ["https://github.example/shared/pull/2"]
+    assert (wt / "draft.txt").read_text() == "downstream work in progress\n"
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    snapshots = {
+        task.slug: task
+        for _, task in RetainedWorktreeStore(state.state_dir).list_records()
+    }
+    assert snapshots["b"].worktrees == {"shared": wt}
+    assert snapshots["b"].pr_urls == {"shared": "https://github.example/shared/pull/2"}
 
 
 def test_close_cascade_refuses_metadata_changed_after_retention(
@@ -2611,83 +2607,6 @@ def test_close_non_required_hook_failure_never_blocks_close(configured_git_app):
         container.shell.reset_override()
 
 
-def test_close_threads_force_true_to_abort(configured_git_app):
-    from datetime import datetime, timezone
-    from unittest.mock import MagicMock
-    from mship.cli import container
-    from mship.core.state import StateManager, Task, WorkspaceState
-    from mship.util.shell import ShellRunner, ShellResult
-    from typer.testing import CliRunner
-    from mship.cli import app as _app
-
-    sm = StateManager(configured_git_app / ".mothership")
-    sm.save(WorkspaceState(tasks={"t": Task(
-        slug="t", description="d", phase="review",
-        created_at=datetime.now(timezone.utc),
-        affected_repos=["shared"], branch="feat/t",
-        pr_urls={"shared": "https://github.com/o/r/pull/1"},
-        finished_at=datetime.now(timezone.utc),
-    )}))
-
-    mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
-
-    class _Rec:
-        def __init__(self): self.calls = []
-        def abort(self, task_slug, force=False): self.calls.append((task_slug, force))
-
-    rec = _Rec()
-    container.shell.override(mock_shell)
-    container.worktree_manager.override(rec)
-    try:
-        result = CliRunner().invoke(_app, ["close", "--yes", "--force", "--task", "t"])
-        assert result.exit_code == 0, result.output
-        assert rec.calls == [("t", True)]              # ac5: force reaches the primitive
-    finally:
-        container.shell.reset_override()
-        container.worktree_manager.reset_override()
-
-
-def test_close_surfaces_worktree_dirty_error_and_keeps_task(configured_git_app):
-    from datetime import datetime, timezone
-    from unittest.mock import MagicMock
-    from mship.cli import container
-    from mship.core.state import StateManager, Task, WorkspaceState
-    from mship.util.shell import ShellRunner, ShellResult
-    from typer.testing import CliRunner
-    from mship.cli import app as _app
-
-    sm = StateManager(configured_git_app / ".mothership")
-    sm.save(WorkspaceState(tasks={"t": Task(
-        slug="t", description="d", phase="review",
-        created_at=datetime.now(timezone.utc),
-        affected_repos=["shared"], branch="feat/t",
-        pr_urls={"shared": "https://github.com/o/r/pull/1"},
-        finished_at=datetime.now(timezone.utc),
-    )}))
-
-    mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
-
-    class _Dirty:
-        def abort(self, task_slug, force=False):
-            from mship.core.worktree import WorktreeDirtyError
-            if not force:
-                raise WorktreeDirtyError(task_slug, {"shared": "uncommitted changes"})
-
-    container.shell.override(mock_shell)
-    container.worktree_manager.override(_Dirty())
-    try:
-        result = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
-        assert result.exit_code != 0
-        assert "uncommitted changes" in result.output
-        assert "--force" in result.output
-        assert "t" in sm.load().tasks                   # ac3: task NOT removed
-    finally:
-        container.shell.reset_override()
-        container.worktree_manager.reset_override()
 
 
 # --- spawn --closes (#386) ---
@@ -3152,9 +3071,8 @@ def test_close_push_only_rev_list_failure_not_delivered(configured_git_app):
         container.shell.reset_override()
 
 
-def test_close_recovery_gate_rev_list_failure_not_skipped_as_clean(configured_git_app):
-    """A repo whose rev-list errors, with no merge/push/PR evidence, must NOT be
-    skipped as trivially clean — the recovery gate refuses instead of deleting."""
+def test_close_retains_work_when_git_delivery_comparison_fails(configured_git_app):
+    """Unknown Git state cannot authorize deletion or prevent safe retention."""
     from unittest.mock import MagicMock
     from mship.cli import container
     from mship.core.state import StateManager, WorkspaceState
@@ -3168,6 +3086,8 @@ def test_close_recovery_gate_rev_list_failure_not_skipped_as_clean(configured_gi
         worktrees={"shared": str(configured_git_app / "shared")},
     )
     sm.save(WorkspaceState(tasks={"t": task}))
+    draft = configured_git_app / "shared" / "draft.txt"
+    draft.write_text("work survives failed Git inspection\n")
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -3184,8 +3104,10 @@ def test_close_recovery_gate_rev_list_failure_not_skipped_as_clean(configured_gi
     container.shell.override(mock_shell)
     try:
         r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
-        assert r.exit_code != 0, r.output
-        assert "unrecoverable" in r.output.lower() or "cannot close" in r.output.lower()
-        assert "t" in sm.load().tasks   # nothing torn down
+        assert r.exit_code == 0, r.output
+        assert "t" not in sm.load().tasks
+        assert draft.read_text() == "work survives failed Git inspection\n"
+        from mship.core.retained_worktrees import RetainedWorktreeStore
+        assert RetainedWorktreeStore(sm.state_dir).list_records()[0][1] == task
     finally:
         container.shell.reset_override()

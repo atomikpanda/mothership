@@ -230,23 +230,21 @@ main repo root — worktree removal must run from outside the worktree —
 and use the `GIT_DIR`/`GIT_COMMON`/`WORKTREE_PATH` values captured in
 Step 2, from before that directory change.
 
-**In a mothership workspace, `mship close` owns cleanup — no manual
-`git worktree remove`.** After a local merge (Option 1, preceded by
-`mship finish --push-only` as described above), run plain `mship close`;
-after a confirmed discard, `mship close --abandon`.
-After a PR merges (Option 2), you usually run nothing at all: when
-`mship serve` is running, its watcher **auto-advances** the bound spec
-(`dispatched → implemented`) and its WorkItem (→ `done`, clearing
-`needs_review`) and tears the worktree down — zero manual steps in the
-clean case (check via `mship pr` for an aggregate view across tasks, or
-`mship reconcile` for drift). You only need `mship close` when the
-worktree still has **uncommitted or unpushed** changes: auto-teardown
-skips it to protect that work (the spec/WorkItem still advance, and a
-note is posted on the task's thread) — resolve (commit/push) then
-`mship close`, or `mship close --force` to discard. `--force` is the
-only way to delete a dirty/unpushed worktree, and the guard is universal
-(it also applies to `mship close --abandon`), so uncommitted/unpushed
-work is **never** deleted without `--force`.
+**In a mothership workspace, task closure and filesystem cleanup are separate.**
+After a local merge (Option 1, preceded by `mship finish --push-only`), run plain
+`mship close`; after intentional abandonment, use `mship close --abandon`.
+Both retain worktrees, branches and a durable Task recovery snapshot, even with
+`--force`. When `mship serve` observes all PRs merged, its watcher advances the
+spec and WorkItem and closes task state with the same retention policy.
+
+Inspect retained paths and recovery records with `mship worktrees` or `mship prune`.
+Only after stopping every writer may the operator request
+`mship prune --force --writers-stopped`. Cleanup pins clean worktree HEADs under
+`refs/mship/recovery/`, never forces Git removal, and preserves dirty, untracked,
+ignored or uncertain content and unexpected hub files. Refusal is not permission
+to run `rm -rf` or retry with bare Git force-removal. Keep the worktree if writers
+cannot be stopped; a recovery ref cannot protect later commits or uncommitted files.
+The non-Mothership cleanup instructions below do not apply to retained Mship tasks.
 
 **If `GIT_DIR == GIT_COMMON`:** Normal repo, no worktree to clean up. Done.
 

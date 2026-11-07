@@ -247,7 +247,12 @@ def cleanup_task_worktrees(
     *,
     deps: RemoteExecDeps,
 ) -> str:
-    """Remove only selected, clean worktrees at their recorded revisions."""
+    """Explicit cleanup after writers stop; never called by task closure.
+
+    The task lock excludes Mothership executions, not arbitrary Git or editor
+    processes. Preserve uncertain content and pin committed work before removal.
+    """
+    from mship.util.git import worktree_recovery_ref
     try:
         if canonical_run_ref_segment(task) != task:
             return "invalid"
@@ -335,14 +340,24 @@ def cleanup_task_worktrees(
                 return "unknown"
             dirty = _run_shell(
                 deps.shell,
-                ("git", "status", "--porcelain", "--untracked-files=normal"),
+                ("git", "status", "--porcelain", "--untracked-files=all", "--ignored=matching"),
                 target,
                 cancel_event=deps.cancel_event,
             )
             if dirty.returncode != 0 or dirty.stdout:
                 return "unknown"
+            recovery = _run_shell(
+                deps.shell,
+                ("git", "update-ref", worktree_recovery_ref(target, expected), expected),
+                repo_path,
+                cancel_event=deps.cancel_event,
+            )
+            if recovery.returncode != 0:
+                return "unknown"
+            if _git_rev(deps.shell, target, "HEAD", cancel_event=deps.cancel_event) != expected:
+                return "unknown"
             removal = _run_shell(
-                deps.shell, ("git", "worktree", "remove", "--force", str(target)),
+                deps.shell, ("git", "worktree", "remove", str(target)),
                 repo_path, cancel_event=deps.cancel_event,
             )
             if removal.returncode != 0 or os.path.lexists(target):

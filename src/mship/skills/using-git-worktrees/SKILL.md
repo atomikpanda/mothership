@@ -22,7 +22,7 @@ mship item new "<title>" --kind <feature|bug|chore|question>   # prints an id
 mship spawn '<description>' --work-item <id>
 ```
 
-`spawn` refuses to run without `--work-item` (`--hotfix` overrides, and the override is logged). It creates the worktree, registers it in workspace state, runs each repo's `task setup`, and symlinks any configured `symlink_dirs` — so Step 2 (Project Setup) is already done; go straight to Step 3 (Verify Clean Baseline). Cleanup later routes through `mship close` (see finishing-a-development-branch), never manual `git worktree remove`.
+`spawn` refuses to run without `--work-item` (`--hotfix` overrides, and the override is logged). It creates the worktree, registers it in workspace state, runs each repo's `task setup`, and symlinks any configured `symlink_dirs` — so Step 2 (Project Setup) is already done; go straight to Step 3 (Verify Clean Baseline). Later, `mship close` closes task state but retains worktrees and recovery records. Inspect with `mship prune`; only after stopping every writer request `mship prune --force --writers-stopped` (see finishing-a-development-branch). Never substitute manual forced worktree removal.
 
 Steps 0–2 below apply only when you're not spawning a mship task — quick read-only exploration, or a repo outside any mship workspace.
 

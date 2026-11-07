@@ -3036,12 +3036,10 @@ class _CleanupShell:
         self.branch = branch
         self.head = head
         self.dirty = dirty
-        self.calls: list[tuple[str, ...]] = []
 
     def run_argv(self, args, cwd, env=None, *, cancel_event=None):
         _ = cwd, env, cancel_event
         command = tuple(args)
-        self.calls.append(command)
         if command[:4] == ("git", "worktree", "list", "--porcelain"):
             return ShellResult(
                 returncode=0,
@@ -3055,9 +3053,6 @@ class _CleanupShell:
             return ShellResult(returncode=0, stdout=self.head, stderr="")
         if command[:3] == ("git", "status", "--porcelain"):
             return ShellResult(returncode=0, stdout=self.dirty, stderr="")
-        if command[:4] == ("git", "worktree", "remove", "--force"):
-            shutil.rmtree(self.target)
-            return ShellResult(returncode=0, stdout="", stderr="")
 
 
 class _CleanupAdmission:
@@ -3069,33 +3064,6 @@ class _CleanupAdmission:
         return self.status
 
 
-def test_remote_task_worktree_cleanup_removes_only_the_selected_registered_task(
-    tmp_path,
-):
-    config = _config(tmp_path)
-    target = tmp_path / ".worktrees" / "task-1" / "api"
-    target.mkdir(parents=True)
-    shell = _CleanupShell(target)
-    deps = remote_exec.RemoteExecDeps(
-        config=config,
-        shell=shell,
-        workspace_root=tmp_path,
-        operations=_CleanupAdmission("available"),
-    )
-
-    assert (
-        remote_exec.cleanup_task_worktrees(
-            "task-1", ["api"], {"api": "a" * 40}, deps=deps
-        )
-        == "removed"
-    )
-    assert not target.exists()
-    assert shell.calls == [
-        ("git", "worktree", "list", "--porcelain"),
-        ("git", "rev-parse", "HEAD"),
-        ("git", "status", "--porcelain", "--untracked-files=normal"),
-        ("git", "worktree", "remove", "--force", str(target)),
-    ]
 
 
 def test_remote_task_worktree_cleanup_preserves_foreign_or_active_state(tmp_path):
@@ -3117,7 +3085,6 @@ def test_remote_task_worktree_cleanup_preserves_foreign_or_active_state(tmp_path
         == "unknown"
     )
     assert target.exists()
-    assert foreign.calls == [("git", "worktree", "list", "--porcelain")]
 
     active = _CleanupShell(target)
     active_deps = remote_exec.RemoteExecDeps(
@@ -3132,7 +3099,6 @@ def test_remote_task_worktree_cleanup_preserves_foreign_or_active_state(tmp_path
         )
         == "busy"
     )
-    assert active.calls == []
     assert target.exists()
 
 
@@ -3231,12 +3197,27 @@ def test_authenticated_task_cleanup_preserves_changed_state_and_removes_owned_wo
         build = target / "build"
         build.mkdir()
         (build / "output.bin").write_bytes(b"generated build output")
+        retained = client.post(
+            "/exec/task-worktrees-cleanup", json=body, headers=headers
+        )
+        assert retained.json() == {"status": "unknown"}
+        assert (build / "output.bin").read_bytes() == b"generated build output"
+        (build / "output.bin").unlink()
+        build.rmdir()
         removed = client.post(
             "/exec/task-worktrees-cleanup", json=body, headers=headers
         )
         assert removed.status_code == 200
         assert removed.json() == {"status": "removed"}
-
     assert not target.exists()
     assert _real_git("rev-parse", "HEAD", cwd=other) == tip
     assert _real_git("rev-parse", "refs/mship/run/t1/api", cwd=repo) == scratch
+    from mship.util.git import worktree_recovery_ref
+    recovery_ref = worktree_recovery_ref(target, scratch)
+    _real_git("update-ref", "-d", "refs/mship/run/t1/api", cwd=repo)
+    _real_git("reflog", "expire", "--expire=now", "--all", cwd=repo)
+    _real_git("gc", "--prune=now", cwd=repo)
+    recovered = tmp_path / "recovered"
+    _real_git("worktree", "add", "--detach", str(recovered), recovery_ref, cwd=repo)
+    assert (recovered / "a.txt").read_text() == "what the operator is editing\n"
+    assert (recovered / "untracked.txt").read_text() == "scratch\n"

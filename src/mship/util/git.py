@@ -1,5 +1,17 @@
+import hashlib
 import subprocess
 from pathlib import Path
+
+
+class WorktreeRemovalRefused(RuntimeError):
+    """Git could not establish that removing a worktree is safe."""
+
+
+def worktree_recovery_ref(worktree_path: Path, head: str) -> str:
+    """Return the durable recovery ref namespace for a worktree HEAD."""
+    resolved_path = Path(worktree_path).resolve()
+    path_hash = hashlib.sha256(str(resolved_path).encode()).hexdigest()
+    return f"refs/mship/recovery/{path_hash}/{head}"
 
 
 class GitRunner:
@@ -85,23 +97,154 @@ class GitRunner:
         except (OSError, subprocess.SubprocessError):
             return False
 
-    def worktree_remove(self, repo_path: Path, worktree_path: Path) -> None:
-        subprocess.run(
-            ["git", "worktree", "remove", str(worktree_path), "--force"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            text=True,
+    def _run_removal_git(
+        self, repo_path: Path, args: list[str], operation: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a cleanup prerequisite, turning uncertainty into a refusal."""
+        try:
+            result = subprocess.run(
+                args,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove worktree: could not {operation}: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "git failed"
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove worktree: could not {operation}: {detail}"
+            )
+        return result
+
+    def _registered_worktrees_for_removal(self, repo_path: Path) -> list[dict[str, str]]:
+        result = self._run_removal_git(
+            repo_path,
+            ["git", "worktree", "list", "--porcelain"],
+            "list registered worktrees",
+        )
+        worktrees: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if line.startswith("worktree "):
+                if current:
+                    worktrees.append(current)
+                current = {"path": line.split(" ", 1)[1]}
+            elif line.startswith("HEAD "):
+                current["head"] = line.split(" ", 1)[1]
+        if current:
+            worktrees.append(current)
+        return worktrees
+
+    def worktree_remove(self, repo_path: Path, worktree_path: Path) -> str:
+        """Safely remove a registered linked worktree and return its recovery ref.
+
+        This performs conservative pre-flight checks only; callers must still
+        ensure concurrent writers have stopped before asking to remove a tree.
+        """
+        try:
+            target = Path(worktree_path).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove unresolvable worktree {worktree_path}: {exc}"
+            ) from exc
+
+        repo_root_result = self._run_removal_git(
+            repo_path,
+            ["git", "rev-parse", "--show-toplevel"],
+            "identify the repository root",
+        )
+        try:
+            repo_root = Path(repo_root_result.stdout.strip()).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise WorktreeRemovalRefused(
+                "Refusing to remove worktree: repository root is unavailable"
+            ) from exc
+        if target == repo_root:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove canonical worktree {target}"
+            )
+
+        try:
+            registered_worktrees = self._registered_worktrees_for_removal(repo_path)
+            primary_worktree = Path(registered_worktrees[0]["path"]).resolve()
+            registered = [
+                worktree
+                for worktree in registered_worktrees
+                if Path(worktree["path"]).resolve() == target
+            ]
+        except (IndexError, KeyError, OSError, RuntimeError) as exc:
+            raise WorktreeRemovalRefused(
+                "Refusing to remove worktree: registered worktree path is unavailable"
+            ) from exc
+        if target == primary_worktree:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove canonical worktree {target}"
+            )
+        if len(registered) != 1:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove unregistered worktree {target}"
+            )
+
+        head_result = self._run_removal_git(
+            target,
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            "resolve the worktree HEAD",
+        )
+        head = head_result.stdout.strip()
+        if not head or registered[0].get("head") != head:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove worktree {target}: registered HEAD changed"
+            )
+
+        status = self._run_removal_git(
+            target,
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
+            "inspect worktree contents",
+        )
+        if status.stdout.strip():
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove worktree {target}: it has tracked, untracked, "
+                "or ignored content"
+            )
+
+        try:
+            recovery_ref = worktree_recovery_ref(target, head)
+        except (OSError, RuntimeError) as exc:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove worktree {target}: cannot name recovery ref"
+            ) from exc
+        self._run_removal_git(
+            repo_path,
+            ["git", "update-ref", recovery_ref, head],
+            "create the recovery ref",
         )
 
-    def branch_delete(self, repo_path: Path, branch: str) -> None:
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            text=True,
+        rechecked_head = self._run_removal_git(
+            target,
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            "recheck the worktree HEAD",
+        ).stdout.strip()
+        if rechecked_head != head:
+            raise WorktreeRemovalRefused(
+                f"Refusing to remove worktree {target}: HEAD changed during pre-flight"
+            )
+
+        self._run_removal_git(
+            repo_path,
+            ["git", "worktree", "remove", str(target)],
+            "remove the registered worktree",
         )
+        return recovery_ref
 
     def is_ignored(self, repo_path: Path, pattern: str) -> bool:
         result = subprocess.run(
@@ -177,63 +320,6 @@ class GitRunner:
             text=True,
         )
         return bool(result.stdout.strip())
-
-    def has_unpushed_commits(self, worktree_path: Path) -> bool:
-        """True if the worktree has commits not provably reachable from origin.
-
-        Teardown guard (spec auto-advance-on-merge):
-        - No `origin` remote at all -> False (nothing to push to; a no-remote
-          checkout can't have "unpushed" work in the sense this guard protects,
-          and every no-remote fixture must still tear down).
-        - Attached HEAD -> True iff `git rev-list --count @{u}..HEAD` > 0.
-          An attached branch without an upstream remains conservatively protected.
-        - Detached HEAD -> False only when an `origin` remote-tracking ref contains
-          HEAD. Local branches and tags do not establish remote reachability.
-        Any git error -> True (conservative: refuse rather than risk data loss).
-        """
-        if not self.has_remote(worktree_path, "origin"):
-            return False
-        head_ref = subprocess.run(
-            ["git", "symbolic-ref", "-q", "HEAD"],
-            cwd=worktree_path, capture_output=True, text=True,
-        )
-        if head_ref.returncode == 1:
-            containing_remote_ref = subprocess.run(
-                [
-                    "git", "for-each-ref", "--format=%(refname)", "--contains=HEAD",
-                    "refs/remotes/origin",
-                ],
-                cwd=worktree_path, capture_output=True, text=True,
-            )
-            if containing_remote_ref.returncode != 0:
-                return True
-            return not bool(containing_remote_ref.stdout.strip())
-        if head_ref.returncode != 0:
-            return True
-        upstream = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-            cwd=worktree_path, capture_output=True, text=True,
-        )
-        if upstream.returncode != 0:
-            return True
-        ahead = subprocess.run(
-            ["git", "rev-list", "--count", "@{u}..HEAD"],
-            cwd=worktree_path, capture_output=True, text=True,
-        )
-        if ahead.returncode != 0:
-            return True
-        try:
-            return int(ahead.stdout.strip() or "0") > 0
-        except ValueError:
-            return True
-
-    def run_worktree_prune(self, repo_path: Path) -> None:
-        """Clean up stale git worktree tracking."""
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            cwd=repo_path,
-            capture_output=True,
-        )
 
     def worktree_list(self, repo_path: Path) -> list[dict[str, str]]:
         result = subprocess.run(

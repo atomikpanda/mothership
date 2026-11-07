@@ -299,10 +299,10 @@ mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [-
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--no-require-tests] [--require-evidence] [--title T] [--body-map ...] [--token T] [--bypass-reconcile]
-mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-base-ancestry] [--bypass-reconcile]   # --force also required to tear down a dirty/unpushed worktree
+mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-base-ancestry] [--bypass-reconcile]   # retains worktrees even with --force
 ```
 
-**Merge auto-advance (`mship serve`).** With `mship serve` running, the PR-watcher auto-closes the loop: when a task's PR(s) merge it advances the bound spec `dispatched → implemented` and the WorkItem to `done` (clearing the `needs_review` attention), then tears the worktree down — so **no manual `mship close` is needed** in the common case. `mship close` is now needed only to force-teardown a worktree with **uncommitted or unpushed** changes: every teardown path (merge auto-close, `mship close`, `mship close --abandon`) refuses to delete such a worktree unless you pass `--force`, so work is never lost. When auto-teardown is skipped for a dirty worktree, the spec/WorkItem still advance and a note is posted on the thread — resolve, then `mship close` (or `--force`).
+**Merge auto-advance (`mship serve`).** When all task PRs merge, the watcher advances the bound spec `dispatched → implemented` and WorkItem to `done`, closes active task state, and retains all worktrees and branches. No manual `mship close` is needed. A recovery note is posted to the task thread. `mship worktrees` lists the durable Task snapshots and original paths; retained worktrees remain managed for audit. Closure never deletes dirty, detached, ignored, or concurrently written work.
 
 ### Every task needs a WorkItem
 
@@ -426,10 +426,10 @@ For larger changes — new features, significant refactors — spawn a new task 
 
 **`close` gates (in order):**
 1. **Requires `finish` first.** Refuses if `task.finished_at is None` unless `--abandon` is passed.
-2. **Recovery-path check.** For each repo with commits past its base, verifies at least one of: merged into base locally, pushed to origin at same SHA, has a PR URL. Refuses if any repo has unrecoverable commits.
+2. **Delivery check.** For push-only tasks, verifies each repo has no commits past its base or is merged into that base. Unknown or undelivered work prevents lifecycle advancement, not safe retention. Closing mid-delivery requires confirmation or `--yes`.
 3. **PR state routing** (via `gh pr view --json state`): all merged → `closed: completed`. All closed unmerged → `closed: cancelled on GitHub`. Any open → refuses unless `--force`. No PRs → `closed: cancelled before finish (abandoned)` when `--abandon`, or `closed: no PRs (pushed via --push-only)` after `finish --push-only`.
 
-`--force` bypasses **every** gate and is destructive — it will delete unrecoverable commits. `--abandon` bypasses only the finish-required gate; recovery-path check still runs.
+`--force` bypasses lifecycle gates but never deletes worktrees. `--abandon` skips the finish-required gate and records intentional abandonment; the files still remain. Closure writes a private, durable full Task snapshot under `.mothership/retained-worktrees/` before deleting active state. A failed retention write leaves the task active.
 
 ### Inspection
 
@@ -457,9 +457,11 @@ mship serve [--host H] [--port 47100] # read + review/approve write API over the
 
 ```bash
 mship sync [--repos r]                # fast-forward behind-only clean repos
-mship prune [--force]                 # remove orphaned worktrees
+mship prune [--force --writers-stopped] # preview; explicitly clean quiescent worktrees
 mship bind refresh [--task T] [--repos R] [--overwrite]
 ```
+
+**Cleanup is separate from close.** Inspect `mship prune`, stop every writer using the listed paths, then explicitly request `mship prune --force --writers-stopped`. Neither flag authorizes Git force-removal: dirty, untracked, ignored, unregistered, or uncertain worktrees remain. Refusals are reported; there is no recursive hub-deletion fallback. Clean worktree HEADs are pinned under `refs/mship/recovery/<path-hash>/<commit>` before removal. The reported ref can be checked out with `git worktree add --detach /new/path <ref>` from the owning repo; records and refs remain afterward. Branches and unexpected hub files are retained. The acknowledgement does not lock out arbitrary writers; if quiescence is uncertain, do not clean up. Refs protect recorded commits, not later writes.
 
 **`sync` is strictly safe.** `git fetch --prune` + `git pull --ff-only` only. It never switches branches, never resets, never touches dirty trees — if a repo isn't cleanly behind the expected branch, it's skipped with a reason.
 

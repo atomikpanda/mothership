@@ -51,7 +51,7 @@ mship switch <repo>                     # context switch across repos
 mship phase plan|dev|review|run         # transition through phases
 mship test                              # run tests in dependency order
 mship finish --body-file - <<'EOF'...   # open PR(s)
-mship close                             # clean up task state and worktrees
+mship close                             # close task state; retain worktrees and recovery records
 
 # Work items & specs
 mship item new "title" --kind feature|bug|chore|question  # durable unit of intent behind a task

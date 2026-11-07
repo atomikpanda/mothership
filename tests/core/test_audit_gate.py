@@ -46,45 +46,55 @@ def test_gate_warns_but_does_not_block_when_block_false():
 from mship.core.audit_gate import collect_known_worktree_paths
 
 
-class _FakeTask:
-    def __init__(self, worktrees: dict[str, str]):
-        self.worktrees = worktrees
+def test_audit_accepts_active_and_retained_worktrees_but_rejects_foreign_ones(
+    audit_workspace,
+):
+    import subprocess
+    from datetime import datetime, timezone
 
+    from mship.core.config import ConfigLoader
+    from mship.core.retained_worktrees import RetainedWorktreeStore
+    from mship.core.repo_state import audit_repos
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from mship.util.shell import ShellRunner
 
-class _FakeState:
-    def __init__(self, tasks):
-        self.tasks = tasks
+    root = audit_workspace
+    config = ConfigLoader.load(root / "mothership.yaml")
+    state = StateManager(root / ".mothership")
+    tasks = {}
+    for slug in ("active", "retained"):
+        wt = root / ".worktrees" / slug / "cli"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(wt), "HEAD"],
+            cwd=root / "cli", check=True, capture_output=True,
+        )
+        tasks[slug] = Task(
+            slug=slug, description=slug, branch=f"feat/{slug}", phase="review",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["cli"], worktrees={"cli": str(wt)},
+        )
+    state.save(WorkspaceState(tasks={"active": tasks["active"]}))
+    RetainedWorktreeStore(state.state_dir).retain(tasks["retained"])
 
+    def audit():
+        return audit_repos(
+            config, ShellRunner(),
+            known_worktree_paths=collect_known_worktree_paths(state),
+        )
 
-class _FakeStateMgr:
-    def __init__(self, state):
-        self._state = state
-
-    def load(self):
-        return self._state
-
-
-def test_collect_known_worktree_paths_union_across_tasks(tmp_path: Path):
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    (tmp_path / "c").mkdir()
-    state = _FakeState({
-        "task1": _FakeTask({"cli": str(tmp_path / "a"), "api": str(tmp_path / "b")}),
-        "task2": _FakeTask({"cli": str(tmp_path / "c")}),
-    })
-    result = collect_known_worktree_paths(_FakeStateMgr(state))
-    expected = frozenset({
-        (tmp_path / "a").resolve(),
-        (tmp_path / "b").resolve(),
-        (tmp_path / "c").resolve(),
-    })
-    assert result == expected
-
-
-def test_collect_known_worktree_paths_no_tasks():
-    state = _FakeState({})
-    result = collect_known_worktree_paths(_FakeStateMgr(state))
-    assert result == frozenset()
+    run_audit_gate(
+        audit(), block=True, force=False, command_name="spawn",
+        on_bypass=lambda codes: pytest.fail(f"unexpected bypass: {codes}"),
+    )
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(root / "foreign"), "HEAD"],
+        cwd=root / "cli", check=True, capture_output=True,
+    )
+    with pytest.raises(AuditGateBlocked, match="extra_worktrees"):
+        run_audit_gate(
+            audit(), block=True, force=False, command_name="spawn",
+            on_bypass=lambda codes: pytest.fail(f"unexpected bypass: {codes}"),
+        )
 
 
 def _two_repo_blocking_report():

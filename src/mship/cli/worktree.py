@@ -712,15 +712,22 @@ def register(app: typer.Typer, get_container):
 
     @app.command(rich_help_panel="Inspection")
     def worktrees():
-        """List active worktrees grouped by task."""
+        """List active and retained worktrees with their recovery records."""
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if not state.tasks:
-            output.print("No active worktrees")
-            return
+        from mship.core.retained_worktrees import (
+            RetainedWorktreeStore,
+            RetainedWorktreeStoreError,
+        )
+
+        try:
+            retained = RetainedWorktreeStore(state_mgr.state_dir).list_records()
+        except (RetainedWorktreeStoreError, OSError, ValueError) as exc:
+            output.error(f"Cannot read recovery records: {exc}")
+            raise typer.Exit(code=1)
 
         if output.is_tty:
             for slug, task in sorted(state.tasks.items()):
@@ -728,12 +735,25 @@ def register(app: typer.Typer, get_container):
                 output.print(f"  Branch: {task.branch}")
                 for repo, path in task.worktrees.items():
                     output.print(f"  {repo}: {path}")
+            for record, task in retained:
+                output.print(f"[bold]{task.slug}[/bold] [retained]")
+                output.print(f"  Recovery record: {record}")
+                for repo, path in task.worktrees.items():
+                    output.print(f"  {repo}: {path}")
+            if not state.tasks and not retained:
+                output.print("No active or retained worktrees")
         else:
             data = {
                 slug: task.model_dump(mode="json")
                 for slug, task in sorted(state.tasks.items())
             }
-            output.json({"tasks": data})
+            output.json({
+                "tasks": data,
+                "retained": [
+                    {"record": str(record), "task": task.model_dump(mode="json")}
+                    for record, task in retained
+                ],
+            })
 
     @app.command(rich_help_panel="Workflow")
     def close(
@@ -744,7 +764,7 @@ def register(app: typer.Typer, get_container):
         ),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
         force: bool = typer.Option(
-            False, "--force", "-f", help="Bypass ALL safety checks (destructive)"
+            False, "--force", "-f", help="Bypass lifecycle checks; worktrees are still retained"
         ),
         abandon: bool = typer.Option(
             False, "--abandon", help="Close without finishing (discard PR flow)"
@@ -771,7 +791,7 @@ def register(app: typer.Typer, get_container):
             False,
             "--cascade",
             help="Also remove downstream tasks from state (#104). "
-            "Their worktrees stay until `mship prune`.",
+            "Their worktrees and recovery records are retained.",
         ),
         detach_downstream: bool = typer.Option(
             False,
@@ -779,7 +799,7 @@ def register(app: typer.Typer, get_container):
             help="Clear the inbound dependency edges, leave downstream tasks alive (#104).",
         ),
     ):
-        """Close a task: check PR state, tear down worktrees, clear state."""
+        """Close a task while retaining its worktrees and recovery metadata."""
         from pathlib import Path
 
         from mship.cli._resolve import resolve_for_command
@@ -820,27 +840,16 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(code=1)
 
-        # --- Recovery-path check ---
-        had_unrecoverable = False
-        # Repos NOT positively verified delivered. Feeds the push-only
-        # completion flag below: delivery must be EARNED by observation
-        # (live worktree AND (nothing past base OR merged into base)), never
-        # inferred — so a merely-pushed branch, a missing worktree, and a
-        # failed git comparison all land here (fail-closed). Under --force the
-        # loop doesn't run, so this stays empty — but the flag below is False
-        # under --force anyway.
-        undelivered_repos: list[tuple[str, str]] = []  # (repo, reason)
+        # Verify delivery independently of cleanup. Closing never deletes the
+        # worktree, but merely retaining work must not mark it delivered.
+        undelivered_repos: list[tuple[str, str]] = []
         if not force:
             from mship.core.base_resolver import resolve_base
 
-            # (repo, commits, branch, base); commits is "?" when the comparison failed
-            unrecoverable: list[tuple[str, int | str, str, str]] = []
             for repo_name in task.affected_repos:
                 wt = task.worktrees.get(repo_name)
                 if wt is None or not Path(wt).exists():
-                    # No worktree to inspect → cannot verify delivery (fail-closed).
-                    # Recovery-wise this repo has always been skipped, so close
-                    # still proceeds as before.
+                    # No worktree to inspect means delivery cannot be verified.
                     undelivered_repos.append((repo_name, "worktree missing"))
                     continue
                 wt_path = Path(wt)
@@ -857,60 +866,28 @@ def register(app: typer.Typer, get_container):
                         "main"  # fall back to main when no base_branch configured
                     )
                 try:
-                    # None = the comparison itself failed (count_commits_ahead
-                    # can no longer masquerade as 0): the repo must NOT read as
-                    # "nothing past base" — it falls through to the merge/push/
-                    # PR evidence checks like any repo with real work.
+                    # A failed comparison is unknown, not zero commits.
                     commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
                     if commits == 0:
                         continue  # VERIFIED nothing past base — delivered
-                    # Recovery checks
+                    # Only merging into base proves delivery.
                     merged = pr_mgr.check_merged_into_base(
                         wt_path, task.branch, eff_base
                     )
-                    has_pr = repo_name in task.pr_urls
-                    pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
                 except Exception:
                     # An errored git comparison proves nothing → not delivered
                     # (fail-closed). Close still proceeds; only advancement is off.
                     undelivered_repos.append((repo_name, "comparison failed"))
                     continue
-                if merged or has_pr or pushed:
-                    # Recoverable — but merely pushed/PR'd is NOT delivered:
-                    # only merged-into-base proves the work reached the base.
-                    if not merged:
-                        undelivered_repos.append(
-                            (
-                                repo_name,
-                                "comparison failed"
-                                if commits is None
-                                else f"not merged into {eff_base}",
-                            )
+                if not merged:
+                    undelivered_repos.append(
+                        (
+                            repo_name,
+                            "comparison failed"
+                            if commits is None
+                            else f"not merged into {eff_base}",
                         )
-                    continue
-                if commits is None:
-                    # Comparison failed AND no merge/push/PR evidence: we can't
-                    # prove there is work, but we can't prove there isn't —
-                    # refuse to delete rather than skip the repo as clean.
-                    undelivered_repos.append((repo_name, "comparison failed"))
-                    unrecoverable.append((repo_name, "?", task.branch, eff_base))
-                    continue
-                unrecoverable.append((repo_name, commits, task.branch, eff_base))
-
-            if unrecoverable:
-                had_unrecoverable = True
-                output.error("Cannot close: unrecoverable commits in these repos:")
-                for repo_name, commits, branch, eff_base in unrecoverable:
-                    output.error(
-                        f"  {repo_name}: {branch} ({commits} commits, "
-                        f"not merged to {eff_base}, not pushed, no PR)"
                     )
-                output.error("")
-                output.error("These will be permanently lost. Options:")
-                output.error("  - `mship finish` to create PRs")
-                output.error("  - push from each worktree to save work")
-                output.error("  - `mship close --force` to delete anyway (destructive)")
-                raise typer.Exit(code=1)
 
         # --- #104 downstream check ---
         from mship.core.task_graph import downstream_of
@@ -1084,22 +1061,15 @@ def register(app: typer.Typer, get_container):
         elif merged_count and bypass_base_ancestry:
             bypassed_base_ancestry = True
 
-        # Append (forced) marker when --force bypassed finish/recovery gates.
-        if force and (task.finished_at is None or had_unrecoverable):
+        # Append a forced marker when --force bypassed the finish gate.
+        if force and task.finished_at is None:
             if "(forced)" not in log_msg:
                 log_msg = log_msg + " (forced)"
         if bypassed_base_ancestry and "(forced base-ancestry bypass)" not in log_msg:
             log_msg = log_msg + " (forced base-ancestry bypass)"
 
-        # Partial multi-repo delivery guard (push-only route). When some repos
-        # are undelivered AND have real work mid-flight — "not merged into
-        # <base>" / "comparison failed" (a "worktree missing" entry has nothing
-        # to preserve) — unconditional teardown would silently delete the
-        # operator's in-progress merge workspaces. Nothing is LOST (the
-        # recovery gate already guarantees the branches are pushed), but the
-        # close must be an explicit choice. --abandon/--force never reach here
-        # (the route excludes them; both are already explicit destructive
-        # intents).
+        # Closing undelivered work is a lifecycle decision, not filesystem
+        # cleanup. Keep the explicit confirmation without discarding work.
         _pushonly_route = (
             not task.pr_urls
             and task.finished_at is not None
@@ -1114,8 +1084,7 @@ def register(app: typer.Typer, get_container):
                 lines = "\n".join(f"  {r}: {why}" for r, why in _midflight)
                 proceed = typer.confirm(
                     f"Undelivered repos:\n{lines}\n"
-                    f"Branches are pushed and recoverable, but these worktrees "
-                    f"will be removed and the lifecycle will NOT advance. "
+                    f"Worktrees will be retained, but the lifecycle will NOT advance. "
                     f"Close anyway?",
                     default=False,
                 )
@@ -1130,7 +1099,7 @@ def register(app: typer.Typer, get_container):
                 output.error(
                     f"close refused: undelivered repos mid-delivery: {names}. "
                     f"Finish the local merge in each repo and re-run mship close, "
-                    f"or pass --yes to close anyway (worktrees removed, "
+                    f"or pass --yes to close anyway (worktrees retained, "
                     f"lifecycle not advanced)."
                 )
                 raise typer.Exit(code=1)
@@ -1139,7 +1108,7 @@ def register(app: typer.Typer, get_container):
             from InquirerPy import inquirer
 
             confirm = inquirer.confirm(
-                message=f"Close task '{task_slug}'? This will remove all worktrees.",
+                message=f"Close task '{task_slug}'? Worktrees will be retained for recovery.",
                 default=False,
             ).execute()
             if not confirm:
@@ -1173,11 +1142,10 @@ def register(app: typer.Typer, get_container):
         # parameter shape the lifecycle helpers take). Matches the
         # "no PRs (pushed via --push-only)" log route above. Completion is
         # EARNED, not inferred: every affected repo with a live worktree must be
-        # verified delivered by the recovery-path loop above (commits_ahead == 0
-        # or merged into base) — a merely-pushed branch is recoverable but NOT
-        # delivered, so closing before the local merge advances nothing.
+        # verified delivered by the delivery loop above (commits_ahead == 0
+        # or merged into base). Closing before the local merge advances nothing.
         # --abandon never qualifies (discarded work stays unadvanced), and
-        # neither does --force: a forced close skips the recovery-path check,
+        # neither does --force: a forced close skips the delivery check,
         # so we can't know the work actually reached anywhere.
         completed_without_prs = (
             not task.pr_urls
@@ -1279,62 +1247,19 @@ def register(app: typer.Typer, get_container):
                     f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}"
                 )
 
-        # A remote task may have materialized dirty, platform-specific
-        # worktrees that local teardown cannot see.  Only durable, exact-host
-        # receipts may address the authenticated removal route; any ambiguity
-        # retains those receipts and keeps their scratch-ref leases actionable.
-        cleared_remote_worktree_hosts: set[tuple[str, str, str]] = set()
-        try:
-            from mship.core.run_host import RunHostStore
-            from mship.core.run_transfer import cleanup_remote_task_worktrees
-
-            cleared_remote_worktree_hosts = cleanup_remote_task_worktrees(
-                task,
-                config=config,
-                store=RunHostStore(container.state_dir()),
-                warn=output.warning,
-            )
-        except Exception:
-            output.warning(
-                "could not prove remote task worktree cleanup; exact cleanup "
-                "receipts are retained"
-            )
-
-        # Scratch refs left on run hosts by `--remote` (spec remote-exact-copy).
-        # Fail-open like the spec/WorkItem advances above: a run host that is
-        # off, unreachable, or was never mapped must not stop a close. The refs
-        # are on the operator's own machine, so a missed one is disk, not
-        # disclosure.
-        try:
-            from mship.core.run_host import RunHostStore
-            from mship.core.run_transfer import cleanup_run_refs
-
-            cleanup_run_refs(
-                task,
-                config=config,
-                store=RunHostStore(container.state_dir()),
-                shell=container.shell(),
-                warn=output.warning,
-                cleared_worktree_hosts=cleared_remote_worktree_hosts,
-            )
-        except Exception:
-            pass
+        # Keep remote materializations, exact-host receipts and scratch-ref
+        # leases too. Task closure is not permission to delete remote work.
 
         wt_mgr = container.worktree_manager()
         from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
-        from mship.core.worktree import WorktreeDirtyError
+        from mship.core.retained_worktrees import (
+            RetainedWorktreeStore,
+            RetainedWorktreeStoreError,
+        )
 
         try:
-            wt_mgr.abort(
-                task_slug, force=force
-            )  # core method retains the name; only CLI verb changed
-        except WorktreeDirtyError as e:
-            output.error(str(e))
-            output.error(
-                "Resolve the changes (commit/push), or re-run `mship close --force` to discard them."
-            )
-            raise typer.Exit(code=1)
-        except TaskMetadataRetentionConflictError as e:
+            recovery_record = wt_mgr.abort(task_slug)
+        except (TaskMetadataRetentionConflictError, RetainedWorktreeStoreError, OSError, ValueError) as e:
             output.error(str(e))
             raise typer.Exit(code=1)
 
@@ -1362,11 +1287,14 @@ def register(app: typer.Typer, get_container):
                     for d_slug in downstream
                     if d_slug in state_before_cascade.tasks
                 }
+                recovery_store = RetainedWorktreeStore(state_mgr.state_dir)
+                for downstream_task in expected_downstream.values():
+                    recovery_store.retain(downstream_task)
                 lifecycle.retain_and_delete_tasks(
                     expected_downstream,
                     now=_dt_cascade.now(_tz_cascade.utc),
                 )
-            except TaskMetadataRetentionConflictError as e:
+            except (TaskMetadataRetentionConflictError, RetainedWorktreeStoreError, OSError, ValueError) as e:
                 output.error(str(e))
                 raise typer.Exit(code=1)
 
@@ -1391,6 +1319,9 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
         output.success(f"{log_msg.capitalize()}: {task_slug}")
+        if recovery_record is not None:
+            output.print(f"Worktrees retained; recovery record: {recovery_record}")
+            output.print("Use `mship worktrees` or `mship prune` to inspect retained paths.")
 
         # Post-op diagnostic: if any affected repo's main-checkout path is
         # dirty after close completed, capture a snapshot. Silent — users
