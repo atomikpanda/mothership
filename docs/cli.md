@@ -33,9 +33,16 @@ mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|m
 mship journal --show-open                           # list open questions
 mship finish [--body-file PATH | --body TEXT] [--base B] [--base-map a=B,b=B] [--push-only] [--handoff] [--force-audit] [--bypass-reconcile] [--force]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-reconcile]
-mship commit "message" [--task <slug>]              # commit staged changes across the task's worktrees; pushes if finished
+mship commit "message" [--task <slug>]              # commit staged changes; push new or existing commits if finished
 mship depends add|remove|list                       # manage task-to-task dependency edges (#104)
 ```
+
+For a finished task with a recorded PR, `mship commit` also pushes already-made
+commits when the index is clean and the branch is ahead of its upstream. It does
+not create another commit in that case; the message is used only for staged
+changes. Repos with nothing to push are skipped successfully. Missing upstreams
+and failed pushes are reported as errors, so you can resolve them and retry the
+same command. Before `finish`, this command commits staged changes but never pushes.
 
 `mship init --install-hooks` writes the project-local Codex hook files, but it
 does not enable Codex features or trust the project. If setup reports the hook

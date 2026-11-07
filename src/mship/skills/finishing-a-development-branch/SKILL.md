@@ -164,8 +164,9 @@ mship finish --body-file /tmp/pr-body.md
 **Post-finish iteration (reviewer feedback, CI fixes, typos):** don't
 spawn a new task. Stage the fix in the worktree and run
 `mship commit "<msg>"` — it commits across the task's affected repos,
-pushes to the existing PR, and journals per repo. Use this for small
-iterations until the PR merges.
+pushes to the existing PR, and journals per repo. If the fix is already
+committed, the same command pushes commits ahead of upstream without creating
+another commit. Use this for small iterations until the PR merges.
 
 **Outside a mothership workspace**, push and create the PR with the
 forge's tooling:

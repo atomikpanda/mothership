@@ -1,4 +1,5 @@
 """Integration tests for `mship commit`. See #29."""
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -7,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.cli.output import reset_output_settings
 from mship.core.state import StateManager
 from mship.util.shell import ShellResult, ShellRunner
 
@@ -195,6 +197,122 @@ def test_commit_post_finish_multi_repo(configured_git_app: Path):
         assert result.exit_code == 0, result.output
         assert len(commits) == 2
         assert len(pushes) == 2
+    finally:
+        container.shell.reset_override()
+
+
+def _git_at(path: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=path, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _finished_with_remotes(workspace: Path, slug: str, repos: list[str]):
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", slug, "--repos", ",".join(repos)],
+    )
+    assert result.exit_code == 0, result.output
+    task = StateManager(workspace / ".mothership").load().tasks[slug]
+    worktrees = {repo: Path(task.worktrees[repo]) for repo in repos}
+    remotes = {}
+    for repo, worktree in worktrees.items():
+        remote = workspace / f"{repo}-origin.git"
+        _git_at(workspace, "init", "--bare", str(remote))
+        _git_at(worktree, "remote", "add", "origin", str(remote))
+        _git_at(worktree, "push", "-u", "origin", task.branch)
+        remotes[repo] = remote
+    _set_finished(workspace, slug, {
+        repo: f"https://example.invalid/{repo}/pull/1" for repo in repos
+    })
+    return worktrees, remotes, task.branch
+
+
+def test_commit_pushes_existing_and_staged_work_then_noops(configured_git_app: Path):
+    """Mixed post-finish work reaches both remotes without duplicating commits."""
+    workspace = configured_git_app
+    slug = "mixed-existing"
+    worktrees, remotes, branch = _finished_with_remotes(
+        workspace, slug, ["shared", "auth-service"],
+    )
+    for worktree in worktrees.values():
+        (worktree / "fix.txt").write_text("review fix\n")
+        _git_at(worktree, "add", "fix.txt")
+    _git_at(worktrees["shared"], "commit", "-m", "already committed")
+    existing_sha = _git_at(worktrees["shared"], "rev-parse", "HEAD")
+    staged_base = _git_at(worktrees["auth-service"], "rev-parse", "HEAD")
+    container.shell.override(ShellRunner())
+    try:
+        result = runner.invoke(app, ["--json", "commit", "finish fixes", "--task", slug])
+        assert result.exit_code == 0, result.output
+        actions = {repo["repo"]: repo["action"] for repo in json.loads(result.output)["repos"]}
+        assert actions == {"shared": "pushed", "auth-service": "committed"}
+        assert _git_at(worktrees["shared"], "rev-parse", "HEAD") == existing_sha
+        assert _git_at(worktrees["auth-service"], "rev-parse", "HEAD^") == staged_base
+        for repo, worktree in worktrees.items():
+            assert _git_at(remotes[repo], "rev-parse", branch) == _git_at(worktree, "rev-parse", "HEAD")
+            assert _git_at(worktree, "show", "HEAD:fix.txt") == "review fix"
+        manager = StateManager(workspace / ".mothership")
+        activity = manager.load().tasks[slug].last_activity_at
+        retry = runner.invoke(app, ["--json", "commit", "already delivered", "--task", slug])
+        assert retry.exit_code == 0, retry.output
+        assert all("skipped" in repo for repo in json.loads(retry.output)["repos"])
+        assert manager.load().tasks[slug].last_activity_at == activity
+        assert _git_at(worktrees["shared"], "rev-parse", "HEAD") == existing_sha
+        log = (workspace / ".mothership" / "logs" / f"{slug}.md").read_text()
+        assert "action=pushed" in log and "action=committed" in log
+    finally:
+        reset_output_settings()
+        container.shell.reset_override()
+
+
+def test_commit_push_only_errors_when_upstream_is_missing(configured_git_app: Path):
+    """Missing upstream cannot be mistaken for a synchronized finished branch."""
+    worktrees, remotes, branch = _finished_with_remotes(
+        configured_git_app, "missing-upstream", ["shared"],
+    )
+    worktree = worktrees["shared"]
+    before = _git_at(worktree, "rev-parse", "HEAD")
+    _git_at(worktree, "branch", "--unset-upstream")
+    container.shell.override(ShellRunner())
+    try:
+        result = runner.invoke(app, ["commit", "deliver", "--task", "missing-upstream"])
+        assert result.exit_code == 1
+        assert "upstream" in result.output.lower()
+        assert _git_at(worktree, "rev-parse", "HEAD") == before
+        assert _git_at(remotes["shared"], "rev-parse", branch) == before
+    finally:
+        container.shell.reset_override()
+
+
+def test_commit_push_only_failure_is_retriable(configured_git_app: Path):
+    """A real remote rejection preserves the local commit for a successful retry."""
+    workspace = configured_git_app
+    slug = "retry-push"
+    worktrees, remotes, branch = _finished_with_remotes(workspace, slug, ["shared"])
+    worktree = worktrees["shared"]
+    remote = remotes["shared"]
+    remote_before = _git_at(remote, "rev-parse", branch)
+    (worktree / "fix.txt").write_text("already committed\n")
+    _git_at(worktree, "add", "fix.txt")
+    _git_at(worktree, "commit", "-m", "already made")
+    local_sha = _git_at(worktree, "rev-parse", "HEAD")
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    container.shell.override(ShellRunner())
+    try:
+        failed = runner.invoke(app, ["commit", "deliver", "--task", slug])
+        assert failed.exit_code == 1
+        assert _git_at(remote, "rev-parse", branch) == remote_before
+        log_path = workspace / ".mothership" / "logs" / f"{slug}.md"
+        assert "action=pushed" not in log_path.read_text()
+        hook.unlink()
+        retried = runner.invoke(app, ["commit", "deliver", "--task", slug])
+        assert retried.exit_code == 0, retried.output
+        assert _git_at(remote, "rev-parse", branch) == local_sha
+        assert _git_at(worktree, "rev-parse", "HEAD") == local_sha
+        assert "action=pushed" in log_path.read_text()
+        assert "action=committed" not in log_path.read_text()
     finally:
         container.shell.reset_override()
 
