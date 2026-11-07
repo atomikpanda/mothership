@@ -867,6 +867,10 @@ Fixture source revisions identify disposable test projects, not the runner
 implementation. This is not macOS/device testing or public-relay proof; the
 actual #506 integration and relay-path release gate above still applies.
 
+The Linux descendant-cancellation regression publishes its PID readiness file
+by atomic rename after writing it. File existence must mean the PID is readable,
+so parallel CI cannot observe an empty file before testing process cleanup.
+
 
 ## Immutable declared task results
 
